@@ -1,0 +1,27 @@
+/* ============================================
+   Dark Theme — Variable Overrides
+   ============================================ */
+
+.dark {
+  --color-background: #0a0a0a;
+  --color-foreground: #ededed;
+  --color-surface: #0f172a;
+  --color-surface-hover: #1e293b;
+  --color-border: rgba(255, 255, 255, 0.05);
+  --color-border-subtle: rgba(255, 255, 255, 0.03);
+
+  --color-text-primary: #f1f5f9;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+
+  /* Layout */
+  --color-sidebar-bg: rgba(15, 23, 42, 0.5);
+  --color-topbar-bg: rgba(15, 23, 42, 0.8);
+  --color-panel-bg: transparent;
+  --color-card-bg: rgba(30, 41, 59, 0.4);
+
+  /* Shadows — subtle in dark mode */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+}

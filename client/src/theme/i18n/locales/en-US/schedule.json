@@ -1,0 +1,16 @@
+{
+  "title": "Schedule",
+  "subtitle": "Task Management",
+  "timeline": "Timeline",
+  "calendar": "Calendar",
+  "createTask": "Create New Task",
+  "quickStats": "Quick Stats",
+  "schedules": "Schedules",
+  "done": "Done",
+  "failed": "Failed",
+  "performance": "Performance",
+  "executionFlow": "Execution Flow",
+  "planningView": "Planning View",
+  "realTimeMonitoring": "Real-time task monitoring and history",
+  "monthlyOverview": "Monthly overview and recurrence rules"
+}

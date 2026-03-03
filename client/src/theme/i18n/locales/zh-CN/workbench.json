@@ -1,0 +1,15 @@
+{
+  "activeTask": "当前任务",
+  "editor": "编辑器",
+  "logs": "日志",
+  "preview": "预览",
+  "history": "历史",
+  "noActiveTask": "无活跃任务",
+  "waitingInstructions": "等待指令...",
+  "noLogs": "-- 暂无日志 --",
+  "noPreview": "暂无文件预览",
+  "previewHint": "任务完成后生成的文件将在这里显示",
+  "noHistory": "暂无历史记录",
+  "historyHint": "执行的任务历史将在这里显示",
+  "generatedFiles": "生成的文件"
+}

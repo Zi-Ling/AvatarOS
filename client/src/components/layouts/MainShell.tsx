@@ -1,0 +1,158 @@
+"use client";
+
+import { ReactNode, useState, useRef } from "react";
+import { useRouter, usePathname } from "next/navigation";
+import { AgentDock, DockTab } from "./AgentDock";
+import { TopBar } from "./TopBar";
+import Workbench from "@/app/(modules)/workbench/Workbench";
+import ChatInterface from "@/app/(modules)/chat/ChatInterface";
+import FileExplorer from "@/app/(modules)/workspace/FileExplorer";
+import { SettingsDialog } from "@/app/(modules)/setting/SettingsDialog";
+import { cn } from "@/lib/utils";
+import { Panel, PanelGroup, PanelResizeHandle, ImperativePanelHandle } from "react-resizable-panels";
+
+type MainShellProps = {
+  children?: ReactNode;
+};
+
+export function MainShell({ children }: MainShellProps) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const [activeTab, setActiveTab] = useState<DockTab>('chat');
+  
+  // Left Panel (Files/History)
+  const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(false);
+  const leftPanelRef = useRef<ImperativePanelHandle>(null);
+  
+  // Right Panel (Chat) - Default Open
+  const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
+  const rightPanelRef = useRef<ImperativePanelHandle>(null);
+  
+  // Settings Dialog
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  // 判断当前是否在Chat页面
+  const isChatPage = pathname === '/chat';
+  // 判断是否是需要全屏显示的页面（home, schedule, knowledge等）
+  const isFullPageView = ['/home', '/schedule', '/knowledge', '/skills', '/analytics'].includes(pathname || '');
+
+  const handleTabChange = (tab: DockTab) => {
+    setActiveTab(tab);
+    
+    if (tab === 'chat') {
+        router.push('/chat');
+        setIsLeftPanelOpen(false); // Auto close panel when going to chat
+    } else if (tab === 'home') {
+        router.push('/home');
+        setIsLeftPanelOpen(false);
+    } else if (tab === 'files') {
+        // Keep on chat route but open files
+        router.push('/chat'); 
+        setIsLeftPanelOpen(true);
+    } else if (tab === 'schedule') {
+        router.push('/schedule');
+        setIsLeftPanelOpen(false);
+    } else if (tab === 'workspace') {
+        // Keep on chat route but open workspace panel
+        router.push('/chat'); 
+        setIsLeftPanelOpen(true);
+    } else if (tab === 'knowledge') {
+        router.push('/knowledge');
+        setIsLeftPanelOpen(false);
+    } else if (tab === 'skills') {
+        router.push('/skills');
+        setIsLeftPanelOpen(false);
+    } else if (tab === 'analytics') {
+        router.push('/analytics');
+        setIsLeftPanelOpen(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-screen w-full bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-white overflow-hidden">
+      {/* 1. Top: Global Header */}
+      <TopBar 
+          isRightPanelOpen={isRightPanelOpen} 
+          onToggleRightPanel={() => setIsRightPanelOpen(!isRightPanelOpen)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+      />
+
+      {/* 2. Bottom: Workspace Area (Horizontal Layout) */}
+      <div className="flex flex-1 overflow-hidden relative">
+          {/* 2.1 Left: Agent Dock (Activity Bar) */}
+          <AgentDock 
+            activeTab={activeTab} 
+            onTabChange={handleTabChange}
+            isLeftPanelOpen={isLeftPanelOpen}
+            onToggleLeftPanel={() => setIsLeftPanelOpen(!isLeftPanelOpen)}
+          />
+          
+          {/* 2.2 Resizable Panels */}
+          <PanelGroup direction="horizontal" className="flex-1" id="main-group">
+            {/* 2.2.1 Left Panel - File Explorer */}
+            {isLeftPanelOpen && (
+              <>
+                <Panel 
+                  id="left-panel"
+                  order={1}
+                  defaultSize={20} 
+                  minSize={15} 
+                  maxSize={40}
+                  className="bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-white/5"
+                >
+                  <div className="h-full flex flex-col">
+                    {(activeTab === 'files' || activeTab === 'workspace') && (
+                      <div className="flex-1 flex flex-col h-full p-2">
+                        <div className="text-sm font-medium text-slate-500 dark:text-slate-400 px-2 mb-2 uppercase">Workspace</div>
+                        <FileExplorer />
+                      </div>
+                    )}
+                  </div>
+                </Panel>
+                <PanelResizeHandle className="w-1 bg-slate-200 dark:bg-white/5 hover:bg-blue-500/50 transition-colors cursor-col-resize" />
+              </>
+            )}
+
+            {/* 2.2.2 Middle Panel - 主要工作区 */}
+            <Panel id="middle-panel" order={2} minSize={30} defaultSize={50}>
+              <main className="h-full flex flex-col bg-slate-50 dark:bg-slate-900/40 relative overflow-hidden">
+                {isChatPage ? (
+                  // Chat页面：显示Workbench（任务监控中心）
+                  <Workbench />
+                ) : (
+                  // 其他页面：页面内容直接替换Workbench位置（完全覆盖）
+                  <>{children}</>
+                )}
+              </main>
+            </Panel>
+
+            {/* 2.2.3 Right Panel - Chat对话区 */}
+            {isRightPanelOpen && (
+              <>
+                <PanelResizeHandle className="w-1 bg-slate-200 dark:bg-white/5 hover:bg-blue-500/50 transition-colors cursor-col-resize hidden xl:block" />
+                <Panel 
+                  id="right-panel"
+                  order={3}
+                  defaultSize={30} 
+                  minSize={20} 
+                  maxSize={45}
+                  className="bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-white/5 hidden xl:block"
+                >
+                  <div className="h-full bg-white dark:bg-transparent">
+                    {/* Chat在右侧始终可用，且使用同一实例保持状态 */}
+                    <ChatInterface />
+                  </div>
+                </Panel>
+              </>
+            )}
+          </PanelGroup>
+      </div>
+
+      {/* Settings Dialog - Rendered at top level */}
+      <SettingsDialog 
+        isOpen={isSettingsOpen} 
+        onClose={() => setIsSettingsOpen(false)} 
+      />
+    </div>
+  );
+}

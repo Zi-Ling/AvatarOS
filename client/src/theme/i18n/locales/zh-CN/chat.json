@@ -1,0 +1,12 @@
+{
+  "placeholder": "输入消息...",
+  "thinking": "正在思考...",
+  "empty": "开始新的对话",
+  "newChat": "开始新对话",
+  "newChatConfirm": "确定要开始新对话吗？当前对话内容将被清除。",
+  "deleteMessage": "删除消息",
+  "deleteMessageConfirm": "确定要删除这条消息吗？",
+  "stopped": "[已停止]",
+  "stoppingTask": "⏸️ 正在停止任务...",
+  "errorHint": "抱歉，我遇到了一些问题。请确保后端服务正在运行。"
+}

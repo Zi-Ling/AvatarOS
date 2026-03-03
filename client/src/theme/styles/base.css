@@ -1,0 +1,44 @@
+/* ============================================
+   Base Styles — Reset & Foundations
+   ============================================ */
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* KaTeX */
+.katex { color: inherit; }
+.katex .mord, .katex .mrel, .katex .mop, .katex .mbin, .katex .mpunct {
+  color: inherit;
+}
+
+/* Resizable Panels */
+[data-panel-resize-handle-enabled] {
+  transition: all var(--transition-fast);
+}
+[data-panel-resize-handle-enabled]:hover {
+  background-color: rgba(59, 130, 246, 0.5) !important;
+}
+[data-panel-resize-handle-enabled]:active {
+  background-color: rgba(59, 130, 246, 0.8) !important;
+}
+
+/* Hide Next.js Dev Tools */
+nextjs-portal {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+[data-nextjs-toast],
+[data-nextjs-static-indicator],
+[data-nextjs-dev-tools-overlay],
+div[class*="nextjs-toast-errors-parent"],
+div[class*="StaticIndicator_indicator"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}

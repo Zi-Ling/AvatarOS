@@ -1,0 +1,21 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+@plugin "@tailwindcss/typography";
+
+/* Enable class-based dark mode for next-themes */
+@variant dark (&:where(.dark, .dark *));
+
+/* Theme: Design Tokens + Light/Dark overrides */
+@import "../theme/styles/variables.css";
+@import "../theme/styles/themes/light.css";
+@import "../theme/styles/themes/dark.css";
+
+/* Base styles: reset, KaTeX, resize handles, devtools hide */
+@import "../theme/styles/base.css";
+
+/* Custom animations */
+@import "../theme/styles/tailwind.css";
+
+/* Sidebar / Dock styles */
+@import "../theme/styles/sidebar.css";

@@ -1,0 +1,21 @@
+{
+  "loading": "加载中...",
+  "save": "保存",
+  "cancel": "取消",
+  "confirm": "确认",
+  "delete": "删除",
+  "sidebar": {
+    "newChat": "新对话",
+    "history": "历史记录",
+    "settings": "设置",
+    "agents": "智能体",
+    "plugins": "插件"
+  },
+  "inspector": {
+    "title": "智能体监控",
+    "tabGraph": "执行图",
+    "tabState": "状态",
+    "tabLogs": "日志",
+    "statusSteps": "步骤"
+  }
+}

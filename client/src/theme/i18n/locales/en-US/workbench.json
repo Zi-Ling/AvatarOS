@@ -1,0 +1,15 @@
+{
+  "activeTask": "Active Task",
+  "editor": "Editor",
+  "logs": "Logs",
+  "preview": "Preview",
+  "history": "History",
+  "noActiveTask": "No Active Task",
+  "waitingInstructions": "Waiting for instructions...",
+  "noLogs": "-- No logs available --",
+  "noPreview": "No File Preview",
+  "previewHint": "Generated files will appear here after task completion",
+  "noHistory": "No History",
+  "historyHint": "Task execution history will appear here",
+  "generatedFiles": "Generated Files"
+}

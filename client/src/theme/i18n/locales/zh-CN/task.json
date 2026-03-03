@@ -1,0 +1,9 @@
+{
+  "executionProgress": "执行进度",
+  "steps": "步骤",
+  "failed": "失败",
+  "executing": "执行中",
+  "completed": "任务执行完成",
+  "taskFailed": "任务执行失败",
+  "taskFlow": "任务执行流程"
+}

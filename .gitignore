@@ -1,0 +1,78 @@
+# ============================================================
+# AvatarOS — Root .gitignore
+# ============================================================
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test/temp files in root
+*.xlsx
+*.xls
+*.csv
+*.log
+
+# ============================================================
+# Server
+# ============================================================
+
+# Python
+server/__pycache__/
+server/**/__pycache__/
+server/**/*.pyc
+server/**/*.pyo
+server/.pytest_cache/
+server/**/.pytest_cache/
+server/.venv/
+server/venv/
+
+# Environment / secrets
+server/.env
+server/.env.*
+
+# Runtime data (generated at runtime, not source code)
+server/workspace/
+server/logs/
+server/memory/
+server/app/models/
+
+# DB files
+server/*.db
+server/**/*.db
+
+# uv lock file (use requirements.txt instead)
+server/uv.lock
+
+# ============================================================
+# Client
+# ============================================================
+
+client/node_modules/
+client/.next/
+client/out/
+client/build/
+client/.env
+client/.env.*
+client/*.tsbuildinfo
+client/next-env.d.ts
+
+# ============================================================
+# Misc
+# ============================================================
+
+# Baidu cloud upload temp files
+*.baiduyun.uploading.cfg
+
+# Cursor IDE
+.git/cursor/
+
+#临时忽略文件
+/server/tests/
+/server/examples/
+/server/docs

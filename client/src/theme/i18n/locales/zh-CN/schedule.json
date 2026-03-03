@@ -1,0 +1,16 @@
+{
+  "title": "定时任务",
+  "subtitle": "任务管理",
+  "timeline": "时间线",
+  "calendar": "日历",
+  "createTask": "创建新任务",
+  "quickStats": "快速统计",
+  "schedules": "定时任务",
+  "done": "已完成",
+  "failed": "失败",
+  "performance": "性能",
+  "executionFlow": "执行流程",
+  "planningView": "规划视图",
+  "realTimeMonitoring": "实时任务监控与历史记录",
+  "monthlyOverview": "月度概览与重复规则"
+}

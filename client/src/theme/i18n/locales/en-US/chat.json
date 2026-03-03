@@ -1,0 +1,12 @@
+{
+  "placeholder": "Type a message...",
+  "thinking": "Thinking...",
+  "empty": "Start a new conversation",
+  "newChat": "Start New Chat",
+  "newChatConfirm": "Start a new chat? Current conversation will be cleared.",
+  "deleteMessage": "Delete Message",
+  "deleteMessageConfirm": "Are you sure you want to delete this message?",
+  "stopped": "[Stopped]",
+  "stoppingTask": "⏸️ Stopping task...",
+  "errorHint": "Sorry, I encountered an issue. Please ensure the backend service is running."
+}

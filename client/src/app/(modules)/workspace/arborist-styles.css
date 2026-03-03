@@ -1,0 +1,39 @@
+/* react-arborist 基础样式 */
+.arborist-tree {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: 8px;
+}
+
+/* 调整树节点的容器 */
+.arborist-tree [role="tree"] {
+  outline: none;
+}
+
+/* 拖拽预览样式 */
+.arborist-tree .drop-cursor {
+  height: 2px;
+  background: #3b82f6;
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+
+/* 拖拽中的节点样式 */
+.arborist-tree [data-drop-target="true"] {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px dashed #3b82f6;
+}
+
+/* 禁用拖拽时的样式 */
+.arborist-tree [data-drop-target="false"] {
+  opacity: 0.5;
+}
+
+/* Dark mode 滚动条 */
+:root.dark .arborist-tree {
+  scrollbar-color: #334155 transparent;
+}
+

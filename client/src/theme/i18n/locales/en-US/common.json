@@ -1,0 +1,21 @@
+{
+  "loading": "Loading...",
+  "save": "Save",
+  "cancel": "Cancel",
+  "confirm": "Confirm",
+  "delete": "Delete",
+  "sidebar": {
+    "newChat": "New Chat",
+    "history": "History",
+    "settings": "Settings",
+    "agents": "Agents",
+    "plugins": "Plugins"
+  },
+  "inspector": {
+    "title": "Agent Inspector",
+    "tabGraph": "Graph",
+    "tabState": "State",
+    "tabLogs": "Logs",
+    "statusSteps": "Steps"
+  }
+}

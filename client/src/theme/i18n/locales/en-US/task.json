@@ -1,0 +1,9 @@
+{
+  "executionProgress": "Execution Progress",
+  "steps": "steps",
+  "failed": "failed",
+  "executing": "Executing",
+  "completed": "Task completed",
+  "taskFailed": "Task failed",
+  "taskFlow": "Task Execution Flow"
+}

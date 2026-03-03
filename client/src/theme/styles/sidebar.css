@@ -1,0 +1,16 @@
+/* ============================================
+   Sidebar / AgentDock Specific Styles
+   ============================================ */
+
+/* Dock item hover effect */
+.dock-item {
+  transition: all var(--transition-fast);
+}
+
+.dock-item:hover {
+  transform: scale(1.05);
+}
+
+.dock-item.active {
+  background: var(--color-primary-light);
+}

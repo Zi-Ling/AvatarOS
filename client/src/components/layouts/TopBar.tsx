@@ -1,0 +1,171 @@
+"use client";
+
+import { useTheme } from "next-themes";
+import { useRouter } from "next/navigation";
+import { useLanguage } from "@/theme/i18n/LanguageContext";
+import { useEffect, useState } from "react";
+import Image from "next/image";
+import { PanelRightClose, PanelRightOpen } from "lucide-react";
+
+interface TopBarProps {
+  isInspectorOpen?: boolean;
+  onToggleInspector?: () => void;
+  
+  // New props for right panel toggle
+  isRightPanelOpen?: boolean;
+  onToggleRightPanel?: () => void;
+  
+  // Settings dialog
+  onOpenSettings?: () => void;
+}
+
+export function TopBar({ isInspectorOpen = true, onToggleInspector, isRightPanelOpen = true, onToggleRightPanel, onOpenSettings }: TopBarProps) {
+  const router = useRouter();
+  const { theme, setTheme } = useTheme();
+  const { language, setLanguage } = useLanguage();
+  const [mounted, setMounted] = useState(false);
+
+  // 避免服务端渲染不匹配
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const toggleTheme = () => {
+    setTheme(theme === "dark" ? "light" : "dark");
+  };
+
+  const toggleLanguage = () => {
+    setLanguage(language === "zh" ? "en" : "zh");
+  };
+
+  const handleSettingsClick = () => {
+    if (onOpenSettings) {
+      onOpenSettings();
+    }
+  };
+
+  if (!mounted) return null;
+
+  return (
+    <header
+      className="flex h-16 items-center justify-between border-b border-slate-200 dark:border-white/10 px-6 backdrop-blur bg-white/80 dark:bg-slate-950/80 text-slate-800 dark:text-white"
+      style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+    >
+      {/* 左侧 Logo 和标题 */}
+      <div className="flex items-center gap-3 select-none">
+         <div className="relative w-8 h-8 rounded-lg overflow-hidden shadow-lg shadow-indigo-500/20">
+            <Image 
+              src="/logo.png" 
+              alt="IntelliAvatar Logo" 
+              fill
+              className="object-cover"
+              priority
+            />
+         </div>
+         <div className="flex flex-col">
+            <span className="font-bold text-base leading-tight tracking-tight">IntelliAvatar</span>
+            <span className="text-[10px] text-slate-500 dark:text-slate-400 font-medium uppercase tracking-wider">Workspace</span>
+         </div>
+      </div>
+
+      {/* 右侧功能区域 */}
+      <div
+        className="flex items-center gap-3"
+        style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+      >
+        <div className="relative hidden md:block">
+          <input
+            type="search"
+            placeholder={language === "zh" ? "搜索任务..." : "Search tasks..."}
+            className="h-10 w-72 rounded-full border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-white/5 pl-10 pr-4 text-sm placeholder:text-slate-400 dark:placeholder:text-white/50 focus:border-indigo-400 focus:outline-none transition-colors"
+          />
+          <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-xs text-slate-400 dark:text-white/60">
+            ⌘K
+          </span>
+        </div>
+
+        {/* Right Panel Toggle */}
+        {onToggleRightPanel && (
+           <button
+             type="button"
+             onClick={onToggleRightPanel}
+             className={`flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 transition hover:border-slate-300 dark:hover:border-white/30 hover:bg-slate-100 dark:hover:bg-white/5 ${!isRightPanelOpen ? 'text-slate-400 dark:text-white/50' : 'text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/30'}`}
+             title={isRightPanelOpen ? (language === 'zh' ? "隐藏侧边栏" : "Hide Sidebar") : (language === 'zh' ? "显示侧边栏" : "Show Sidebar")}
+           >
+             {isRightPanelOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
+           </button>
+        )}
+
+        <div className="h-6 w-px bg-slate-200 dark:bg-white/10 mx-1" />
+
+        {/* 语言切换 */}
+        <button
+          type="button"
+          onClick={toggleLanguage}
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-white/80 transition hover:border-slate-300 dark:hover:border-white/30 hover:bg-slate-100 dark:hover:bg-white/5 font-medium text-xs"
+          title="Switch Language"
+        >
+          {language.toUpperCase()}
+        </button>
+
+        {/* 主题切换 */}
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-white/80 transition hover:border-slate-300 dark:hover:border-white/30 hover:bg-slate-100 dark:hover:bg-white/5"
+          title="Toggle Theme"
+        >
+          {theme === "dark" ? (
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+            </svg>
+          ) : (
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+            </svg>
+          )}
+        </button>
+
+        {/* 系统设置 */}
+        <button
+          type="button"
+          onClick={handleSettingsClick}
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-white/80 transition hover:border-slate-300 dark:hover:border-white/30 hover:bg-slate-100 dark:hover:bg-white/5"
+        >
+          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+        </button>
+
+        {/* Window Controls */}
+        <div className="flex items-center gap-1 ml-2 pl-2 border-l border-slate-200 dark:border-white/10">
+           <button 
+             type="button"
+             onClick={() => window.electronAPI?.minimizeWindow?.()}
+             className="flex h-8 w-8 items-center justify-center rounded hover:bg-slate-100 dark:hover:bg-white/10 transition text-slate-600 dark:text-white/80"
+             title={language === 'zh' ? "最小化" : "Minimize"}
+           >
+             <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
+           </button>
+           <button 
+             type="button"
+             onClick={() => window.electronAPI?.maximizeWindow?.()}
+             className="flex h-8 w-8 items-center justify-center rounded hover:bg-slate-100 dark:hover:bg-white/10 transition text-slate-600 dark:text-white/80"
+             title={language === 'zh' ? "最大化" : "Maximize"}
+           >
+             <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5" /></svg>
+           </button>
+           <button 
+             type="button"
+             onClick={() => window.electronAPI?.closeWindow?.()}
+             className="flex h-8 w-8 items-center justify-center rounded hover:bg-red-500 hover:text-white transition text-slate-600 dark:text-white/80"
+             title={language === 'zh' ? "关闭" : "Close"}
+           >
+             <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+           </button>
+        </div>
+      </div>
+    </header>
+  );
+}
