@@ -50,13 +50,28 @@ and recovering from failures automatically.
 ## 🚀 Quick Start
 
 ```bash
-# Backend
+# 1. Clone
+git clone https://github.com/Zi-Ling/AvatarOS.git
+cd AvatarOS
+
+# 2. Backend
 cd server
 pip install -r requirements.txt
+
+# 3. Configure
+cp .env.example .env
+# Edit .env and fill in your LLM_API_KEY
+
+# 4. Download embedding model (~1.1GB, required for semantic search)
+# If you're in China, set mirror first:
+# $env:HF_ENDPOINT='https://hf-mirror.com'
+python scripts/download_embedding_model.py
+
+# 5. Start backend
 python main.py
 
-# Frontend
-cd client
+# 6. Frontend (new terminal)
+cd ../client
 npm install
 npm run dev
 ```

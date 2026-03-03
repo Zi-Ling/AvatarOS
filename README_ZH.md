@@ -49,13 +49,28 @@
 ## 🚀 快速开始
 
 ```bash
-# 后端
+# 1. Clone
+git clone https://github.com/Zi-Ling/AvatarOS.git
+cd AvatarOS
+
+# 2. 安装后端依赖
 cd server
 pip install -r requirements.txt
+
+# 3. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填入你的 LLM_API_KEY
+
+# 4. 下载 Embedding 模型（约 1.1GB，语义搜索必需）
+# 国内网络建议先设置镜像：
+# $env:HF_ENDPOINT='https://hf-mirror.com'
+python scripts/download_embedding_model.py
+
+# 5. 启动后端
 python main.py
 
-# 前端
-cd client
+# 6. 启动前端（新终端）
+cd ../client
 npm install
 npm run dev
 ```
