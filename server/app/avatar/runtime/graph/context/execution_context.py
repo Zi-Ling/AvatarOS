@@ -57,7 +57,8 @@ class ExecutionContext(TaskContext):
         memory_manager: Optional[Any] = None,
         task_id: Optional[str] = None,
         env: Optional[Dict[str, Any]] = None,
-        encryption_key: Optional[bytes] = None
+        encryption_key: Optional[bytes] = None,
+        workspace: Optional[Any] = None,
     ):
         """
         Initialize ExecutionContext.
@@ -71,6 +72,7 @@ class ExecutionContext(TaskContext):
             task_id: Optional task identifier (defaults to graph_id)
             env: Environment variables
             encryption_key: Optional encryption key for secrets (generates one if not provided)
+            workspace: Optional SessionWorkspace for this execution
         """
         # Initialize parent TaskContext
         super().__init__(
@@ -93,6 +95,7 @@ class ExecutionContext(TaskContext):
         
         # Graph-specific fields (Requirement 29.1)
         self.graph_id = graph_id
+        self.workspace = workspace  # SessionWorkspace for this execution (may be None)
         
         # Node outputs storage (Requirement 29.2)
         self._node_outputs: Dict[str, Dict[str, Any]] = {}

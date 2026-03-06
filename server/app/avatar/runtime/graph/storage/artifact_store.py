@@ -18,6 +18,7 @@ import json
 import hashlib
 import logging
 import asyncio
+import uuid
 from pydantic import BaseModel, Field
 
 # Async file I/O

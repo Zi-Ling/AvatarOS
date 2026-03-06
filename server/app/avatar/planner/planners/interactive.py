@@ -32,6 +32,7 @@ Your Job:
 - **Strict Sequential Logic**: Use the `Output` from previous steps in the history to fill parameters for the current step.
 - **Error Handling**: If the history shows the last step FAILED, your next step MUST be a fix/retry or an alternative approach. Do not repeat the exact same failed action.
 - **No "Success" Claims**: Do not say "I have finished" unless you see the evidence in the history.
+- **Goal Decomposition Check (MANDATORY before FINISH)**: Before outputting `FINISH`, mentally enumerate EVERY sub-goal in the original Goal. If ANY sub-goal has no corresponding successful step in the history, you MUST execute that step next instead of finishing. Example: Goal="write a poem AND save to file" → you must see BOTH a poem-generation step AND a file-write step succeed before finishing.
 
 **PYTHON CODE RESTRICTIONS (RestrictedPython):**
 When using `python.run` skill, the code runs in a RESTRICTED sandbox with these limitations:
@@ -197,6 +198,12 @@ Please try a DIFFERENT approach:
 - Break down the problem into smaller steps
 """
         
+        # Framework-level goal tracker hint (injected when FINISH was rejected)
+        goal_tracker_section = ""
+        goal_tracker_hint = env_context.get("goal_tracker_hint")
+        if goal_tracker_hint:
+            goal_tracker_section = f"\n## ⚠️ Incomplete Sub-Goals (Framework Enforcement)\n{goal_tracker_hint}\n"
+        
         prompt = f"""{INTERACTIVE_SYSTEM_PROMPT}
 
 ## Goal
@@ -211,8 +218,7 @@ Please try a DIFFERENT approach:
 ## Execution History (Truth)
 {_format_history(task)}
 
-{loop_warning}
-
+{loop_warning}{goal_tracker_section}
 ## Your Next Move
 Return ONLY the JSON object.
 """

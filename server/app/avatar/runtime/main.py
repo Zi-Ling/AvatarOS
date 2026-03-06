@@ -162,9 +162,10 @@ class AvatarMain:
         # Initialize Memory Manager if not provided
         if memory_manager is None:
             from app.avatar.memory.manager import MemoryManagerConfig
+            from app.core.config import AVATAR_MEMORY_DIR
             memory_config = MemoryManagerConfig(
-                root_dir=self.base_path / "memory",
-                use_inmemory_working_state=True  # 使用内存版本（性能更好）
+                root_dir=AVATAR_MEMORY_DIR,
+                use_inmemory_working_state=True
             )
             self.memory_manager = MemoryManager.from_local_dir(memory_config)
         else:
@@ -440,6 +441,10 @@ class AvatarMain:
 
                 env_context = self._build_env_context(user_request=intent.goal)
                 env_context["run_id"] = run_record.id
+                # Propagate session_id so NodeRunner can resolve the correct session workspace
+                session_id = intent.metadata.get("session_id")
+                if session_id:
+                    env_context["session_id"] = session_id
                 if cancel_event:
                     env_context["cancel_event"] = cancel_event
 
@@ -447,7 +452,7 @@ class AvatarMain:
                     intent.goal, mode="react", config={"env": env_context}
                 )
 
-                if graph_result.final_status == "FAILED":
+                if graph_result.final_status == "failed":
                     raise RuntimeError(graph_result.error_message or "GraphController execution failed")
 
                 RunStore.update_status(run_record.id, "completed", summary=f"✅ 成功完成任务：{task_record.title}")
@@ -468,7 +473,13 @@ class AvatarMain:
             # Re-raise so API returns 500 or catches it
             raise
         
-        return RunStore.get(run_record.id)
+        result = RunStore.get(run_record.id)
+        # 把 graph 挂到 run_record 上，供 task_executor 读取节点输出
+        if self._graph_controller and 'graph_result' in locals() and graph_result.graph:
+            result._graph = graph_result.graph
+        else:
+            result._graph = None
+        return result
 
     def load_task(self, task_id: str) -> Optional[Task]:
         return self.state.load_task(task_id)

@@ -11,9 +11,10 @@ Requirements: 26.1-26.14
 """
 
 from __future__ import annotations
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from enum import Enum
 import logging
+import re
 import asyncio
 from datetime import datetime, timezone
 
@@ -187,6 +188,13 @@ class GraphController:
             nodes={},
             edges={},
         )
+        # Propagate session_id and env into graph metadata so ExecutionContext picks them up
+        graph.metadata["session_id"] = env_context.get("session_id")
+        graph.metadata["env"] = env_context
+        
+        # Decompose goal into sub_goals for completion tracking (zero LLM calls)
+        sub_goals = self._decompose_goal(intent)
+        logger.info(f"[GoalTracker] Decomposed '{intent}' into {len(sub_goals)} sub-goals: {sub_goals}")
         
         # Track planner usage
         planner_invocations = 0
@@ -256,6 +264,21 @@ class GraphController:
                 patch.actions[0].operation == PatchOperation.FINISH
             ):
                 logger.info("Planner returned FINISH")
+                # Framework-level goal completion check — LLM cannot bypass this
+                uncovered = self._get_uncovered_sub_goals(sub_goals, graph)
+                if uncovered:
+                    logger.warning(
+                        f"[GoalTracker] FINISH rejected: {len(uncovered)} sub-goal(s) uncovered: {uncovered}"
+                    )
+                    # Inject uncovered goals into env_context so next planner call is aware
+                    env_context = dict(env_context)
+                    env_context["uncovered_sub_goals"] = uncovered
+                    env_context["goal_tracker_hint"] = (
+                        f"The following sub-goals are NOT yet completed: {uncovered}. "
+                        f"You MUST complete them before finishing."
+                    )
+                    continue  # Reject FINISH, force another planning iteration
+                logger.info("Planner returned FINISH — all sub-goals covered")
                 break
             
             # 2. Validate patch
@@ -313,7 +336,23 @@ class GraphController:
                     )
             
             # 5. Check if terminal
-            if result.final_status in ["SUCCESS", "FAILED"]:
+            if result.final_status in ("success", "failed", "partial_success"):
+                # On success, run GoalTracker before accepting the result.
+                # "failed" / "partial_success" are already terminal — no point continuing.
+                if result.final_status == "success":
+                    uncovered = self._get_uncovered_sub_goals(sub_goals, graph)
+                    if uncovered:
+                        logger.warning(
+                            f"[GoalTracker] Runtime success but {len(uncovered)} sub-goal(s) "
+                            f"uncovered: {uncovered} — continuing ReAct loop"
+                        )
+                        env_context = dict(env_context)
+                        env_context["uncovered_sub_goals"] = uncovered
+                        env_context["goal_tracker_hint"] = (
+                            f"The following sub-goals are NOT yet completed: {uncovered}. "
+                            f"You MUST complete them before finishing."
+                        )
+                        continue  # Reject premature success, force another planning iteration
                 return result
         
         # Execute any remaining nodes
@@ -716,3 +755,122 @@ class GraphController:
                 exc_info=True
             )
             return None
+
+    # -------------------------------------------------------------------------
+    # Goal Completion Tracking (Framework-level, zero LLM calls)
+    # -------------------------------------------------------------------------
+
+    # Connectors used to split a goal into sub-goals.
+    # Only split on explicit multi-goal connectors (并且/然后/and then/etc.).
+    # Bare commas/semicolons are NOT treated as sub-goal separators because they
+    # often appear within a single compound task (e.g. "读取test.txt，找到最大的数").
+    _GOAL_SPLIT_PATTERN = re.compile(
+        r'\s+(?:并且?|然后|接着|之后|and then|then also|after that|additionally)\s+',
+        re.IGNORECASE,
+    )
+
+    # Skills that have no IO side-effects; successful execution covers any non-IO sub-goal
+    _COMPUTE_SKILLS: set = {"python.run", "python.eval", "shell.run"}
+
+    # Keywords that indicate an IO sub-goal; these require an explicit IO skill to cover
+    _IO_KEYWORDS: set = {
+        "保存", "写入", "写到", "存储", "save", "write", "保存到",
+        "读取", "下载", "发送", "上传", "fetch", "download", "send", "upload",
+    }
+
+    # Skill → semantic tags: what "kind of work" does this skill cover
+    _SKILL_TAGS: Dict[str, List[str]] = {
+        "fs.write":          ["save", "write", "file", "保存", "写入", "文件", "存储"],
+        "fs.read":           ["read", "open", "load", "读取", "打开"],
+        "fs.list":           ["list", "ls", "dir", "列出", "目录"],
+        "fs.delete":         ["delete", "remove", "删除"],
+        "fs.copy":           ["copy", "复制"],
+        "fs.move":           ["move", "rename", "移动", "重命名"],
+        "python.run":        ["run", "execute", "compute", "calculate", "generate", "运行", "执行", "计算", "生成"],
+        "net.get":           ["fetch", "get", "download", "request", "获取", "下载", "请求"],
+        "net.post":          ["post", "send", "submit", "发送", "提交"],
+        "browser.open":      ["open", "browse", "visit", "打开", "浏览", "访问"],
+        "computer.app.launch": ["launch", "open", "start", "启动", "打开"],
+        "memory.store":      ["remember", "store", "记住", "存储"],
+        "memory.retrieve":   ["recall", "retrieve", "remember", "回忆", "检索"],
+    }
+
+    def _decompose_goal(self, goal: str) -> List[str]:
+        """
+        Split a goal string into sub-goals using punctuation and connectors.
+        Returns a list of non-empty stripped sub-goal strings.
+        Single-clause goals return a list with one element.
+        """
+        parts = self._GOAL_SPLIT_PATTERN.split(goal)
+        sub_goals = [p.strip() for p in parts if p and p.strip()]
+        # Only treat as multi-goal if we actually split into 2+
+        return sub_goals if len(sub_goals) > 1 else [goal]
+
+    def _get_uncovered_sub_goals(
+        self,
+        sub_goals: List[str],
+        graph: 'ExecutionGraph',
+    ) -> List[str]:
+        """
+        Return sub-goals that have no corresponding successful node in the graph.
+
+        Matching logic (no LLM):
+        1. Collect all successful nodes' skill names + stdout/output text.
+        2. For each sub-goal, check if any successful node's skill tags OR
+           output text contains keywords from the sub-goal.
+        3. A sub-goal is "covered" if at least one successful node matches.
+        """
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+
+        if len(sub_goals) <= 1:
+            # Single-goal tasks: trust the LLM's FINISH decision
+            return []
+
+        # Build a corpus of (skill_name, output_text) for successful nodes
+        successful_nodes = [
+            n for n in graph.nodes.values()
+            if n.status == NodeStatus.SUCCESS
+        ]
+
+        if not successful_nodes:
+            # Nothing succeeded yet — all sub-goals uncovered
+            return list(sub_goals)
+
+        # IO-type keywords: sub-goals containing these require explicit IO skill coverage
+
+        def _node_covers(node, sub_goal: str) -> bool:
+            sub_goal_lower = sub_goal.lower()
+
+            # 1. Check skill semantic tags
+            skill = node.capability_name
+            tags = self._SKILL_TAGS.get(skill, [skill])
+            if any(tag.lower() in sub_goal_lower for tag in tags):
+                return True
+
+            # 2. Compute-only skills cover any non-IO sub-goal on success
+            if skill in self._COMPUTE_SKILLS:
+                if not any(kw in sub_goal_lower for kw in self._IO_KEYWORDS):
+                    return True
+
+            # 3. Check if CJK keywords from sub-goal appear in node outputs
+            #    (CJK-only to avoid false positives from code tokens)
+            output_text = ""
+            outputs = node.outputs or {}
+            for v in outputs.values():
+                if isinstance(v, str):
+                    output_text += v.lower()
+                elif isinstance(v, dict):
+                    output_text += str(v).lower()
+
+            cjk_words = re.findall(r'[\u4e00-\u9fff]{2,}', sub_goal_lower)
+            if cjk_words and any(w in output_text for w in cjk_words):
+                return True
+
+            return False
+
+        uncovered = []
+        for sub_goal in sub_goals:
+            if not any(_node_covers(n, sub_goal) for n in successful_nodes):
+                uncovered.append(sub_goal)
+
+        return uncovered

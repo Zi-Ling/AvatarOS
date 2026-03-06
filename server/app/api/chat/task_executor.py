@@ -265,7 +265,10 @@ async def execute_task(
         run_record = await runtime.run_intent(
             initial_intent, task_mode=decision.task_mode, cancel_event=task_cancel_event,
         )
-    
+
+        # 任务执行完成后，向前端推送完整的执行计划和每个步骤的结果
+        await _emit_plan_and_steps(run_record, initial_intent, session_id)
+
     except RuntimeError as e:
         return await _handle_planning_failure(
             e, avatar_router, decision, user_message, session_id, prefix_content,
@@ -275,6 +278,143 @@ async def execute_task(
     return await _format_and_push_result(
         run_record, decision, avatar_router, session_id, prefix_content, memory_manager,
     )
+
+
+async def _emit_plan_and_steps(run_record, intent, session_id: str):
+    """
+    任务执行完成后，向前端补发 plan.generated + step.end 事件。
+    优先从 run_record._graph（ExecutionGraph）读取节点信息，
+    fallback 到 run_record.steps（DB 记录）。
+    """
+    plan_id = getattr(run_record, "id", str(uuid.uuid4()))
+    goal = getattr(intent, "goal", "Task")
+
+    # 优先从 ExecutionGraph 读取节点（GraphController 不写 StepStore）
+    graph = getattr(run_record, "_graph", None)
+
+    if graph and graph.nodes:
+        # 从 ExecutionGraph.nodes 构建 steps_payload
+        nodes = list(graph.nodes.values())
+        steps_payload = []
+        for i, node in enumerate(nodes):
+            steps_payload.append({
+                "id": str(node.id),
+                "skill": node.capability_name,
+                "skill_name": node.capability_name,
+                "description": node.capability_name.replace(".", " → "),
+                "status": "pending",
+                "order": i,
+                "params": node.params or {},
+                "depends_on": [],
+            })
+
+        # 发 plan.generated
+        await socket_manager.emit("server_event", {
+            "type": "plan.generated",
+            "payload": {
+                "session_id": session_id,
+                "plan": {
+                    "id": plan_id,
+                    "goal": goal,
+                    "steps": steps_payload,
+                },
+            },
+        })
+
+        # 逐节点发 step.end / step.failed
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+        for node in nodes:
+            is_failed = node.status == NodeStatus.FAILED
+            event_type = "step.failed" if is_failed else "step.end"
+
+            outputs = node.outputs or {}
+            b64_image = None
+            if isinstance(outputs, dict):
+                b64_image = outputs.get("base64_image")
+
+            await socket_manager.emit("server_event", {
+                "type": event_type,
+                "step_id": str(node.id),
+                "payload": {
+                    "session_id": session_id,
+                    "skill_name": node.capability_name,
+                    "status": "failed" if is_failed else "completed",
+                    "raw_output": outputs,
+                    "base64_image": b64_image,
+                    "error": node.error_message if is_failed else None,
+                },
+            })
+
+    elif run_record.steps:
+        # Fallback: 从 DB steps 读取（旧架构兼容）
+        steps_payload = []
+        for i, step in enumerate(run_record.steps):
+            skill_name = getattr(step, "skill_name", "unknown")
+            step_id = getattr(step, "id", f"step_{i}")
+            input_params = getattr(step, "input_params", {}) or {}
+            steps_payload.append({
+                "id": str(step_id),
+                "skill": skill_name,
+                "skill_name": skill_name,
+                "description": skill_name.replace(".", " → "),
+                "status": "pending",
+                "order": i,
+                "params": input_params,
+                "depends_on": [],
+            })
+
+        await socket_manager.emit("server_event", {
+            "type": "plan.generated",
+            "payload": {
+                "session_id": session_id,
+                "plan": {"id": plan_id, "goal": goal, "steps": steps_payload},
+            },
+        })
+
+        for i, step in enumerate(run_record.steps):
+            skill_name = getattr(step, "skill_name", "unknown")
+            step_id = getattr(step, "id", f"step_{i}")
+            status = getattr(step, "status", "completed")
+            output_result = getattr(step, "output_result", {}) or {}
+            error_message = getattr(step, "error_message", None)
+            is_failed = str(status).lower() == "failed"
+
+            b64_image = None
+            if isinstance(output_result, dict):
+                val = output_result.get("value", output_result)
+                if isinstance(val, dict):
+                    b64_image = val.get("base64_image")
+
+            await socket_manager.emit("server_event", {
+                "type": "step.failed" if is_failed else "step.end",
+                "step_id": str(step_id),
+                "payload": {
+                    "session_id": session_id,
+                    "skill_name": skill_name,
+                    "status": "failed" if is_failed else "completed",
+                    "raw_output": output_result,
+                    "base64_image": b64_image,
+                    "error": error_message,
+                },
+            })
+    else:
+        # 没有任何步骤信息，跳过
+        logger.warning(f"[_emit_plan_and_steps] No graph nodes or DB steps found for run {plan_id}")
+        return
+
+    # 发 task.completed
+    final_status = getattr(run_record, "status", "completed")
+    await socket_manager.emit("server_event", {
+        "type": "task.completed",
+        "payload": {
+            "session_id": session_id,
+            "task": {
+                "id": plan_id,
+                "status": "FAILED" if final_status != "completed" else "SUCCESS",
+            },
+            "step_count": len(graph.nodes) if graph else len(run_record.steps),
+        },
+    })
 
 
 async def _handle_planning_failure(error, avatar_router, decision, user_message, session_id, prefix_content):
@@ -324,7 +464,20 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
     """格式化任务结果并通过 Socket 推送到前端，同时保存到 session 历史"""
     from .session import save_message_to_session
     
-    success, output_val, real_b64_image, target_obj = _extract_step_result(run_record)
+    # 优先从 ExecutionGraph 读取最后一个节点的输出
+    graph = getattr(run_record, "_graph", None)
+    real_b64_image = None
+    target_obj = None
+
+    if graph and graph.nodes:
+        nodes = list(graph.nodes.values())
+        last_node = nodes[-1]
+        outputs = last_node.outputs or {}
+        real_b64_image = outputs.get("base64_image")
+        target_obj = {k: v for k, v in outputs.items() if k != "base64_image"} or outputs
+        success = True
+    else:
+        success, output_val, real_b64_image, target_obj = _extract_step_result(run_record)
     
     # 任务失败
     if run_record.status != "completed":
@@ -342,10 +495,23 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
     # 生成友好总结
     from app.avatar.planner.summarizer import ResultSummarizer
     summary_lines = []
-    
-    if run_record.steps and len(run_record.steps) == 1:
-        step = run_record.steps[0]
-        skill_name = step.skill_name if hasattr(step, 'skill_name') else step.get('skill_name', 'unknown')
+
+    # 从 graph nodes 或 DB steps 获取步骤信息
+    graph = getattr(run_record, "_graph", None)
+    if graph and graph.nodes:
+        nodes = list(graph.nodes.values())
+        step_count = len(nodes)
+        last_node = nodes[-1]
+        skill_name = last_node.capability_name
+    elif run_record.steps:
+        step_count = len(run_record.steps)
+        last_step = run_record.steps[-1]
+        skill_name = getattr(last_step, "skill_name", "unknown")
+    else:
+        step_count = 0
+        skill_name = "unknown"
+
+    if step_count == 1:
         if target_obj:
             try:
                 friendly = ResultSummarizer.summarize(skill_name, target_obj, avatar_router.llm)
@@ -354,13 +520,10 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
                 summary_lines.append("✅ 任务执行完成")
         else:
             summary_lines.append("✅ 任务执行完成")
-    
-    elif run_record.steps and len(run_record.steps) > 1:
+    elif step_count > 1:
         summary_lines.append("✅ **任务执行成功**\n")
-        summary_lines.append(f"完成了 {len(run_record.steps)} 个步骤")
+        summary_lines.append(f"完成了 {step_count} 个步骤")
         if target_obj:
-            last_step = run_record.steps[-1]
-            skill_name = last_step.skill_name if hasattr(last_step, 'skill_name') else last_step.get('skill_name', 'unknown')
             try:
                 friendly = ResultSummarizer.summarize(skill_name, target_obj, avatar_router.llm)
                 summary_lines.append(f"\n📊 {friendly}")

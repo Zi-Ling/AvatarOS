@@ -20,6 +20,7 @@ AVATAR_SESSIONS_DIR = AVATAR_HOME / "sessions"
 AVATAR_ARTIFACTS_DIR= AVATAR_HOME / "artifacts"
 AVATAR_LOGS_DIR     = AVATAR_HOME / "logs"
 AVATAR_TMP_DIR      = AVATAR_HOME / ".tmp"
+AVATAR_LEARNING_DIR = AVATAR_HOME / "learning"
 
 
 def ensure_avatar_home() -> None:
@@ -31,6 +32,7 @@ def ensure_avatar_home() -> None:
         AVATAR_ARTIFACTS_DIR,
         AVATAR_LOGS_DIR,
         AVATAR_TMP_DIR,
+        AVATAR_LEARNING_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
 

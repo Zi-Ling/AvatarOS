@@ -83,10 +83,15 @@ class NodeRunner:
         start_time = datetime.now()
         logger.info(f"[NodeRunner] Starting execution of node {node.id}")
 
+        # Workspace is resolved once by GraphRuntime and stored on ExecutionContext.
+        # NodeRunner has no global state dependency.
+        session_id = getattr(context, "session_id", None) or "default"
+        workspace = getattr(context, "workspace", None) or self.workspace
+
         # --- workspace snapshot（执行前）---
         before_snapshot: Dict[str, float] = {}
-        if self.workspace:
-            before_snapshot = self.workspace.snapshot_workspace()
+        if workspace:
+            before_snapshot = workspace.snapshot_workspace()
 
         # Main execution loop with retry logic
         while True:
@@ -97,14 +102,22 @@ class NodeRunner:
 
                 # --- artifact collection（执行后）---
                 artifact_ids: List[str] = []
-                if self.workspace and self.artifact_collector:
-                    session_id = getattr(context, "session_id", node.id)
+                if workspace and self.artifact_collector:
                     try:
+                        export_to = None
+                        try:
+                            from app.core.workspace.manager import get_workspace_manager
+                            export_to = get_workspace_manager().get_workspace()
+                        except Exception:
+                            if self.executor.base_path:
+                                from pathlib import Path
+                                export_to = Path(self.executor.base_path)
                         collected = await self.artifact_collector.collect(
-                            workspace=self.workspace,
+                            workspace=workspace,
                             before_snapshot=before_snapshot,
                             node_id=node.id,
                             session_id=session_id,
+                            export_to=export_to,
                         )
                         artifact_ids = [a.artifact_id for a in collected]
                         if artifact_ids:
@@ -137,6 +150,7 @@ class NodeRunner:
                     execution_time_s=execution_time,
                     artifact_ids=artifact_ids,
                     output_summary=self._summarize(node.outputs),
+                    workspace_path=str(workspace.root) if workspace else None,
                 )
 
                 return NodeResult(
@@ -190,6 +204,7 @@ class NodeRunner:
                         ended_at=datetime.now(),
                         execution_time_s=execution_time,
                         error_message=error_message,
+                        workspace_path=str(workspace.root) if workspace else None,
                     )
 
                     return NodeResult(
@@ -330,14 +345,14 @@ class NodeRunner:
         artifact_ids: Optional[List[str]] = None,
         error_message: Optional[str] = None,
         output_summary: Optional[str] = None,
+        workspace_path: Optional[str] = None,
     ) -> None:
         """写一条 step trace，失败时静默（不影响主流程）"""
         if self.trace_store is None:
             return
         try:
-            session_id = getattr(context, "session_id", None) or node.id
+            session_id = getattr(context, "session_id", None) or "default"
             graph_id   = getattr(context, "graph_id", None)
-            workspace_path = str(self.workspace.root) if self.workspace else None
 
             self.trace_store.record_step(
                 session_id=session_id,

@@ -18,15 +18,15 @@ from app.api.chat.models import (
     SessionHistoryResponse,
     MessageResponse,
 )
-from app.core.config import config
+from app.core.config import config, AVATAR_HOME
 
 
 router = APIRouter()
 
 
 def get_sessions_dir() -> Path:
-    """获取会话存储目录"""
-    sessions_dir = config.avatar_workspace / ".sessions"
+    """获取会话存储目录（聊天历史，系统级数据，存 ~/.avatar/.sessions）"""
+    sessions_dir = AVATAR_HOME / ".sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     return sessions_dir
 

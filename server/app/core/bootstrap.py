@@ -94,13 +94,12 @@ class AppBootstrap:
         self.app.state.workspace_manager = workspace_mgr
         logger.info(f"  ├─ 当前工作目录: {workspace_mgr.get_workspace()}")
 
-        # 初始化 SessionWorkspaceManager（sandbox session IO 边界）
+        # 初始化 SessionWorkspaceManager（sandbox session IO 边界，固定在 ~/.avatar/sessions）
         from app.avatar.runtime.workspace import init_session_workspace_manager
-        from pathlib import Path
-        session_ws_base = Path(config.avatar_workspace) / "sessions"
-        session_ws_mgr = init_session_workspace_manager(base_path=session_ws_base)
+        from app.core.config import AVATAR_SESSIONS_DIR
+        session_ws_mgr = init_session_workspace_manager(base_path=AVATAR_SESSIONS_DIR)
         self.app.state.session_workspace_manager = session_ws_mgr
-        logger.info(f"  └─ Session workspace base: {session_ws_base}")
+        logger.info(f"  └─ Session workspace base: {AVATAR_SESSIONS_DIR}")
 
     def _init_database(self):
         logger.info("🔧 初始化数据库...")
@@ -108,11 +107,10 @@ class AppBootstrap:
 
     def _init_memory(self):
         logger.info("🧠 初始化记忆管理器...")
-        workspace_mgr = self.app.state.workspace_manager
-        memory_root = workspace_mgr.get_workspace() / "memory"
+        from app.core.config import AVATAR_MEMORY_DIR
         self.app.state.memory_manager = MemoryManager.from_local_dir(
             MemoryManagerConfig(
-                root_dir=memory_root,
+                root_dir=AVATAR_MEMORY_DIR,
                 use_inmemory_working_state=True,
             )
         )
@@ -121,7 +119,8 @@ class AppBootstrap:
 
     def _init_learning(self):
         logger.info("📚 初始化学习管理器...")
-        learning_root = config.avatar_workspace / "learning"
+        from app.core.config import AVATAR_LEARNING_DIR
+        learning_root = AVATAR_LEARNING_DIR
         self.app.state.learning_manager = LearningManager(
             config=LearningManagerConfig(workspace_root=learning_root),
             memory_manager=self.app.state.memory_manager,

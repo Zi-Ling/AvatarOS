@@ -50,6 +50,7 @@ class ExecutionResult:
         execution_time: Total execution time in seconds
         error_message: Error message if execution failed
         is_stuck: Whether execution is stuck (no ready nodes but pending nodes exist)
+        graph: The ExecutionGraph after execution (for node output access)
     """
     success: bool
     final_status: str
@@ -59,6 +60,7 @@ class ExecutionResult:
     execution_time: float = 0.0
     error_message: Optional[str] = None
     is_stuck: bool = False
+    graph: Optional[Any] = None  # ExecutionGraph, typed as Any to avoid circular import
 
 
 class GraphRuntime:
@@ -158,13 +160,25 @@ class GraphRuntime:
                 logger.info(f"[GraphRuntime] Using default ExecutionContext for graph {graph.id}")
             else:
                 from app.avatar.runtime.graph.context.execution_context import ExecutionContext
+                # Resolve session workspace so NodeRunner doesn't need global lookups
+                _session_id = graph.metadata.get('session_id')
+                _workspace = None
+                if _session_id:
+                    try:
+                        from app.avatar.runtime.workspace import get_session_workspace_manager
+                        _ws_mgr = get_session_workspace_manager()
+                        if _ws_mgr is not None:
+                            _workspace = _ws_mgr.get_or_create(_session_id)
+                    except Exception:
+                        pass
                 context = ExecutionContext(
                     graph_id=graph.id,
                     goal_desc=graph.goal,
                     inputs=graph.metadata.get('inputs', {}),
-                    session_id=graph.metadata.get('session_id'),
+                    session_id=_session_id,
                     task_id=graph.id,
-                    env=graph.metadata.get('env', {})
+                    env=graph.metadata.get('env', {}),
+                    workspace=_workspace,
                 )
                 logger.info(f"[GraphRuntime] Created ExecutionContext for graph {graph.id}")
         
@@ -265,6 +279,7 @@ class GraphRuntime:
                 execution_time, 
                 is_incremental=(mode == ExecutionMode.INCREMENTAL)
             )
+            result.graph = graph  # 附带 graph 供调用方读取节点输出
             
             # Check if graph is stuck (no ready nodes but not terminal)
             # Only mark as stuck if we're NOT in incremental mode (incremental mode handles this earlier)

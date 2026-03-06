@@ -16,6 +16,7 @@ ArtifactCollector — 把 session sandbox 接进 Runtime 数据链
 import hashlib
 import logging
 import mimetypes
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
@@ -97,9 +98,11 @@ class ArtifactCollector:
         before_snapshot: Dict[str, float],
         node_id: str,
         session_id: str,
+        export_to: Optional[Path] = None,
     ) -> List[CollectedArtifact]:
         """
         扫描 session sandbox 根目录，把 before_snapshot 之后新增或修改的文件注册为 artifact。
+        如果提供 export_to，同时把文件 copy 到用户 workspace，让用户能直接看到产出物。
 
         Returns:
             新注册的 CollectedArtifact 列表（可能为空）
@@ -126,6 +129,17 @@ class ArtifactCollector:
                     f"[ArtifactCollector] Promoted {file_path.name} "
                     f"→ artifact {artifact.artifact_id} (node={node_id})"
                 )
+
+                # 导出到用户 workspace
+                if export_to is not None:
+                    try:
+                        dest = export_to / file_path.name
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(file_path), str(dest))
+                        logger.info(f"[ArtifactCollector] Exported {file_path.name} → {dest}")
+                    except Exception as e:
+                        logger.warning(f"[ArtifactCollector] Export failed for {file_path.name}: {e}")
+
             except Exception as e:
                 logger.warning(
                     f"[ArtifactCollector] Failed to promote {file_path}: {e}"

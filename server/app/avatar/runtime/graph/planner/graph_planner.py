@@ -272,7 +272,7 @@ class GraphPlanner:
         
         failure_context = ExecutionResult(
             success=False,
-            final_status="FAILED",
+            final_status="failed",
             completed_nodes=completed_nodes,
             failed_nodes=failed_nodes,
             skipped_nodes=skipped_nodes,

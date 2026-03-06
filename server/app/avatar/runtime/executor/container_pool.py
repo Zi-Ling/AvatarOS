@@ -278,10 +278,7 @@ class ContainerPool:
             except _DOCKER_TRANSIENT_ERRORS as e:
                 last_err = e
                 if attempt < self._INSPECT_RETRIES:
-                    logger.debug(
-                        f"[ContainerPool] {entry.short_id} inspect transient error "
-                        f"(attempt {attempt + 1}), retrying: {e}"
-                    )
+                    logger.debug(f"[ContainerPool] {entry.short_id} inspect transient error (suppressed), retrying")
                     time.sleep(self._INSPECT_RETRY_DELAY)
             except Exception as e:
                 # 非连接类错误，不重试
@@ -331,10 +328,7 @@ class ContainerPool:
                         f"exec ping skipped {entry.ping_skip_count} consecutive times: {e}"
                     ))
                 else:
-                    logger.debug(
-                        f"[ContainerPool] {entry.short_id} exec ping transient error "
-                        f"(skip {entry.ping_skip_count}/3), skipping: {e}"
-                    )
+                    logger.debug(f"[ContainerPool] {entry.short_id} exec ping transient error (skip {entry.ping_skip_count}/3, suppressed)")
                 continue
             except Exception as e:
                 dead_entries.append((entry, f"exec ping failed: {e}"))

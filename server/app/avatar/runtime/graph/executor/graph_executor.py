@@ -101,8 +101,8 @@ class GraphExecutor:
             if node.metadata is None:
                 node.metadata = {}
             node.metadata["execution_latency"] = latency
-            node.mark_failed(f"Execution failed: {str(e)}")
             logger.error(f"[GraphExecutor] Node {node.id} failed: {e}", exc_info=True)
+            raise  # 让 NodeRunner 的 retry 逻辑接管
 
     def _resolve_parameters(
         self,
