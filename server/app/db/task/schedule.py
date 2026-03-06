@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, Field, Column, JSON
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 import uuid
 
@@ -31,8 +31,8 @@ class Schedule(SQLModel, table=True):
     last_run_at: Optional[datetime] = None
     next_run_at: Optional[datetime] = None
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __repr__(self):
         return f"<Schedule {self.id[:8]} '{self.name}' cron='{self.cron_expression}'>"

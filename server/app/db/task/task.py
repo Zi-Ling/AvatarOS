@@ -5,7 +5,7 @@ Task / Run / Step 数据模型（使用 SQLModel）
 # from __future__ import annotations  <-- 移除此行，避免类型注解变为字符串
 
 from sqlmodel import SQLModel, Field, Relationship, Column, JSON
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 import uuid
 
@@ -30,7 +30,7 @@ class Step(SQLModel, table=True):
     
     status: str = Field(default="pending")
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = Field(default=None)
     finished_at: Optional[datetime] = Field(default=None)
     
@@ -68,7 +68,7 @@ class Run(SQLModel, table=True):
     
     status: str = Field(default="pending")
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = Field(default=None)
     finished_at: Optional[datetime] = Field(default=None)
     
@@ -105,8 +105,8 @@ class Task(SQLModel, table=True):
     title: str
     intent_spec: dict = Field(sa_column=Column(JSON, nullable=False))
     task_mode: str = Field(default="one_shot")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     # 关联
     # 使用直接类引用，因为 Run 已经定义

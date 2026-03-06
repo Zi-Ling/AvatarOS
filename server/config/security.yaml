@@ -1,0 +1,224 @@
+# Security Configuration for Graph Runtime
+# This file defines security policies for PlannerGuard and execution isolation
+
+# Capability-level policies
+# Actions: allow, deny, require_approval
+capability_policies:
+  # Filesystem operations
+  fs.read:
+    action: allow
+    description: "Allow reading files within workspace"
+  
+  fs.write:
+    action: require_approval
+    description: "Require approval for writing files"
+    approval_reason: "File write operations can modify important files"
+  
+  fs.delete:
+    action: require_approval
+    description: "Require approval for deleting files"
+    approval_reason: "File deletion is irreversible"
+  
+  fs.list:
+    action: allow
+    description: "Allow listing directory contents"
+  
+  # Code execution
+  python.run:
+    action: require_approval
+    description: "Require approval for executing Python code"
+    approval_reason: "Code execution can have security implications"
+  
+  # Network operations
+  net.http_request:
+    action: require_approval
+    description: "Require approval for HTTP requests"
+    approval_reason: "Network requests can access external resources"
+  
+  net.download:
+    action: require_approval
+    description: "Require approval for downloading files"
+    approval_reason: "Downloads can introduce malicious content"
+  
+  # State management
+  state.get:
+    action: allow
+    description: "Allow reading state"
+  
+  state.set:
+    action: allow
+    description: "Allow setting state"
+  
+  # Memory operations
+  memory.store:
+    action: allow
+    description: "Allow storing in memory"
+  
+  memory.retrieve:
+    action: allow
+    description: "Allow retrieving from memory"
+  
+  # Approval operations
+  approval.request:
+    action: allow
+    description: "Allow requesting approvals"
+  
+  # Computer control (GUI automation)
+  computer.screenshot:
+    action: deny
+    description: "Deny screenshot capability"
+    denial_reason: "Screenshots may capture sensitive information"
+  
+  computer.mouse_move:
+    action: deny
+    description: "Deny mouse control"
+    denial_reason: "Mouse control can interfere with user actions"
+  
+  computer.keyboard_type:
+    action: deny
+    description: "Deny keyboard control"
+    denial_reason: "Keyboard control can interfere with user actions"
+
+# Workspace isolation settings
+workspace_isolation:
+  enabled: true
+  workspace_root: "."  # Relative to server root
+  allowed_paths:
+    - "."
+    - "./data"
+    - "./temp"
+  denied_paths:
+    - "./.git"
+    - "./node_modules"
+    - "./.env"
+    - "./config"
+    - "./.kiro/settings"
+  
+  # Enforce that all file operations stay within workspace
+  enforce_workspace_boundary: true
+  
+  # Allow symlinks within workspace
+  allow_symlinks: false
+  
+  # Allow absolute paths (if within workspace)
+  allow_absolute_paths: false
+
+# Resource limits for patches
+resource_limits:
+  max_nodes_per_patch: 50
+  max_edges_per_patch: 100
+  max_patch_size_bytes: 1048576  # 1 MB
+  
+  # Cycle detection
+  enable_cycle_detection: true
+  max_cycle_check_depth: 1000
+
+# Sandbox configuration
+sandbox:
+  # Default executor for capabilities
+  default_executor: "process"  # local, process, docker, kata
+  
+  # Executor selection by capability
+  executor_overrides:
+    python.run: "docker"  # Always use Docker for Python execution
+    computer.*: "local"   # GUI automation must run locally
+  
+  # Docker sandbox settings
+  docker:
+    image: "python:3.11-slim"
+    memory_limit: "512m"
+    cpu_limit: "1.0"
+    network_mode: "none"  # Disable network access
+    read_only_root: true
+    tmpfs_size: "100m"
+  
+  # Process sandbox settings
+  process:
+    timeout: 300  # 5 minutes
+    memory_limit: "256m"
+    cpu_limit: "0.5"
+
+# Approval settings
+approval:
+  # Timeout for approval requests (seconds)
+  timeout: 300  # 5 minutes
+  
+  # Default action when timeout occurs
+  timeout_action: "deny"  # deny or allow
+  
+  # Enable idempotent approval protocol
+  enable_idempotency: true
+  
+  # Approval cache TTL (seconds)
+  cache_ttl: 3600  # 1 hour
+
+# Audit logging
+audit:
+  enabled: true
+  log_level: "INFO"
+  
+  # Events to log
+  log_events:
+    - "capability_execution"
+    - "approval_requested"
+    - "approval_granted"
+    - "approval_denied"
+    - "policy_violation"
+    - "workspace_boundary_violation"
+  
+  # Log destination
+  log_file: "./logs/security_audit.log"
+  
+  # Rotate logs
+  rotate_logs: true
+  max_log_size_mb: 100
+  max_log_files: 10
+
+# Rate limiting
+rate_limiting:
+  enabled: true
+  
+  # Per-capability rate limits (requests per minute)
+  capability_limits:
+    python.run: 10
+    net.http_request: 30
+    fs.write: 20
+    fs.delete: 10
+  
+  # Global rate limit (requests per minute)
+  global_limit: 100
+
+# Security profiles
+profiles:
+  development:
+    capability_policies:
+      python.run:
+        action: allow  # No approval needed in dev
+      fs.write:
+        action: allow
+      fs.delete:
+        action: allow
+    workspace_isolation:
+      enforce_workspace_boundary: false
+    sandbox:
+      default_executor: "local"
+  
+  staging:
+    # Use default policies
+    pass
+  
+  production:
+    capability_policies:
+      python.run:
+        action: deny  # Completely deny in production
+      computer.*:
+        action: deny
+    workspace_isolation:
+      enforce_workspace_boundary: true
+      allow_symlinks: false
+      allow_absolute_paths: false
+    sandbox:
+      default_executor: "docker"
+    rate_limiting:
+      enabled: true
+      global_limit: 50

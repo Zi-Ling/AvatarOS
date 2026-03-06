@@ -1,0 +1,127 @@
+# Graph Runtime Configuration
+# This file contains configuration for the Graph Runtime system.
+# Supports multiple environment profiles: development, staging, production
+
+# Development profile (default)
+development:
+  runtime:
+    max_concurrent_graphs: 5
+    max_nodes_per_graph: 100
+    max_edges_per_graph: 300
+    max_execution_time: 1800  # 30 minutes
+    checkpoint_interval: 5
+  
+  scheduler:
+    max_concurrent_nodes: 5
+    priority_enabled: true
+  
+  executor:
+    default_executor: "local"
+    timeout: 300  # 5 minutes
+    retry_enabled: true
+  
+  planner:
+    default_mode: "react"
+    max_planner_invocations: 100
+    max_planner_tokens: 50000
+    max_planner_cost: 5.0  # USD
+  
+  observability:
+    metrics_enabled: true
+    logging_level: "DEBUG"
+    tracing_enabled: false
+    structured_logging: true
+  
+  security:
+    workspace_isolation: true
+    max_nodes_per_patch: 20
+    max_edges_per_patch: 50
+    approval_required_capabilities: []
+    denied_capabilities: []
+
+# Staging profile
+staging:
+  runtime:
+    max_concurrent_graphs: 10
+    max_nodes_per_graph: 200
+    max_edges_per_graph: 500
+    max_execution_time: 3600  # 1 hour
+    checkpoint_interval: 5
+  
+  scheduler:
+    max_concurrent_nodes: 10
+    priority_enabled: true
+  
+  executor:
+    default_executor: "process"
+    timeout: 600  # 10 minutes
+    retry_enabled: true
+  
+  planner:
+    default_mode: "react"
+    max_planner_invocations: 200
+    max_planner_tokens: 100000
+    max_planner_cost: 10.0  # USD
+  
+  observability:
+    metrics_enabled: true
+    logging_level: "INFO"
+    tracing_enabled: true
+    structured_logging: true
+  
+  security:
+    workspace_isolation: true
+    max_nodes_per_patch: 50
+    max_edges_per_patch: 100
+    approval_required_capabilities:
+      - "fs.write"
+      - "fs.delete"
+      - "python.run"
+    denied_capabilities: []
+
+# Production profile
+production:
+  runtime:
+    max_concurrent_graphs: 20
+    max_nodes_per_graph: 200
+    max_edges_per_graph: 500
+    max_execution_time: 7200  # 2 hours
+    checkpoint_interval: 10
+  
+  scheduler:
+    max_concurrent_nodes: 15
+    priority_enabled: true
+  
+  executor:
+    default_executor: "docker"
+    timeout: 900  # 15 minutes
+    retry_enabled: true
+  
+  planner:
+    default_mode: "dag"
+    max_planner_invocations: 200
+    max_planner_tokens: 100000
+    max_planner_cost: 20.0  # USD
+  
+  observability:
+    metrics_enabled: true
+    logging_level: "INFO"
+    tracing_enabled: true
+    structured_logging: true
+  
+  security:
+    workspace_isolation: true
+    max_nodes_per_patch: 50
+    max_edges_per_patch: 100
+    approval_required_capabilities:
+      - "fs.write"
+      - "fs.delete"
+      - "python.run"
+      - "net.http_request"
+    denied_capabilities:
+      - "computer.screenshot"
+      - "computer.mouse_move"
+
+# Environment variable overrides:
+# Use GRAPH_RUNTIME_<SECTION>_<KEY>=value format
+# Example: GRAPH_RUNTIME_PLANNER_MAX_PLANNER_INVOCATIONS=300

@@ -5,7 +5,7 @@ LLM 调用日志数据模型
 from __future__ import annotations
 
 from sqlmodel import SQLModel, Field, Column, JSON
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import uuid
 
@@ -35,7 +35,7 @@ class LLMCall(SQLModel, table=True):
     response: Optional[str] = Field(default=None)
     
     # 时间信息
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: Optional[datetime] = Field(default=None)
     latency_ms: Optional[float] = Field(default=None)
     

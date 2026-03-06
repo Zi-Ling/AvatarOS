@@ -293,8 +293,8 @@ This ordering ensures:
 
 ## Tasks
 
-- [ ] 1. Phase 1: Core Data Models (ExecutionGraph + Graph Primitives)
-  - [ ] 1.1 Create ExecutionGraph data model with adjacency indexes
+- [x] 1. Phase 1: Core Data Models (ExecutionGraph + Graph Primitives)
+  - [x] 1.1 Create ExecutionGraph data model with adjacency indexes
     - Create `server/app/avatar/runtime/graph/models/execution_graph.py`
     - Implement ExecutionGraph class with fields: id (uuid7), goal, nodes, edges, status, metadata, created_at, updated_at
     - Use uuid7 for graph_id (sortable, time-ordered)
@@ -312,7 +312,7 @@ This ordering ensures:
     - Use hypothesis to generate random graphs
     - Verify all edges appear in correct adjacency indexes
   
-  - [ ] 1.3 Create StepNode and DataEdge models
+  - [x] 1.3 Create StepNode and DataEdge models
     - Create `server/app/avatar/runtime/graph/models/step_node.py`
     - Implement StepNode with fields: id, capability_name, params, status, outputs, retry_policy, metadata, start_time, end_time, error_message, retry_count, stream_events
     - Add stream_events field for streaming output support (List[StreamEvent])
@@ -329,7 +329,7 @@ This ordering ensures:
     - Verify validate_dag() correctly detects cycles
     - Verify no node can reach itself in valid DAGs
   
-  - [ ] 1.5 Create GraphPatch model for LLM-generated modifications
+  - [x] 1.5 Create GraphPatch model for LLM-generated modifications
     - Create `server/app/avatar/runtime/graph/models/graph_patch.py`
     - Implement PatchOperation enum: ADD_NODE, ADD_EDGE, REMOVE_NODE, REMOVE_EDGE, FINISH
     - Implement PatchAction model: operation, node, edge, node_id, edge_id
@@ -337,7 +337,7 @@ This ordering ensures:
     - _Requirements: 6.2_
 
 - [ ] 2. Phase 2: Capability Layer (基于现有核心技能构建)
-  - [ ] 2.1 Create CapabilityRegistry with execution mode support
+  - [x] 2.1 Create CapabilityRegistry with execution mode support
     - Create `server/app/avatar/runtime/graph/registry/capability_registry.py`
     - Implement CapabilityRegistry with methods: register_capability(), get_capability(), list_by_category()
     - Define Capability model: name, input_model, output_model, composed_skills, category, cost_estimate, latency_estimate, execution_mode
@@ -354,7 +354,7 @@ This ordering ensures:
     - **Validates: Requirements 27.4, 27.8, 27.9, 28.4**
     - Verify Capabilities have at most 3 required inputs and 5 output fields
   
-  - [ ] 2.3 Create TypeRegistry for Capability type definitions
+  - [x] 2.3 Create TypeRegistry for Capability type definitions
     - Create `server/app/avatar/runtime/graph/registry/type_registry.py`
     - Implement TypeRegistry class with methods: register_type(), get_input_model(), get_output_model()
     - Store input_model and output_model as Pydantic BaseModel classes
@@ -366,14 +366,14 @@ This ordering ensures:
     - **Validates: Requirements 2.1**
     - Verify all registered Capabilities have retrievable input/output models
   
-  - [ ] 2.5 Migrate existing Task/Step models to GraphNode compatibility
+  - [x] 2.5 Migrate existing Task/Step models to GraphNode compatibility
     - Update `server/app/avatar/planner/models/task.py` and `step.py`
     - Add compatibility layer to convert Task/Step to StepNode
     - Preserve existing fields while adding new GraphNode fields
     - _Requirements: 23.1, 23.2_
 
 - [ ] 3. Phase 3: ExecutionContext and ArtifactStore (Unified Runtime Data)
-  - [ ] 3.1 Create ExecutionContext for unified runtime data management
+  - [x] 3.1 Create ExecutionContext for unified runtime data management
     - Create `server/app/avatar/runtime/graph/context/execution_context.py`
     - Implement ExecutionContext with fields: graph_id, node_outputs, artifacts, session_memory, environment, secrets, variables, locks
     - Add locks field for node-level locking (future distributed execution support)
@@ -388,7 +388,7 @@ This ordering ensures:
     - **Validates: Requirements 29.13**
     - Verify concurrent access doesn't cause data corruption
   
-  - [ ] 3.3 Create ArtifactStore with lifecycle management
+  - [x] 3.3 Create ArtifactStore with lifecycle management
     - Create `server/app/avatar/runtime/graph/storage/artifact_store.py`
     - Implement Artifact model: id, type, uri, size, metadata, created_by_node, created_at, ttl_days
     - Implement ArtifactStore with methods: store(), retrieve(), delete(), stream_retrieve(), gc()
@@ -411,7 +411,7 @@ This ordering ensures:
     - Verify stored artifacts can be retrieved without errors
 
 - [ ] 4. Phase 4: Runtime Engine (GraphRuntime + Scheduler + NodeRunner + Executor)
-  - [ ] 4.1 Create Scheduler with adjacency index-based ready node detection
+  - [x] 4.1 Create Scheduler with adjacency index-based ready node detection
     - Create `server/app/avatar/runtime/graph/scheduler/scheduler.py`
     - Implement Scheduler class with method: get_ready_nodes(graph: ExecutionGraph) -> List[StepNode]
     - Use incoming_edges adjacency index for O(V) dependency checking
@@ -430,7 +430,7 @@ This ordering ensures:
     - **Validates: Requirements 4.2**
     - Verify Scheduler returns ALL ready nodes, not a subset
 
-  - [ ] 2.4 Refactor existing SkillExecutor to support typed execution
+  - [x] 2.4 Refactor existing SkillExecutor to support typed execution
     - Update `server/app/avatar/runtime/executor/base.py`
     - Add type validation before execution using TypeRegistry
     - Add type validation after execution for outputs
@@ -449,7 +449,7 @@ This ordering ensures:
     - **Validates: Requirements 2.4**
     - Verify Executor fails nodes with invalid output types after execution
   
-  - [ ] 2.7 Create Executor with parameter resolution via DataEdge traversal
+  - [x] 2.7 Create Executor with parameter resolution via DataEdge traversal
     - Create `server/app/avatar/runtime/graph/executor/graph_executor.py`
     - Implement execute_node(graph: ExecutionGraph, node: StepNode) method
     - Implement parameter resolution by traversing incoming DataEdges
@@ -470,7 +470,7 @@ This ordering ensures:
     - **Validates: Requirements 5.3**
     - Verify transformers are applied when specified in DataEdge
   
-  - [ ] 2.10 Create TransformerRegistry with built-in transformers
+  - [x] 2.10 Create TransformerRegistry with built-in transformers
     - Create `server/app/avatar/runtime/graph/registry/transformer_registry.py`
     - Implement TransformerRegistry class with methods: register(), get(), list_all()
     - Implement built-in transformers: split_lines, json_parse, extract_field, regex_extract, to_string, to_int
@@ -482,7 +482,7 @@ This ordering ensures:
     - **Validates: Requirements 8.6**
     - Verify Executor marks node as FAILED when transformer raises exception
 
-  - [ ] 2.12 Create NodeRunner as intermediate execution layer
+  - [x] 2.12 Create NodeRunner as intermediate execution layer
     - Create `server/app/avatar/runtime/graph/executor/node_runner.py`
     - Implement NodeRunner class with method: run_node(graph: ExecutionGraph, node: StepNode, context: ExecutionContext) -> NodeResult
     - Handle parameter resolution via DataEdge traversal
@@ -493,7 +493,7 @@ This ordering ensures:
     - Store outputs in ExecutionContext
     - _Requirements: 5.1, 5.2, 5.7, 9.1, 9.2, 9.3_
   
-  - [ ] 2.13 Refactor DagRunner into GraphRuntime with NodeRunner integration
+  - [x] 2.13 Refactor DagRunner into GraphRuntime with NodeRunner integration
     - Refactor `server/app/avatar/planner/runners/dag_runner.py` → `server/app/avatar/runtime/graph/runtime/graph_runtime.py`
     - Replace linear execution with Scheduler-based parallel execution
     - Implement execute_graph(graph: ExecutionGraph) -> ExecutionResult
@@ -516,7 +516,7 @@ This ordering ensures:
     - **Validates: Requirements 1.9**
     - Verify downstream nodes are marked SKIPPED when node is CANCELLED
   
-  - [ ] 2.16 Update Executor to support Capability execution_mode
+  - [x] 2.16 Update Executor to support Capability execution_mode
     - Update `server/app/avatar/runtime/graph/executor/graph_executor.py`
     - Check Capability.execution_mode field
     - For execution_mode="sequential": execute composed_skills in sequence (existing behavior)
@@ -524,7 +524,7 @@ This ordering ensures:
     - Aggregate outputs from composed skills based on execution_mode
     - _Requirements: 27.7, 28.6, 28.7_
   
-  - [ ] 2.17 Implement retry policy execution in NodeRunner
+  - [x] 2.17 Implement retry policy execution in NodeRunner
     - Update `server/app/avatar/runtime/graph/executor/node_runner.py`
     - Implement retry logic with exponential backoff
     - Calculate delay: initial_delay * (backoff_multiplier ^ retry_count)
@@ -543,11 +543,11 @@ This ordering ensures:
     - **Validates: Requirements 9.4**
     - Verify nodes are marked FAILED permanently after max_retries
 
-- [ ] 3. Checkpoint - Ensure all tests pass
+- [x] 3. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 4. Phase 5: Graph Planner (集成现有 InteractiveLLMPlanner + 扩展 DAG 模式)
-  - [ ] 4.1 Create PromptBuilder for Planner prompt management
+  - [x] 4.1 Create PromptBuilder for Planner prompt management
     - Create `server/app/avatar/runtime/graph/planner/prompt_builder.py`
     - Implement PromptBuilder class with methods: build_react_prompt(), build_dag_prompt(), build_repair_prompt()
     - Generate prompts with Capability schemas from CapabilityRegistry
@@ -557,7 +557,7 @@ This ordering ensures:
     - Support prompt templates with variable substitution
     - _Requirements: 6.1, 27.5, 27.6, 28.5_
   
-  - [ ] 4.2 Integrate existing InteractiveLLMPlanner as GraphPlanner base
+  - [x] 4.2 Integrate existing InteractiveLLMPlanner as GraphPlanner base
     - **现有实现**: `server/app/avatar/planner/planners/interactive.py` - InteractiveLLMPlanner
     - Create adapter layer: `server/app/avatar/runtime/graph/planner/graph_planner.py`
     - Wrap InteractiveLLMPlanner to implement GraphPlanner interface
@@ -566,7 +566,7 @@ This ordering ensures:
     - _Requirements: 6.1_
     - _Note: InteractiveLLMPlanner 已实现 ReAct 模式，无需从头开发_
 
-  - [ ] 4.3 Extend InteractiveLLMPlanner for Graph Runtime compatibility
+  - [x] 4.3 Extend InteractiveLLMPlanner for Graph Runtime compatibility
     - Update `server/app/avatar/planner/planners/interactive.py`
     - Add support for ExecutionGraph input (currently uses Task model)
     - Add support for GraphPatch output (currently returns Step)
@@ -575,7 +575,7 @@ This ordering ensures:
     - _Requirements: 6.3, 19.1, 19.2, 19.3, 19.4, 19.5_
     - _Note: 保持向后兼容，支持 AgentLoop 和 GraphRuntime 双模式_
   
-  - [ ] 4.4 Implement DAG mode planning in GraphPlanner
+  - [x] 4.4 Implement DAG mode planning in GraphPlanner
     - Create `server/app/avatar/runtime/graph/planner/dag_planner.py`
     - Implement plan_complete_graph(intent: str) -> GraphPatch
     - Use PromptBuilder.build_dag_prompt() for prompt generation
@@ -584,7 +584,7 @@ This ordering ensures:
     - Optimize for parallel execution opportunities
     - _Requirements: 6.4, 20.1, 20.2, 20.3, 20.4_
   
-  - [ ] 4.5 Implement REPAIR mode for error recovery
+  - [x] 4.5 Implement REPAIR mode for error recovery
     - Update `server/app/avatar/runtime/graph/planner/graph_planner.py`
     - Implement plan_repair(graph: ExecutionGraph, failure_context: ExecutionResult) -> GraphPatch
     - Use PromptBuilder.build_repair_prompt() for prompt generation
@@ -608,7 +608,7 @@ This ordering ensures:
     - Verify only pre-registered transformers are allowed
     - Verify LLM-generated code is rejected
   
-  - [ ] 4.8 Update GraphPlanner to use Capability layer instead of Primitive Skills
+  - [x] 4.8 Update GraphPlanner to use Capability layer instead of Primitive Skills
     - Update `server/app/avatar/runtime/graph/planner/graph_planner.py`
     - Query CapabilityRegistry instead of SkillRegistry for planning
     - Generate StepNodes with capability_name (not primitive skill names)
@@ -616,7 +616,7 @@ This ordering ensures:
     - _Requirements: 27.5, 27.6, 28.5_
 
 - [ ] 5. Phase 4: New Production Components (ExecutionContext, ArtifactStore, PlannerGuard)
-  - [ ] 5.1 Create ExecutionContext for unified runtime data management
+  - [x] 5.1 Create ExecutionContext for unified runtime data management
     - Create `server/app/avatar/runtime/graph/context/execution_context.py`
     - Implement ExecutionContext with fields: graph_id, node_outputs, artifacts, session_memory, environment, secrets, variables
     - Implement thread-safe access methods: set_node_output(), get_node_output(), set_artifact(), get_artifact()
@@ -630,7 +630,7 @@ This ordering ensures:
     - **Validates: Requirements 29.13**
     - Verify concurrent access doesn't cause data corruption
   
-  - [ ] 5.3 Update GraphRuntime to use ExecutionContext
+  - [x] 5.3 Update GraphRuntime to use ExecutionContext
     - Update `server/app/avatar/runtime/graph/runtime/graph_runtime.py`
     - Create ExecutionContext at graph execution start
     - Pass ExecutionContext to Executor for all node executions
@@ -638,7 +638,7 @@ This ordering ensures:
     - Update Executor to resolve parameters from ExecutionContext
     - _Requirements: 29.8, 29.9, 29.10_
   
-  - [ ] 5.4 Create ArtifactStore for large file management
+  - [x] 5.4 Create ArtifactStore for large file management
     - Create `server/app/avatar/runtime/graph/storage/artifact_store.py`
     - Implement Artifact model: id, type, uri, size, metadata, created_by_node, created_at
     - Implement ArtifactStore with methods: store(), retrieve(), delete(), stream_retrieve()
@@ -658,7 +658,7 @@ This ordering ensures:
     - **Validates: Requirements 30.3**
     - Verify stored artifacts can be retrieved without errors
   
-  - [ ] 5.7 Integrate ArtifactStore with Executor
+  - [x] 5.7 Integrate ArtifactStore with Executor
     - Update `server/app/avatar/runtime/graph/executor/graph_executor.py`
     - Store large outputs (>1MB) in ArtifactStore
     - Save only artifact_id in node.outputs
@@ -667,7 +667,7 @@ This ordering ensures:
     - Integrate with existing ArtifactRegistrar from `server/app/avatar/runtime/artifacts/registrar.py`
     - _Requirements: 30.4, 30.5, 29.3, 29.14_
   
-  - [ ] 5.8 Create PlannerGuard for safety validation
+  - [x] 5.8 Create PlannerGuard for safety validation
     - Create `server/app/avatar/runtime/graph/guard/planner_guard.py`
     - Implement PlannerGuard with method: validate(patch: GraphPatch, graph: ExecutionGraph) -> ValidationResult
     - Implement capability-level policy enforcement (allow, deny, require_approval)
@@ -699,14 +699,14 @@ This ordering ensures:
     - **Validates: Requirements 31.12, 31.13**
     - Verify patches creating cycles are rejected
 
-  - [ ] 5.13 Implement Capability Cost Model
+  - [x] 5.13 Implement Capability Cost Model
     - Update `server/app/avatar/runtime/graph/registry/capability_registry.py`
     - Add cost_estimate, latency_estimate, risk_level to Capability metadata
     - Add resource_requirements: {cpu, memory, network, storage}
     - Validate cost_estimate and latency_estimate are non-negative
     - _Requirements: 32.1, 32.2, 32.3_
   
-  - [ ] 5.14 Implement cost tracking in Executor
+  - [x] 5.14 Implement cost tracking in Executor
     - Update `server/app/avatar/runtime/graph/executor/graph_executor.py`
     - Record actual execution cost and latency in node metadata
     - Update ExecutionContext to track accumulated cost
@@ -717,7 +717,7 @@ This ordering ensures:
     - **Validates: Requirements 32.5, 32.6**
     - Verify total cost is sum of all node execution costs
   
-  - [ ] 5.16 Implement Graph Versioning
+  - [x] 5.16 Implement Graph Versioning
     - Create `server/app/avatar/runtime/graph/versioning/graph_version.py`
     - Implement GraphVersion model: version, graph_snapshot, patch_applied, created_at, created_by
     - Implement version creation on patch application
@@ -741,11 +741,11 @@ This ordering ensures:
     - **Validates: Requirements 33.11, 33.12**
     - Verify diff shows added/removed nodes and edges
 
-- [ ] 6. Checkpoint - Ensure all tests pass
+- [x] 6. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 7. Phase 5: State Persistence and Observability
-  - [ ] 7.1 Create StateStore for graph persistence
+  - [x] 7.1 Create StateStore for graph persistence
     - Create `server/app/avatar/runtime/graph/storage/state_store.py`
     - Implement StateStore with methods: checkpoint(), load_latest(), load_snapshot(), rollback(), replay()
     - Create database tables: execution_graphs, graph_snapshots, node_execution_logs, graph_versions
@@ -764,7 +764,7 @@ This ordering ensures:
     - **Validates: Requirements 12.4**
     - Verify snapshot is always created on terminal states
   
-  - [ ] 7.4 Implement graph resumption from persisted state
+  - [x] 7.4 Implement graph resumption from persisted state
     - Update `server/app/avatar/runtime/graph/runtime/graph_runtime.py`
     - Implement resume_from_snapshot(graph_id: str) method
     - Load latest snapshot from StateStore
@@ -782,7 +782,7 @@ This ordering ensures:
     - **Validates: Requirements 12.6, 12.7**
     - Verify StateStore loads and resumes from snapshots correctly
   
-  - [ ] 7.7 Implement observability metrics
+  - [x] 7.7 Implement observability metrics
     - Create `server/app/avatar/runtime/graph/observability/metrics.py`
     - Implement Prometheus metrics: graph_execution_duration_seconds, node_execution_duration_seconds, parallel_nodes_current, graph_status_total, scheduler_latency_ms, planner_latency_ms, edge_resolution_latency_ms
     - Integrate metrics collection in GraphRuntime
@@ -791,14 +791,14 @@ This ordering ensures:
     - Integrate metrics collection in GraphPlanner
     - _Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 14.8, 14.9, 14.10_
   
-  - [ ] 7.8 Implement structured logging
+  - [x] 7.8 Implement structured logging
     - Create `server/app/avatar/runtime/graph/observability/logger.py`
     - Implement JSON structured logging with fields: timestamp, level, event_type, graph_id, node_id, message, metadata
     - Log events: graph_started, graph_completed, graph_failed, node_started, node_completed, node_failed, node_retrying, planner_invoked, patch_applied
     - Use appropriate log levels: INFO, ERROR, DEBUG
     - _Requirements: 15.1, 15.2, 15.3, 15.4, 15.5, 15.6, 15.7_
   
-  - [ ] 7.9 Implement distributed tracing
+  - [x] 7.9 Implement distributed tracing
     - Create `server/app/avatar/runtime/graph/observability/tracing.py`
     - Integrate OpenTelemetry for distributed tracing
     - Create root span for graph execution: "graph.execute"
@@ -807,14 +807,14 @@ This ordering ensures:
     - Record timing information and exceptions
     - _Requirements: 16.1, 16.2, 16.3, 16.4, 16.5, 16.6, 16.7_
 
-  - [ ] 7.10 Implement cost tracking and budget enforcement
+  - [x] 7.10 Implement cost tracking and budget enforcement
     - Update `server/app/avatar/runtime/graph/runtime/graph_runtime.py`
     - Expose get_execution_cost(graph_id) API
     - Emit cost metrics: capability_execution_cost_total, graph_execution_cost_total
     - Log cost information in structured logs
     - _Requirements: 32.6, 32.11, 32.12, 32.13_
   
-  - [ ] 7.11 Implement resource limit enforcement
+  - [x] 7.11 Implement resource limit enforcement
     - Update `server/app/avatar/runtime/graph/runtime/graph_runtime.py`
     - Enforce max_nodes, max_edges, max_execution_time limits
     - Terminate execution when limits exceeded
@@ -827,7 +827,7 @@ This ordering ensures:
     - Verify GraphRuntime terminates when limits exceeded
 
 - [ ] 8. Phase 6: GraphController and Integration
-  - [ ] 8.1 Create GraphController orchestration layer
+  - [x] 8.1 Create GraphController orchestration layer
     - Create `server/app/avatar/runtime/graph/controller/graph_controller.py`
     - Implement GraphController with method: execute(intent, mode, config) -> ExecutionResult
     - Implement _execute_react_mode() for iterative planning
@@ -838,7 +838,7 @@ This ordering ensures:
     - Enforce global limits: max_concurrent_graphs, max_planner_invocations_per_graph
     - _Requirements: 26.1, 26.2, 26.3, 26.4, 26.5, 26.6, 26.7, 26.8, 26.9_
   
-  - [ ] 8.2 Implement planner budget enforcement in GraphController
+  - [x] 8.2 Implement planner budget enforcement in GraphController
     - Update `server/app/avatar/runtime/graph/controller/graph_controller.py`
     - Track planner usage: total_tokens, total_calls, total_cost
     - Enforce budget limits: max_planner_tokens, max_planner_calls, max_planner_cost
@@ -851,7 +851,7 @@ This ordering ensures:
     - **Validates: Requirements 26.10, 26.11, 26.12, 26.13**
     - Verify planning terminates when budget limits exceeded
   
-  - [ ] 8.4 Implement cost budget enforcement in GraphController
+  - [x] 8.4 Implement cost budget enforcement in GraphController
     - Update `server/app/avatar/runtime/graph/controller/graph_controller.py`
     - Enforce max_execution_cost budget limit
     - Terminate execution when cost budget exceeded
@@ -863,7 +863,7 @@ This ordering ensures:
     - **Validates: Requirements 32.7, 32.8**
     - Verify execution terminates when cost budget exceeded
 
-  - [ ] 8.6 Implement ReAct mode iteration limits
+  - [x] 8.6 Implement ReAct mode iteration limits
     - Update `server/app/avatar/runtime/graph/controller/graph_controller.py`
     - Enforce max_react_iterations limit (default: 200)
     - Enforce max_graph_nodes limit (default: 200)
@@ -875,7 +875,7 @@ This ordering ensures:
     - **Validates: Requirements 19.6, 19.8**
     - Verify execution terminates at max iterations
   
-  - [ ] 8.8 Implement DAG mode auto-repair
+  - [x] 8.8 Implement DAG mode auto-repair
     - Update `server/app/avatar/runtime/graph/controller/graph_controller.py`
     - Implement _auto_repair_dag() for simple errors
     - Fix: duplicate node IDs, invalid field references, missing edges
@@ -884,7 +884,7 @@ This ordering ensures:
     - Limit planning attempts to 3
     - _Requirements: 20.5, 20.6, 20.7, 20.8_
   
-  - [ ] 8.9 Implement error recovery coordination
+  - [x] 8.9 Implement error recovery coordination
     - Update `server/app/avatar/runtime/graph/controller/graph_controller.py`
     - Implement _invoke_planner_for_repair() when node fails permanently
     - Apply recovery patch and resume execution
@@ -902,7 +902,7 @@ This ordering ensures:
     - **Validates: Requirements 10.6**
     - Verify recovery attempts are limited to 3
   
-  - [ ] 8.12 Implement failure propagation
+  - [x] 8.12 Implement failure propagation
     - Update `server/app/avatar/runtime/graph/runtime/graph_runtime.py`
     - Implement _propagate_failure() using outgoing_edges adjacency index
     - Mark downstream nodes as SKIPPED when required dependency fails
@@ -925,11 +925,11 @@ This ordering ensures:
     - **Validates: Requirements 11.4**
     - Verify nodes with only failed optional dependencies are NOT skipped
 
-- [ ] 9. Checkpoint - Ensure all tests pass
+- [x] 9. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 10. Phase 7: Security and Sandboxing (集成现有执行器架构)
-  - [ ] 10.1 Implement permission checking in Executor
+  - [x] 10.1 Implement permission checking in Executor
     - Update `server/app/avatar/runtime/graph/executor/graph_executor.py`
     - Check Capability permissions before execution
     - Mark node as FAILED with "permission denied" if lacking permissions
@@ -945,7 +945,7 @@ This ordering ensures:
     - **Validates: Requirements 17.6**
     - Verify nodes are marked FAILED when lacking permissions
   
-  - [ ] 10.4 Integrate existing ExecutorFactory with Graph Runtime
+  - [x] 10.4 Integrate existing ExecutorFactory with Graph Runtime
     - **现有实现**: `server/app/avatar/runtime/executor/factory.py` - ExecutorFactory
     - **现有执行器**: LocalExecutor, ProcessExecutor, WASMExecutor, DockerExecutor, KataExecutor, FirecrackerExecutor
     - Create adapter: `server/app/avatar/runtime/graph/security/executor_adapter.py`
@@ -954,7 +954,7 @@ This ordering ensures:
     - _Requirements: 17.8, 17.9, 17.10_
     - _Note: 执行器架构已完成，包含智能路由、降级策略、容器池优化_
   
-  - [ ] 10.5 Verify container pool optimization in Graph Runtime
+  - [x] 10.5 Verify container pool optimization in Graph Runtime
     - **现有优化**: Docker/Kata 容器池（2-3x 性能提升）
     - Test container reuse across multiple node executions
     - Verify warmup strategy reduces cold start time
@@ -972,7 +972,7 @@ This ordering ensures:
     - **Validates: Requirements 17.11**
     - Verify executor terminates when resource limits exceeded
   
-  - [ ] 10.8 Integrate Prometheus metrics from ExecutorFactory
+  - [x] 10.8 Integrate Prometheus metrics from ExecutorFactory
     - **现有指标**: `server/app/avatar/runtime/executor/metrics.py`
     - Expose executor metrics in Graph Runtime observability layer
     - Include: executor_executions_total, executor_error_rate, executor_execution_duration_*
@@ -980,7 +980,7 @@ This ordering ensures:
     - _Note: 执行器监控指标已实现，需集成到 Graph Runtime_
 
 - [ ] 11. Phase 8: Frontend Integration and Visualization
-  - [ ] 11.1 Implement WebSocket endpoint for real-time updates
+  - [x] 11.1 Implement WebSocket endpoint for real-time updates
     - Create `server/app/avatar/runtime/graph/api/websocket.py`
     - Implement WebSocket endpoint for graph state updates
     - Broadcast node status changes to connected clients
@@ -988,13 +988,13 @@ This ordering ensures:
     - Support reconnection with state synchronization
     - _Requirements: 21.1, 21.2, 21.3, 21.7_
 
-  - [ ] 11.2 Integrate EventBus with WebSocket broadcasting
+  - [x] 11.2 Integrate EventBus with WebSocket broadcasting
     - Update `server/app/avatar/runtime/events/bus.py`
     - Add WebSocket broadcast handler for graph events
     - Broadcast on: node_started, node_completed, node_failed, graph_completed
     - _Requirements: 21.2_
   
-  - [ ] 11.3 Implement Mermaid visualization generation
+  - [x] 11.3 Implement Mermaid visualization generation
     - Verify ExecutionGraph.to_mermaid() implementation from Phase 1
     - Test Mermaid output format compliance
     - Test node representation with labels
@@ -1018,7 +1018,7 @@ This ordering ensures:
     - **Validates: Requirements 13.5**
     - Verify nodes are colored by status
   
-  - [ ] 11.4 Create REST API endpoints for graph operations
+  - [x] 11.4 Create REST API endpoints for graph operations
     - Create `server/app/avatar/runtime/graph/api/rest.py`
     - Implement POST /graphs/execute - execute graph with intent
     - Implement GET /graphs/{graph_id} - get graph state
@@ -1031,7 +1031,7 @@ This ordering ensures:
     - _Requirements: 26.7, 32.6, 33.8_
 
 - [ ] 12. Phase 9: Migration and Backward Compatibility
-  - [ ] 12.1 Create migration utility for AgentLoop to Graph Runtime
+  - [x] 12.1 Create migration utility for AgentLoop to Graph Runtime
     - Create `server/app/avatar/runtime/graph/migration/loop_to_graph.py`
     - Implement convert_loop_to_graph(loop_steps) -> ExecutionGraph
     - Convert step lists to StepNodes
@@ -1040,14 +1040,14 @@ This ordering ensures:
     - Generate migration report
     - _Requirements: 23.1, 23.2, 23.3, 23.4_
   
-  - [ ] 12.2 Implement dry-run mode for migration
+  - [x] 12.2 Implement dry-run mode for migration
     - Update migration utility to support dry-run mode
     - Preview migration without applying changes
     - Validate generated ExecutionGraph for DAG constraints
     - Log warnings for unresolved references
     - _Requirements: 23.5, 23.6, 23.7_
 
-  - [ ] 12.3 Delete AgentLoop, CompositeTaskExecutor, and DagRunner
+  - [x] 12.3 Delete AgentLoop, CompositeTaskExecutor, and DagRunner
     - Delete `server/app/avatar/runtime/loop.py` (772 lines)
     - Delete `server/app/avatar/runtime/executor/composite_executor.py` (1294 lines)
     - Delete `server/app/avatar/planner/runners/dag_runner.py` (~200 lines)
@@ -1056,7 +1056,7 @@ This ordering ensures:
     - **Total deletion: ~2266 lines of old code**
     - _Requirements: Architecture refactoring_
   
-  - [ ] 12.4 Update existing API endpoints to use GraphController
+  - [x] 12.4 Update existing API endpoints to use GraphController
     - Update `server/app/avatar/api/` endpoints
     - Replace AgentLoop calls with GraphController.execute()
     - Maintain backward compatibility for existing clients
@@ -1064,7 +1064,7 @@ This ordering ensures:
     - _Requirements: 26.7_
 
 - [ ] 13. Phase 10: Configuration and Extensibility
-  - [ ] 13.1 Create configuration system
+  - [x] 13.1 Create configuration system
     - Create `server/app/avatar/runtime/graph/config/config.py`
     - Implement YAML configuration loading
     - Define configuration sections: runtime, scheduler, executor, planner, observability, security
@@ -1072,14 +1072,14 @@ This ordering ensures:
     - Support configuration overrides via environment variables
     - _Requirements: 24.1, 24.2, 24.7_
   
-  - [ ] 13.2 Implement plugin system for extensibility
+  - [x] 13.2 Implement plugin system for extensibility
     - Create `server/app/avatar/runtime/graph/plugins/registry.py`
     - Implement plugin registration decorators: @register_skill, @register_capability, @register_transformer
     - Implement plugin loading and validation at startup
     - Handle plugin load failures gracefully
     - _Requirements: 24.3, 24.4, 24.5, 24.6, 8.7, 28.8_
   
-  - [ ] 13.3 Create security configuration
+  - [x] 13.3 Create security configuration
     - Create `server/config/security.yaml`
     - Define PlannerGuard policies for capabilities
     - Define workspace isolation settings
@@ -1087,13 +1087,13 @@ This ordering ensures:
     - Define resource limits
     - _Requirements: 31.2, 31.3, 31.4, 31.8, 17.10_
   
-  - [ ] 13.4 Create default configuration files
+  - [x] 13.4 Create default configuration files
     - Create `server/config/graph_runtime.yaml` with default settings
     - Document all configuration options
     - Provide example configurations for different deployment scenarios
     - _Requirements: 24.1, 24.2_
 
-- [ ] 14. Checkpoint - Ensure all tests pass
+- [x] 14. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 15. Phase 11: Integration Testing and Performance Validation

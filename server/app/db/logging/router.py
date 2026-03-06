@@ -5,7 +5,7 @@ Router 日志数据模型
 from __future__ import annotations
 
 from sqlmodel import SQLModel, Field, Column, JSON
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import uuid
 
@@ -37,7 +37,7 @@ class RouterRequest(SQLModel, table=True):
     task_id: Optional[str] = Field(default=None, index=True)  # 如果路由到任务，记录 task_id
     
     # 时间信息
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: Optional[datetime] = Field(default=None)
     
     # 元数据
