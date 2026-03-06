@@ -293,6 +293,110 @@ class TaskContext:
         self.status.end_time = time.time()
         self.save_snapshot()
 
+    # ========================================
+    # Serialization Support (for ProcessExecutor)
+    # ========================================
+    
+    def __getstate__(self):
+        """
+        自定义序列化：排除不可序列化的字段
+        
+        这使得 TaskContext 可以通过 multiprocessing 传递给 ProcessExecutor。
+        """
+        import pickle
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        state = self.__dict__.copy()
+        
+        # 排除不可序列化的字段
+        state.pop('_memory_manager', None)
+        state.pop('_event_bus', None)
+        
+        # 特殊处理 _attachments：只保留可序列化的部分
+        if '_attachments' in state:
+            attachments = state['_attachments'].copy()
+            attachments.pop('memory_manager', None)
+            attachments.pop('event_bus', None)
+            attachments.pop('session_context', None)
+            state['_attachments'] = attachments
+        
+        # 递归转换函数：将任何对象转换为可序列化的形式
+        def make_serializable(obj, depth=0):
+            """递归转换对象为可序列化形式"""
+            if depth > 10:  # 防止无限递归
+                return str(obj)
+            
+            # 尝试直接序列化
+            try:
+                pickle.dumps(obj)
+                return obj
+            except:
+                pass
+            
+            # 处理字典
+            if isinstance(obj, dict):
+                return {k: make_serializable(v, depth+1) for k, v in obj.items()}
+            
+            # 处理列表
+            if isinstance(obj, (list, tuple)):
+                return [make_serializable(item, depth+1) for item in obj]
+            
+            # 处理有 items() 方法的对象（如 Bindings）
+            if hasattr(obj, 'items') and callable(obj.items):
+                try:
+                    return {k: make_serializable(v, depth+1) for k, v in obj.items()}
+                except:
+                    pass
+            
+            # 处理有 __dict__ 的对象
+            if hasattr(obj, '__dict__'):
+                try:
+                    return {k: make_serializable(v, depth+1) for k, v in obj.__dict__.items()}
+                except:
+                    pass
+            
+            # 最后兜底：转换为字符串
+            return str(obj)
+        
+        # 特殊处理 variables：递归转换所有不可序列化的对象
+        if 'variables' in state and state['variables'] is not None:
+            try:
+                original_vars = state['variables']
+                
+                # 转换 inputs
+                inputs_dict = {}
+                if hasattr(original_vars, 'inputs'):
+                    inputs_dict = make_serializable(original_vars.inputs)
+                
+                # 转换 vars
+                vars_dict = {}
+                if hasattr(original_vars, 'vars'):
+                    vars_dict = make_serializable(original_vars.vars)
+                
+                # 创建新的 TaskVariables 对象
+                state['variables'] = TaskVariables(
+                    inputs=inputs_dict if isinstance(inputs_dict, dict) else {},
+                    vars=vars_dict if isinstance(vars_dict, dict) else {}
+                )
+            except Exception as e:
+                logger.warning(f"[TaskContext] Failed to serialize variables: {e}, creating empty TaskVariables")
+                state['variables'] = TaskVariables(inputs={}, vars={})
+        
+        return state
+    
+    def __setstate__(self, state):
+        """
+        自定义反序列化：恢复对象状态
+        """
+        self.__dict__.update(state)
+        
+        # 恢复被排除的字段为 None
+        if '_memory_manager' not in self.__dict__:
+            self._memory_manager = None
+        if '_attachments' not in self.__dict__:
+            self._attachments = {}
+
 # Backward Alias
 ExecutionContext = TaskContext
 

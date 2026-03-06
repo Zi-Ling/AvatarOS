@@ -9,6 +9,9 @@ from .filesystem import router as filesystem_router
 from .schedule import router as schedule_router
 from .history import router as history_router
 from .workspace import router as workspace_router
+from .state import router as state_router
+from .memory import router as memory_router
+from .approval import router as approval_router
 
 __all__ = [
     "chat_router",
@@ -19,4 +22,7 @@ __all__ = [
     "schedule_router",
     "history_router",
     "workspace_router",
+    "state_router",
+    "memory_router",
+    "approval_router",
 ]

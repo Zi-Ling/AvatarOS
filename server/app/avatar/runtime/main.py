@@ -52,6 +52,35 @@ class _SkillCaller:
     workspace_manager: Optional[Any] = None
     user_request: Optional[str] = None  # 原始用户请求，用于意图检测
 
+    def __getstate__(self):
+        """
+        自定义序列化：排除不可序列化的对象
+        
+        ProcessExecutor 需要通过 pickle 传递 _SkillCaller 到子进程。
+        """
+        state = {
+            'base_path': self.base_path,
+            'dry_run': self.dry_run,
+            'user_request': self.user_request,
+            # 不序列化：memory_manager, learning_manager, step_logger, run_id, execution_context, workspace_manager
+        }
+        return state
+
+    def __setstate__(self, state):
+        """
+        自定义反序列化：恢复可序列化的字段
+        """
+        self.base_path = state.get('base_path')
+        self.dry_run = state.get('dry_run', False)
+        self.user_request = state.get('user_request')
+        # 不可序列化的字段设置为 None
+        self.memory_manager = None
+        self.learning_manager = None
+        self.step_logger = None
+        self.run_id = None
+        self.execution_context = None
+        self.workspace_manager = None
+
     async def call_skill(self, name: str, params: Dict[str, Any], step_ctx: Optional[StepContext] = None) -> Any:
         skill_cls = skill_registry.get(name)
         if not skill_cls:
@@ -183,13 +212,10 @@ class AvatarMain:
             self.task_planner = task_planner
         elif llm_client is not None:
             from app.avatar.planner.registry import create_planner
-            # Use simple_llm (Blueprint First) by default
+            # 🎯 使用 InteractiveLLMPlanner（ReAct Pattern）
             self.task_planner = create_planner(
-                "simple_llm", 
-                llm_client=llm_client,
-                memory_manager=self.memory_manager,  # 传递 Memory Manager
-                learning_manager=self.learning_manager,  # 传递 Learning Manager
-                use_tool_calling=use_tool_calling  # 传递 tool calling 模式
+                "interactive_llm", 
+                llm_client=llm_client
             )
         else:
             self.task_planner = None
@@ -292,7 +318,7 @@ class AvatarMain:
             
         return ctx
 
-    def run_task(self, task: Task) -> Task:
+    async def run_task(self, task: Task) -> Task:
         from platform import system as get_os
         # 动态获取当前工作目录
         current_workspace = self.base_path
@@ -326,7 +352,7 @@ class AvatarMain:
         # Lifecycle management
         task_ctx.mark_running()
         try:
-            result_task = self.runner.run(task, ctx=caller, state=self.state, skill_guard=self.skill_guard, event_bus=self.event_bus)
+            result_task = await self.runner.run(task, ctx=caller, state=self.state, skill_guard=self.skill_guard, event_bus=self.event_bus)
             
             # Final status update based on runner result
             if result_task.status == TaskStatus.SUCCESS:
@@ -503,8 +529,30 @@ class AvatarMain:
         # 职责下放：让 Planner 自己搜索技能（符合"谁决策，谁搜索"原则）
         # 参考：LangChain, OpenAI Assistants, Semantic Kernel
         
+        # 为 InteractiveLLMPlanner 提供 available_skills
+        available_skills = {}
+        for skill_cls in skill_registry.iter_skills():
+            spec = skill_cls.spec
+            skill_name = spec.api_name or spec.internal_name
+            
+            # 获取参数 schema
+            params_schema = {}
+            if spec.input_model:
+                try:
+                    input_schema = spec.input_model.model_json_schema()
+                    params_schema = input_schema.get("properties", {})
+                except Exception as e:
+                    logger.debug(f"Failed to get params schema for {skill_name}: {e}")
+            
+            available_skills[skill_name] = {
+                "description": spec.description,
+                "params_schema": params_schema
+            }
+        
         return {
             "skill_registry": skill_registry,  # 提供注册表引用，而非预过滤的技能列表
+            "available_skills": available_skills,  # 为 ReAct 模式提供 skill 列表
+            "workspace_path": str(current_workspace),  # 为文件系统扫描提供路径
             "os": system(),
             "default_paths": {"workspace": str(current_workspace)},
         }

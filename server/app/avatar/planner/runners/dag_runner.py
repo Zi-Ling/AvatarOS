@@ -131,6 +131,7 @@ class DagRunner(Planner):
             # 跳过已完成的步骤
             if step.status in (StepStatus.SUCCESS, StepStatus.SKIPPED):
                 logger.debug(f"DagRunner: Skipping step {step.id} (status: {step.status})")
+                # 注意：不再需要重新注入变量，ParameterEngine 会按需从 Task.steps 查找
                 continue
             
             # 检查依赖

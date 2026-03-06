@@ -148,6 +148,47 @@ class TaskService:
         except Exception as e:
             logger.error(f"Failed to persist replan steps for task {task_id}: {e}", exc_info=True)
 
+    def add_step_to_task(self, task_id: str, step: RuntimeStep):
+        """
+        ReAct 模式：动态添加单个步骤到任务的最新 Run。
+        """
+        try:
+            with Session(engine) as session:
+                # 找最新 Run
+                run_stmt = select(Run).where(Run.task_id == task_id).order_by(Run.created_at.desc())
+                run = session.exec(run_stmt).first()
+                if not run:
+                    logger.warning(f"TaskService: No run found for task {task_id}, skipping step add")
+                    return
+
+                # 检查步骤是否已存在
+                existing_step = session.get(Step, step.id)
+                if existing_step:
+                    logger.debug(f"TaskService: Step {step.id} already exists, skipping")
+                    return
+
+                # 获取当前最大 step_index
+                max_idx_stmt = select(Step.step_index).where(Step.run_id == run.id).order_by(Step.step_index.desc())
+                max_idx_row = session.exec(max_idx_stmt).first()
+                next_index = (max_idx_row + 1) if max_idx_row is not None else 0
+
+                # 创建新步骤
+                db_step = Step(
+                    id=step.id,
+                    run_id=run.id,
+                    step_index=next_index,
+                    step_name=step.id,
+                    skill_name=step.skill_name,
+                    status="pending",
+                    input_params=serialize_for_db(step.params),
+                    created_at=datetime.utcnow(),
+                )
+                session.add(db_step)
+                session.commit()
+                logger.debug(f"TaskService: Added step {step.id} to task {task_id}")
+        except Exception as e:
+            logger.error(f"Failed to add step {step.id} to task {task_id}: {e}", exc_info=True)
+
     def complete_run(self, task_id: str, status: str, error: str = None):
         """
         Mark the latest run of a task as completed/failed.

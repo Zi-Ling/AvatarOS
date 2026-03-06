@@ -3,55 +3,43 @@
 """
 Builtin skills package.
 Importing this package registers all builtin skills.
+
+重构原则：技能是"可控边界"，不是"功能目录"
+- 核心边界（core/）：python.run, fs.*, net.*, state.*, memory.*, approval.*
+- 专用边界：computer（GUI 自动化）
+- 降级机制：fallback
 """
 
-# Core V2 Skills
-from . import file  # noqa: F401
-from . import system  # noqa: F401
-from . import web  # noqa: F401
-from . import time  # noqa: F401
-from . import llm  # noqa: F401
+# ============================================================================
+# 核心技能（Core Skills - P0 + P1 + P2）
+# ============================================================================
+from ..core import python  # noqa: F401
+from ..core import fs  # noqa: F401
+from ..core import net  # noqa: F401
+from ..core import state  # noqa: F401
+from ..core import memory  # noqa: F401
+from ..core import approval  # noqa: F401
 
-# Computer Use Skills (GUI Automation)
-from . import computer  # noqa: F401
+# ============================================================================
+# 专用边界（Specialized Boundaries）
+# ============================================================================
+from . import computer  # noqa: F401 (GUI Automation - 真正的边界)
 
-# Extended V2 Skills (Fully Migrated)
-from . import directory  # noqa: F401
-from . import word  # noqa: F401
-from . import excel  # noqa: F401
-from . import text  # noqa: F401
-from . import pdf  # noqa: F401
-from . import http  # noqa: F401
-from . import email  # noqa: F401
-from . import archive  # noqa: F401
-from . import clipboard  # noqa: F401
-from . import csv  # noqa: F401
-from . import json  # noqa: F401
-from . import schedule  # noqa: F401
-from . import python  # noqa: F401
-
-#Fallback Skills
-from . import fallback
+# ============================================================================
+# 降级机制（Fallback Mechanism）
+# ============================================================================
+from . import fallback  # noqa: F401
 
 __all__ = [
-    "file",
-    "system",
-    "web",
-    "time",
-    "llm",  # Added
-    "schedule", # Added
-    "computer",  # Added
-    "directory",
-    "word",
-    "excel",
-    "text",
-    "pdf",
-    "http",
-    "email",
-    "archive",
-    "clipboard",
-    "csv",
-    "json",
-    "python", # Added
+    # Core Boundaries
+    "python",
+    "fs",
+    "net",
+    "state",
+    "memory",
+    "approval",
+    # Specialized Boundaries
+    "computer",
+    # Fallback
     "fallback",
 ]

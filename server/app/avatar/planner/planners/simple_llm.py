@@ -102,6 +102,7 @@ class SimpleLLMPlanner(TaskPlanner):
         self._current_user_message = raw_input or goal
         self._current_intent_label = intent_type
         
+        logger.error(f"🔥🔥🔥 Planner.make_task() CALLED: goal='{goal}', domain={domain}")
         logger.debug(f"Planner: make_task called with goal='{goal}', domain={domain}")
         
         # --- 1. 缓存检查 (v2 接口) ---
@@ -116,6 +117,15 @@ class SimpleLLMPlanner(TaskPlanner):
             
             if instantiated_steps:
                 logger.debug(f"Planner: Successfully instantiated {len(instantiated_steps)} steps from cache")
+                
+                # 🎯 检查缓存返回的 steps 是否为空
+                if len(instantiated_steps) == 0:
+                    logger.error(f"Planner: Cache returned empty steps for goal '{goal}'")
+                    raise RetryablePlanningError(
+                        reason=f"Cache returned empty plan (0 steps) for goal: {goal}",
+                        original_error=None
+                    )
+                
                 # 直接使用实例化的步骤创建任务
                 return self._create_task_from_instantiated_steps(intent, instantiated_steps, from_cache=True)
             else:
@@ -132,8 +142,12 @@ class SimpleLLMPlanner(TaskPlanner):
         # --- 3. 技能选择 ---
         # 简化：不再进行子任务类型过滤或两阶段判断
         allow_dangerous = False
+        subtask_type = None  # 从 metadata 中提取（如果有）
+        
         if hasattr(intent, 'metadata') and intent.metadata:
             allow_dangerous = intent.metadata.get('allow_dangerous_skills', False)
+            # 🎯 修复：恢复 subtask_type 的传递（用于 Prompt 提示，不做强制过滤）
+            subtask_type = intent.metadata.get('subtask_type')
         
         # 优先复用 Router 层的技能搜索结果（避免重复向量搜索）
         router_scored_skills = None
@@ -145,7 +159,7 @@ class SimpleLLMPlanner(TaskPlanner):
             goal,
             raw_input,
             enable_two_stage=False, # 禁用两阶段
-            subtask_type=None,      # 移除类型约束
+            subtask_type=subtask_type,  # 🎯 修复：传递 subtask_type（用于 Prompt 提示）
             allow_dangerous=allow_dangerous,
             router_scored_skills=router_scored_skills,
         )
@@ -194,6 +208,21 @@ class SimpleLLMPlanner(TaskPlanner):
         
         # --- 7. 计划规范化 ---
         normalized_steps = PlanNormalizer.normalize(steps_data)
+        logger.debug(f"Planner: After normalization: {len(normalized_steps)} steps")
+        
+        # --- 7.5. 计划压缩（检测重复操作）---
+        from app.avatar.planner.planners.plan_compressor import get_plan_compressor
+        compressor = get_plan_compressor()
+        normalized_steps = compressor.compress(normalized_steps)
+        logger.debug(f"Planner: After compression: {len(normalized_steps)} steps")
+        
+        # --- 7.6. 检查空计划 ---
+        if not normalized_steps or len(normalized_steps) == 0:
+            logger.error(f"Planner: Generated empty plan for goal '{goal}'")
+            raise RetryablePlanningError(
+                reason=f"Planner generated empty plan (0 steps) for goal: {goal}",
+                original_error=None
+            )
         
         # --- 8. 构建Task ---
         # 注意：缓存写入已移至执行器（executor），只在执行成功后才缓存

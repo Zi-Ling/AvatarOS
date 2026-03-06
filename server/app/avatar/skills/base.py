@@ -48,6 +48,45 @@ class SkillCapability(str, Enum):
     SEARCH = "search"
 
 
+class SkillRiskLevel(str, Enum):
+    """
+    Skill 风险级别（用于执行器选择）
+    
+    - SAFE: 纯计算，无副作用（math, json）
+    - READ: 只读操作（fs.read, web.fetch）
+    - WRITE: 写操作（fs.write, db.insert）
+    - EXECUTE: 代码执行（python.run, shell.exec）
+    - SYSTEM: 系统级操作（process.kill, network.config）
+    """
+    SAFE = "safe"
+    READ = "read"
+    WRITE = "write"
+    EXECUTE = "execute"
+    SYSTEM = "system"
+
+
+class ExecutionClass(str, Enum):
+    """
+    执行器类别（显式声明，用于路由）
+    
+    - AUTO: 自动推导（默认，基于 risk_level）
+    - LOCAL: 本机直接执行（纯计算，无副作用）
+    - PROCESS: 子进程隔离（文件/DB 操作）
+    - WASM_PLUGIN: WASM 插件加速（预编译静态工具）
+    - SANDBOX: 强隔离沙箱（动态代码，Kata/Docker）
+    
+    注意：
+    - AUTO 是默认值，Factory 会根据 risk_level 自动推导
+    - 动态代码（LLM 生成）必须使用 SANDBOX
+    - WASM_PLUGIN 仅用于预编译的静态工具
+    """
+    AUTO = "auto"
+    LOCAL = "local"
+    PROCESS = "process"
+    WASM_PLUGIN = "wasm_plugin"
+    SANDBOX = "sandbox"
+
+
 @dataclass
 class SkillMetadata:
     """
@@ -56,7 +95,8 @@ class SkillMetadata:
     """
     domain: SkillDomain
     capabilities: Set[SkillCapability] = field(default_factory=set)
-    risk_level: str = "normal" # low, normal, high, critical
+    risk_level: SkillRiskLevel = SkillRiskLevel.SAFE  # 默认为 SAFE
+    exec_class: ExecutionClass = ExecutionClass.AUTO  # 默认为 AUTO（自动推导）
     is_generic: bool = False   # True for fallback skills like python.run
     
     # 智能路由权重配置（避免硬编码）

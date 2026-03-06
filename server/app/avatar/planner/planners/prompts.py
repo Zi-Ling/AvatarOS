@@ -33,6 +33,56 @@ SYSTEM_PROMPT = """
     Each step:
     {"id": "s1", "skill": "x.y", "params": {...}, "depends_on": []}
 
+    CORE SKILLS PRIORITY (P0 重构)
+    ----------------
+    优先使用以下核心技能：
+    
+    1. python.run - 计算沙箱（用于批量操作、数据处理、复杂逻辑）
+       - 参数: {"code": "..."}
+       - 适用场景：批量文件操作、数据分析、循环处理、复杂计算
+       - 安全沙箱：只允许 numpy, pandas, matplotlib 等安全模块
+    
+    2. fs.* - 文件系统边界（文本优先，20MB限制）
+       - fs.read: {"path": "...", "encoding": "utf-8", "mode": "text"}
+       - fs.write: {"path": "...", "content": "...", "encoding": "utf-8", "mode": "text", "append": false}
+       - fs.list: {"path": ".", "recursive": false}
+       - fs.delete: {"path": "...", "recursive": false}
+       - fs.move: {"src": "...", "dst": "..."}
+       - fs.copy: {"src": "...", "dst": "...", "overwrite": false}
+       - 注意：path 参数统一，支持相对路径和绝对路径
+       - 默认文本模式，二进制需显式 mode="binary"
+    
+    3. net.* - 网络边界
+       - net.get: {"url": "...", "params_json": "{...}", "headers_json": "{...}", "timeout": 30}
+       - net.post: {"url": "...", "body_json": "{...}", "headers_json": "{...}", "timeout": 30}
+    
+    4. state.* - 短期状态管理（跨步骤数据共享）
+       - state.set: {"scope": "task|session|user", "key": "...", "value": ..., "ttl_seconds": null}
+       - state.get: {"scope": "task|session|user", "key": "...", "default": null}
+       - state.delete: {"scope": "task|session|user", "key": "..."}
+       - 适用场景：任务内计数器、会话临时数据、用户偏好设置
+       - scope 说明：task（单次任务）、session（对话会话）、user（跨会话持久化）
+    
+    5. memory.* - 长期记忆管理（向量库，跨会话持久化）
+       - memory.store: {"content": "...", "metadata": {...}, "memory_id": null}
+       - memory.search: {"query": "...", "limit": 5, "filter_metadata": {...}}
+       - memory.delete: {"memory_id": "..."}
+       - 适用场景：用户偏好、历史对话摘要、知识库、跨会话上下文
+       - 使用向量相似度搜索，支持语义检索
+    
+    6. approval.* - 人工审批（敏感操作需要用户确认）
+       - approval.request: {"message": "...", "operation": "...", "details": {...}, "timeout_seconds": 60}
+       - 适用场景：删除重要文件、发送邮件、执行危险命令
+       - 幂等协议：相同 request_id 只会创建一次审批请求
+
+    SKILL SELECTION RULES (倾向规则)
+    ----------------
+    - 批量操作（多个文件、循环处理）→ 优先 python.run
+    - 单步简单读写 → 优先 fs.read / fs.write
+    - 数据分析、可视化 → 必须 python.run
+    - 网络请求 → 必须 net.get / net.post
+    - 复杂逻辑（条件判断、循环）→ 必须 python.run
+
     RULES
     ----------------
     1. One step = one skill call.
@@ -45,7 +95,9 @@ SYSTEM_PROMPT = """
     PARAMETER RULES (CRITICAL)
     ----------------
     - Use EXACTLY the parameter names defined in AVAILABLE SKILLS.
-    - NEVER invent keys (e.g., no "file_path", "path" if spec says "relative_path").
+    - fs.* 技能统一使用 "path" 参数（不是 relative_path, file_path, abs_path）
+    - python.run 使用 "code" 参数（不是 command, script）
+    - net.* 使用 "url" 参数
     - MUST include ALL required parameters listed for the skill.
     - If required parameters are missing from the user input, you MUST infer them from:
         (1) the task goal,
@@ -59,32 +111,43 @@ SYSTEM_PROMPT = """
     STEP REFERENCE SYNTAX (for multi-step tasks)
     ----------------
     When a later step needs the output of an earlier step, use:
-      {{step_id.field}}
+      {{step_id.output}}
+    
+    ALL skills now have a standardized "output" field that contains the primary result.
+    
     Examples:
-      - Step s1 runs llm.generate_text → output field is "text"
-        → Reference in s2: "content": "{{s1.text}}"
-      - Step s1 runs file.read → output field is "content"
-        → Reference in s2: "text": "{{s1.content}}"
-      - Step s1 runs python.run → output field is "output"
-        → Reference in s2: "data": "{{s1.output}}"
+      - Step s1 runs python.run → Reference: "data": "{{s1.output}}"
+      - Step s1 runs fs.read → Reference: "content": "{{s1.output}}"
+      - Step s1 runs fs.write → Reference: "path": "{{s1.output}}"
+      - Step s1 runs net.get → Reference: "response": "{{s1.output}}"
+      - Step s1 runs state.get → Reference: "value": "{{s1.output}}"
+      - Step s1 runs memory.search → Reference: "results": "{{s1.output}}"
+    
     RULES:
+      - ALWAYS use {{step_id.output}} format (NOT {{step_id.result}}, {{step_id.stdout}}, {{step_id.content}}, etc.)
       - The step_id must match the "id" of the earlier step exactly.
-      - The field must be an output field of that skill (check skill description).
       - depends_on MUST include the referenced step_id.
       - NEVER write placeholder text like "The content from step X goes here".
       - NEVER leave content empty when a prior step produced it.
 
-    For writing a text file, use: {"skill":"file.write","params":{"relative_path":"<name>","content":"<text>"}}
-    For reading a text file, use: {"skill":"file.read","params":{"relative_path":"<name>"}} (prefer relative_path when filename is given)
+    fs.* FORMAT EXAMPLES
+    ----------------
+    - Read file: {"skill":"fs.read","params":{"path":"README.md"}}
+    - Write file: {"skill":"fs.write","params":{"path":"output.txt","content":"Hello World"}}
+    - List dir: {"skill":"fs.list","params":{"path":"."}}
+    - Delete file: {"skill":"fs.delete","params":{"path":"temp.txt"}}
+    - Move file: {"skill":"fs.move","params":{"src":"old.txt","dst":"new.txt"}}
  
-    python.run RULES
+    python.run RULES (CRITICAL - 批量操作必读)
     ----------------
     - Use ONLY when no built-in skill suffices.
-    - MUST use {"code": "..."} (never "cmd").
-    - Use print() for output.
-    - USE python.run for batch/loop operations (e.g., rename all files, process multiple items).
-      Do NOT try to reference array elements like {{step.items[0]}} across multiple steps.
-      Instead, write a single python.run step that loops over the list.
+    - MUST use {"code": "..."} (never "cmd", "command", "script").
+    - Use print() for output, assign to "result" variable for return value.
+    - BATCH OPERATIONS: 当任务涉及多个文件或循环处理时，必须使用单个 python.run 步骤
+      Example: 批量重命名文件
+      {"id":"s1","skill":"python.run","params":{"code":"import os\\nfor f in os.listdir('.'):\\n    if f.endswith('.txt'):\\n        os.rename(f, '1_' + f)\\nprint('done')"},"depends_on":[]}
+    - Do NOT try to reference array elements like {{step.items[0]}} across multiple steps.
+    - 沙箱限制：不能使用 os.system, subprocess, socket 等危险模块
 
     CONTENT HANDLING
     ----------------
@@ -473,11 +536,14 @@ def build_replan_prompt(task: Any, failed_step: Any, error_msg: str, available_s
         outputs_block = f"""
 AVAILABLE OUTPUTS FROM SUCCESSFUL STEPS
 ----------------------------------------
-Use {{{{step_id.field}}}} syntax to reference these in your new steps.
-{json.dumps(successful_outputs, ensure_ascii=False, indent=2)}
+Use {{{{step_id.output}}}} syntax to reference these in your new steps.
+All skills now have a standardized "output" field containing the primary result.
 
-EXAMPLE: If step s1 succeeded with field "text", use: "content": "{{{{s1.text}}}}"
-NEVER write placeholder text. ALWAYS use the reference syntax above.
+Successful steps:
+{json.dumps([{"step_id": s["step_id"], "skill": s["skill"]} for s in successful_outputs], ensure_ascii=False, indent=2)}
+
+EXAMPLE: If step s1 succeeded, use: "content": "{{{{s1.output}}}}"
+NEVER write placeholder text. ALWAYS use the {{{{step_id.output}}}} syntax.
 """
 
     return f"""

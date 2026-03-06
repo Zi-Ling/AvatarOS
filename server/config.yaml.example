@@ -1,0 +1,142 @@
+# AvatarOS 配置文件示例
+# 复制此文件到 ~/.avatarOS/config.yaml 并根据需要修改
+
+# 文件系统技能配置
+fs:
+  # 允许访问的路径（支持通配符）
+  allowed_paths:
+    - ~/Documents
+    - ~/Desktop
+    - ~/Projects
+    - ~/Downloads
+  
+  # 禁止访问的路径（优先级高于 allowed_paths）
+  forbidden_paths:
+    - ~/.ssh
+    - ~/.aws
+    - ~/.config
+    - /etc
+    - /sys
+    - /proc
+  
+  # 最大文件大小（MB）
+  max_file_size_mb: 20
+  
+  # 默认文本编码
+  default_encoding: utf-8
+
+# 网络技能配置
+net:
+  # 允许访问的域名（支持通配符）
+  allowed_domains:
+    - "*.github.com"
+    - "*.githubusercontent.com"
+    - "api.openai.com"
+    - "*.deepseek.com"
+    - "*.google.com"
+    - "*.stackoverflow.com"
+  
+  # 禁止访问的域名（优先级高于 allowed_domains）
+  forbidden_domains:
+    - localhost
+    - "127.0.0.1"
+    - "192.168.*"
+    - "10.*"
+    - "172.16.*"
+  
+  # 请求超时（秒）
+  timeout: 30
+  
+  # 最大重定向次数
+  max_redirects: 5
+
+# Python 沙箱配置
+python:
+  # 执行超时（秒）
+  timeout: 30
+  
+  # 最大内存使用（MB）
+  max_memory_mb: 512
+  
+  # 允许的内置函数
+  allowed_builtins:
+    - print
+    - len
+    - range
+    - enumerate
+    - zip
+    - map
+    - filter
+    - sorted
+    - sum
+    - min
+    - max
+    - abs
+    - round
+  
+  # 允许的模块
+  allowed_modules:
+    - math
+    - datetime
+    - json
+    - re
+    - collections
+    - itertools
+
+# 审批配置
+approval:
+  # 自动批准低风险操作
+  auto_approve_low_risk: true
+  
+  # 低风险操作列表
+  low_risk_operations:
+    - read_file
+    - list_directory
+    - search_web
+  
+  # 默认超时时间（秒）
+  timeout: 60
+  
+  # 是否启用审批功能
+  enabled: true
+
+# 状态管理配置
+state:
+  # 默认 TTL（秒）
+  default_ttl: 3600
+  
+  # 自动清理过期状态的间隔（秒）
+  cleanup_interval: 300
+
+# 记忆管理配置
+memory:
+  # 向量库类型（chromadb | qdrant）
+  vector_db: chromadb
+  
+  # 搜索结果数量限制
+  default_limit: 5
+  
+  # 相似度阈值（0-1）
+  similarity_threshold: 0.7
+
+# 审计日志配置
+audit:
+  # 是否启用审计日志
+  enabled: true
+  
+  # 日志保留天数
+  retention_days: 30
+  
+  # 自动清理间隔（秒）
+  cleanup_interval: 86400
+
+# 计划压缩器配置
+plan_compressor:
+  # 是否启用
+  enabled: true
+  
+  # 重复操作阈值（触发警告）
+  repeat_threshold: 3
+  
+  # 是否自动重写计划（当前版本建议设为 false）
+  auto_rewrite: false

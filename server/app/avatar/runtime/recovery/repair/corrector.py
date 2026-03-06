@@ -36,7 +36,8 @@ class SelfCorrector:
         self,
         step: Any,
         error_msg: str,
-        task_goal: str = ""
+        task_goal: str = "",
+        task_context: Any = None
     ) -> bool:
         """
         尝试自我修复
@@ -45,6 +46,7 @@ class SelfCorrector:
             step: 失败的步骤对象
             error_msg: 错误消息
             task_goal: 任务目标（用于上下文）
+            task_context: TaskContext（用于存储 repair 状态）
         
         Returns:
             是否修复成功
@@ -73,7 +75,8 @@ class SelfCorrector:
             repair_result = await self.repair_manager.attempt_repair(
                 step=step,
                 error_msg=error_msg,
-                task_goal=task_goal
+                task_goal=task_goal,
+                task_context=task_context
             )
             
             if repair_result.success:

@@ -3,6 +3,7 @@
 import { MainShell } from "@/components/layouts/MainShell";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToastStore } from "@/lib/hooks/useToast";
+import ApprovalDialog from "@/components/ui/ApprovalDialog";
 
 export default function ModelsLayout({
   children,
@@ -15,6 +16,7 @@ export default function ModelsLayout({
     <>
       <MainShell>{children}</MainShell>
       <ToastContainer toasts={toasts} onClose={removeToast} />
+      <ApprovalDialog />
     </>
   );
 }

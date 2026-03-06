@@ -42,6 +42,7 @@ class AppBootstrap:
         llm_client = self._init_llm_client(llm_logger)
         self._init_embedding()
         self._warmup_skills()
+        self._warmup_executors()  # 新增：预热执行器
         self._warmup_classifier()
         self._init_runtime(llm_client)
         self._init_router(llm_client, llm_logger)
@@ -167,6 +168,19 @@ class AppBootstrap:
             logger.info("  ✅ 技能选择器已就绪")
         except Exception as e:
             logger.warning(f"  ⚠️ 技能选择器初始化失败: {e}")
+    
+    def _warmup_executors(self):
+        """预热执行器（避免首次执行延迟）"""
+        logger.info("🔥 预热执行器...")
+        from app.avatar.runtime.executor import ExecutorFactory
+        
+        start_time = time.time()
+        try:
+            ExecutorFactory.preload_executors()
+            elapsed = (time.time() - start_time) * 1000
+            logger.info(f"  ✅ 执行器预热完成，耗时 {elapsed:.0f}ms")
+        except Exception as e:
+            logger.warning(f"  ⚠️ 执行器预热失败: {e}")
 
     def _warmup_classifier(self):
         logger.info("🔥 预热能力分类器...")

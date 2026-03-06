@@ -45,10 +45,10 @@ export function TaskEventListener() {
       
       // --- 鲁棒性修复: Fallback 机制 ---
       // 如果 currentTaskMessageId 为空，但在任务相关事件中，
-      // 我们尝试寻找最后一条 "正在流式传输" 的 Assistant 消息。
+      // 我们尝试寻找最后一条 Assistant 消息（不要求 isStreaming）
       if (!currentTaskMessageId && (type.startsWith('plan.') || type.startsWith('step.') || type.startsWith('task.'))) {
           const lastMsg = messages[messages.length - 1];
-          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.isStreaming) {
+          if (lastMsg && lastMsg.role === 'assistant') {
               console.warn(`⚠️ TaskEventListener: Recovered lost task ID: ${lastMsg.id} for event ${type}`);
               currentTaskMessageId = lastMsg.id;
               setCurrentTaskMessageId(lastMsg.id); // Restore state
@@ -191,10 +191,11 @@ export function TaskEventListener() {
       // 3. 步骤结束（兼容 step.end 和 subtask.complete）
       if ((type === 'step.end' || type === 'subtask.complete') && (event.step_id || payload.subtask_id)) {
         const stepId = payload.subtask_id || event.step_id;
+        
         // 更新全局 Task
         updateStep(stepId, { 
             status: 'completed',
-            output_result: payload.result
+            output_result: payload.raw_output || payload.result  // 优先使用 raw_output
         });
 
         if (currentTaskMessageId) {
@@ -204,7 +205,7 @@ export function TaskEventListener() {
                     step.id == stepId ? { 
                         ...step, 
                         status: 'completed' as const,
-                        output_result: payload.result
+                        output_result: payload.raw_output || payload.result  // 同样需要传递 output_result
                     } : step
                 );
                 const completedCount = updatedSteps.filter(s => s.status === 'completed').length;

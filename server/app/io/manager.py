@@ -38,6 +38,7 @@ class SocketManager:
         self.server.on('disconnect', self.on_disconnect)
         self.server.on('request_missed_events', self.on_request_missed_events)
         self.server.on('cancel_task', self.on_cancel_task)
+        self.server.on('approval_response', self.on_approval_response)
 
     @classmethod
     def get_instance(cls) -> 'SocketManager':
@@ -132,6 +133,51 @@ class SocketManager:
             
         except Exception as e:
             logger.error(f"❌ [SocketManager] 处理取消请求失败: {e}", exc_info=True)
+    
+    async def on_approval_response(self, sid, data):
+        """
+        处理客户端审批响应
+        data: {"request_id": "xxx", "approved": bool, "user_comment": "xxx"}
+        """
+        try:
+            from app.services.approval_service import get_approval_service
+            
+            request_id = data.get("request_id")
+            approved = data.get("approved", False)
+            user_comment = data.get("user_comment")
+            
+            logger.info(f"✅ [SocketManager] 收到审批响应 - Client: {sid}, Request: {request_id}, Approved: {approved}")
+            
+            service = get_approval_service()
+            success = service.respond(
+                request_id=request_id,
+                approved=approved,
+                user_comment=user_comment
+            )
+            
+            if success:
+                # 发送审批确认事件
+                await self.emit("server_event", {
+                    "type": "approval.responded",
+                    "payload": {
+                        "request_id": request_id,
+                        "approved": approved,
+                        "message": "审批已处理"
+                    }
+                })
+                logger.info(f"✅ [SocketManager] 审批响应已处理")
+            else:
+                logger.warning(f"⚠️ [SocketManager] 审批响应失败 - Request: {request_id}")
+                await self.emit("server_event", {
+                    "type": "approval.error",
+                    "payload": {
+                        "request_id": request_id,
+                        "message": "审批请求不存在或已过期"
+                    }
+                })
+            
+        except Exception as e:
+            logger.error(f"❌ [SocketManager] 处理审批响应失败: {e}", exc_info=True)
 
     async def emit(self, event: str, data: dict, room: str = None):
         """

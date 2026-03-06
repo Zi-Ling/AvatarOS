@@ -114,6 +114,7 @@ class AgentLoop:
             memory_manager=memory_manager,
             learning_logger=learning_logger,
             event_bus=event_bus,
+            llm_client=llm_client,  # 🎯 传递 llm_client，让 CompositeExecutor 创建 SimpleLLMPlanner
         ) if self._orchestration_service else None
         
         self._self_corrector = SelfCorrector(
@@ -126,11 +127,11 @@ class AgentLoop:
             max_replan_attempts=config.max_replan_attempts
         )
 
-    async def _attempt_self_correction(self, step: Step, error_msg: str, task_goal: str = "") -> bool:
+    async def _attempt_self_correction(self, step: Step, error_msg: str, task_goal: str = "", task_context: Any = None) -> bool:
         """委托给 SelfCorrector"""
         if not self._self_corrector:
             return False
-        return await self._self_corrector.attempt_correction(step, error_msg, task_goal)
+        return await self._self_corrector.attempt_correction(step, error_msg, task_goal, task_context)
 
     async def run(self, user_request: str | IntentSpec, env_context: dict) -> AgentLoopResult:
         """
@@ -224,8 +225,12 @@ class AgentLoop:
 
         task.metadata["user_request"] = raw_request_text
         
-        safe_plan = _sanitize_task_for_event(task)
-        self._emit_event(EventType.PLAN_GENERATED, payload={"plan": safe_plan, "goal": task.goal, "step_count": len(task.steps)})
+        # ReAct 模式：只在有步骤时才发送 PLAN_GENERATED 事件
+        if task.steps:
+            safe_plan = _sanitize_task_for_event(task)
+            self._emit_event(EventType.PLAN_GENERATED, payload={"plan": safe_plan, "goal": task.goal, "step_count": len(task.steps)})
+        else:
+            logger.info("[AgentLoop] ReAct mode: No initial plan, will generate steps dynamically")
 
         # --- Task History: Persist Initial Plan ---
         try:
@@ -250,12 +255,15 @@ class AgentLoop:
         context.mark_running()
         
         iteration = 0
-        replan_count = 0
-        max_replan_attempts = config.max_replan_attempts
+        consecutive_failures = 0  # 连续失败计数器
+        max_consecutive_failures = 3  # 连续失败 3 次就放弃
         max_total_iterations = 50 
         
         # 获取取消事件
         cancel_event = env_context.get("cancel_event")
+        
+        # 检测是否为 ReAct 模式（初始步骤为空）
+        is_react_mode = len(task.steps) == 0
         
         while iteration < max_total_iterations:
             iteration += 1
@@ -284,47 +292,83 @@ class AgentLoop:
                 except Exception as e:
                     logger.warning(f"Perception failed: {e}")
             
-            # Identify next pending steps
-            pending_steps = [s for s in task.steps if s.status == StepStatus.PENDING]
-            
-            if not pending_steps:
-                # All done?
-                if any(s.status == StepStatus.FAILED for s in task.steps):
+            # === ReAct 模式：动态生成下一步 ===
+            if is_react_mode:
+                try:
+                    logger.info(f"[AgentLoop] Generating next step (iteration {iteration})...")
+                    next_step = await self._planner.next_step(task, env_context)
+                    
+                    if next_step is None:
+                        # 任务完成
+                        logger.info("[AgentLoop] Planner returned None, task finished")
+                        task.status = TaskStatus.SUCCESS
+                        context.mark_finished("SUCCESS")
+                        break
+                    
+                    # 添加新步骤到任务
+                    task.steps.append(next_step)
+                    logger.info(f"[AgentLoop] Generated step: {next_step.skill_name} - {next_step.description[:50]}...")
+                    
+                    # 持久化新步骤
+                    try:
+                        db_task_id = task.metadata.get("intent_id") or task.id
+                        task_service.add_step_to_task(db_task_id, next_step)
+                    except Exception as db_err:
+                        logger.warning(f"Failed to persist new step: {db_err}")
+                    
+                    step_to_run = next_step
+                    step_index = len(task.steps) - 1
+                    
+                except Exception as e:
+                    logger.error(f"[AgentLoop] Failed to generate next step: {e}")
+                    logger.error(traceback.format_exc())
                     task.status = TaskStatus.FAILED
                     context.mark_finished("FAILED")
-                else:
-                    task.status = TaskStatus.SUCCESS
-                    context.mark_finished("SUCCESS")
-                break
-
-            step_to_run = pending_steps[0]
-            
-            # Find index for DagRunner
-            step_index = task.steps.index(step_to_run)
-            
-            # Check dependencies
-            can_run = True
-            for dep_id in step_to_run.depends_on:
-                dep = next((s for s in task.steps if s.id == dep_id), None)
-                if not dep or dep.status != StepStatus.SUCCESS:
-                    can_run = False
                     break
             
-            if not can_run:
-                dep_failed = any(
-                    next((s for s in task.steps if s.id == dep_id), None).status == StepStatus.FAILED
-                    for dep_id in step_to_run.depends_on
-                    if next((s for s in task.steps if s.id == dep_id), None) is not None
-                )
-                if dep_failed:
-                    # 依赖步骤已失败 → 标记当前步骤为 FAILED，让 replan 逻辑处理
-                    step_to_run.status = StepStatus.FAILED
-                    step_to_run.result = StepResult(
-                        success=False,
-                        error=f"Dependency failed: {[d for d in step_to_run.depends_on]}"
+            # === 传统模式：从 pending 步骤中选择 ===
+            else:
+                # Identify next pending steps
+                pending_steps = [s for s in task.steps if s.status == StepStatus.PENDING]
+                
+                if not pending_steps:
+                    # All done?
+                    if any(s.status == StepStatus.FAILED for s in task.steps):
+                        task.status = TaskStatus.FAILED
+                        context.mark_finished("FAILED")
+                    else:
+                        task.status = TaskStatus.SUCCESS
+                        context.mark_finished("SUCCESS")
+                    break
+
+                step_to_run = pending_steps[0]
+                
+                # Find index for DagRunner
+                step_index = task.steps.index(step_to_run)
+                
+                # Check dependencies
+                can_run = True
+                for dep_id in step_to_run.depends_on:
+                    dep = next((s for s in task.steps if s.id == dep_id), None)
+                    if not dep or dep.status != StepStatus.SUCCESS:
+                        can_run = False
+                        break
+                
+                if not can_run:
+                    dep_failed = any(
+                        next((s for s in task.steps if s.id == dep_id), None).status == StepStatus.FAILED
+                        for dep_id in step_to_run.depends_on
+                        if next((s for s in task.steps if s.id == dep_id), None) is not None
                     )
-                else:
-                    break 
+                    if dep_failed:
+                        # 依赖步骤已失败 → 标记当前步骤为 FAILED，让 replan 逻辑处理
+                        step_to_run.status = StepStatus.FAILED
+                        step_to_run.result = StepResult(
+                            success=False,
+                            error=f"Dependency failed: {[d for d in step_to_run.depends_on]}"
+                        )
+                    else:
+                        break 
 
             try:
                 task_service.update_step_status(step_to_run.id, "running")
@@ -347,6 +391,24 @@ class AgentLoop:
                 error_str = step_to_run.result.error if step_to_run.result else None
                 
                 task_service.update_step_status(step_to_run.id, status_str, result=result_dict, error=error_str)
+                
+                # Audit logging: 记录步骤执行
+                try:
+                    from app.services.audit_service import get_audit_service
+                    audit_service = get_audit_service()
+                    audit_service.log(
+                        skill_name=step_to_run.skill_name,
+                        operation=step_to_run.skill_name,
+                        result="success" if step_to_run.status == StepStatus.SUCCESS else "failed",
+                        task_id=task.id,
+                        details={
+                            "step_id": step_to_run.id,
+                            "params": step_to_run.params,
+                            "error": error_str
+                        }
+                    )
+                except Exception as audit_err:
+                    logger.warning(f"Failed to log audit: {audit_err}")
                 
                 if self._state_store:
                     self._state_store.save_task(task)
@@ -410,7 +472,7 @@ class AgentLoop:
                     error_msg = step_to_run.result.error if step_to_run.result else "Unknown error"
                     task_goal = task.goal if hasattr(task, 'goal') else "Unknown task"
                     
-                    fixed = await self._attempt_self_correction(step_to_run, error_msg, task_goal)
+                    fixed = await self._attempt_self_correction(step_to_run, error_msg, task_goal, context)
                     
                     if fixed:
                         step_to_run.status = StepStatus.PENDING
@@ -419,7 +481,26 @@ class AgentLoop:
                         self._emit_event(EventType.TASK_UPDATED, payload={"task": _sanitize_task_for_event(task)})
                         continue
 
-            # Re-Planning Phase
+            # === ReAct 模式：简化失败处理 ===
+            if is_react_mode:
+                if step_to_run.status == StepStatus.FAILED:
+                    consecutive_failures += 1
+                    logger.warning(f"[AgentLoop] Step failed (consecutive failures: {consecutive_failures}/{max_consecutive_failures})")
+                    
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.error(f"[AgentLoop] Max consecutive failures reached, giving up")
+                        task.status = TaskStatus.FAILED
+                        context.mark_finished("FAILED")
+                        break
+                    
+                    # 继续循环，让 next_step() 看到失败的 Observation 并生成修复步骤
+                    continue
+                else:
+                    # 成功，重置连续失败计数器
+                    consecutive_failures = 0
+                    continue
+            
+            # === 传统模式：Re-Planning Phase ===
             if step_to_run.status == StepStatus.FAILED:
                 if replan_count >= max_replan_attempts:
                     logger.warning(f"Step {step_to_run.id} failed. Max replan attempts ({max_replan_attempts}) reached. Giving up.")
@@ -527,6 +608,8 @@ class AgentLoop:
 
         if self._learning_logger:
             log_request = intent.goal if intent else (user_request if isinstance(user_request, str) else str(user_request))
+            # 传统模式才有 replan_count
+            replan_count = 0 if is_react_mode else locals().get('replan_count', 0)
             self._learning_logger.record(
                 user_request=log_request,
                 plan=task,
@@ -534,7 +617,8 @@ class AgentLoop:
                     "iterations": iteration, 
                     "final_status": task.status.name,
                     "replan_count": replan_count,
-                    "self_corrected": replan_count > 0
+                    "self_corrected": replan_count > 0,
+                    "mode": "react" if is_react_mode else "traditional"
                 }
             )
         
@@ -548,6 +632,9 @@ class AgentLoop:
                     failed_steps = [s for s in task.steps if s.status == StepStatus.FAILED]
                     task_summary += f" | Failed at {len(failed_steps)} step(s)"
                 
+                # 传统模式才有 replan_count
+                replan_count = 0 if is_react_mode else locals().get('replan_count', 0)
+                
                 self._memory_manager.remember_task_run(
                     task_id=task.id,
                     status=task.status.name,
@@ -560,7 +647,8 @@ class AgentLoop:
                         "step_count": len(task.steps),
                         "replan_count": replan_count,
                         "execution_time": execution_time,
-                        "user_request": raw_request_text
+                        "user_request": raw_request_text,
+                        "mode": "react" if is_react_mode else "traditional"
                     }
                 )
                 logger.info(f"✅ Task memory recorded: {task.id}")
@@ -569,6 +657,9 @@ class AgentLoop:
         
         if self._learning_manager:
             try:
+                # 传统模式才有 replan_count
+                replan_count = 0 if is_react_mode else locals().get('replan_count', 0)
+                
                 self._learning_manager.on_task_finished(
                     task_id=task.id,
                     user_id=None,
@@ -577,7 +668,8 @@ class AgentLoop:
                     extra={
                         "steps": [s.skill_name for s in task.steps],
                         "replan_count": replan_count,
-                        "success": task.status == TaskStatus.SUCCESS
+                        "success": task.status == TaskStatus.SUCCESS,
+                        "mode": "react" if is_react_mode else "traditional"
                     }
                 )
             except Exception as learn_err:

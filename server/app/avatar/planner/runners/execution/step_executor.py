@@ -227,14 +227,31 @@ class StepExecutor:
         params: dict
     ) -> tuple[bool, Optional[str]]:
         """
-        执行技能
+        执行技能（使用 ExecutorFactory 智能路由）
         
         Returns:
             (成功标志, 错误消息)
         """
         try:
-            # 调用技能
-            output = await ctx.call_skill(step.skill_name, params, step_ctx=step_ctx)
+            # 获取 Skill 类和实例
+            skill_cls = skill_registry.get(step.skill_name)
+            if not skill_cls:
+                raise ValueError(f"Skill not found: {step.skill_name}")
+            
+            skill_instance = skill_cls()
+            
+            # 验证并转换输入参数
+            input_model = skill_cls.spec.input_model
+            validated_input = input_model(**params)
+            
+            # 使用 ExecutorFactory 选择执行器
+            from app.avatar.runtime.executor import ExecutorFactory
+            executor = ExecutorFactory.get_executor(skill_instance)
+            
+            logger.debug(f"[StepExecutor] Executing {step.skill_name} with {executor.__class__.__name__}")
+            
+            # 执行
+            output = await executor.execute(skill_instance, validated_input, ctx)
             
             # 判断成功
             is_success = True
@@ -245,8 +262,10 @@ class StepExecutor:
             elif isinstance(output, dict) and "success" in output:
                 is_success = output["success"]
             
-            # 转换输出为字典
-            if hasattr(output, "dict"):
+            # 转换输出为字典（Pydantic v2 使用 model_dump）
+            if hasattr(output, "model_dump"):
+                output = output.model_dump()
+            elif hasattr(output, "dict"):
                 output = output.dict()
             
             # 提取错误消息

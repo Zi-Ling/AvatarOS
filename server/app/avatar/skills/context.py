@@ -111,3 +111,37 @@ class SkillContext:
             uri=uri,
             meta=metadata or {}
         )
+
+    # =========================
+    # Serialization Support (for ProcessExecutor)
+    # =========================
+
+    def __getstate__(self):
+        """
+        自定义序列化：排除不可序列化的对象
+        
+        ProcessExecutor 需要通过 pickle 传递 SkillContext 到子进程。
+        我们只保留可序列化的字段（base_path, dry_run, extra）。
+        """
+        state = {
+            'base_path': self.base_path,
+            'dry_run': self.dry_run,
+            'extra': self.extra,
+            # 不序列化：memory_manager, learning_manager, execution_context
+        }
+        return state
+
+    def __setstate__(self, state):
+        """
+        自定义反序列化：恢复可序列化的字段
+        
+        不可序列化的字段（memory_manager 等）在子进程中设置为 None。
+        这是安全的，因为子进程中的 Skill 不应该依赖这些运行时对象。
+        """
+        self.base_path = state.get('base_path')
+        self.dry_run = state.get('dry_run', False)
+        self.extra = state.get('extra', {})
+        # 不可序列化的字段设置为 None
+        self.memory_manager = None
+        self.learning_manager = None
+        self.execution_context = None

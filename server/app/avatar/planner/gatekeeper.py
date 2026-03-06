@@ -167,14 +167,28 @@ class ExecutionGatekeeper:
                 logger.info(f"[Gatekeeper] Uncovered FILE domain dangerous action, blocking python.run for safety")
                 return False
         
-        # 6. 🆕 分数评估（收紧策略：有专用技能就拒绝 python.run）
+        # 6. 🆕 分数评估（智能策略：检查专用技能是否真的适合）
         if match_score < min_threshold:
             # 检查是否有其他可用的专用技能
             if specialized_skills:
-                # 🎯 [防止 python.run 乱入] 步骤2：有专用技能时，直接拒绝低分的 python.run
+                # 🎯 检查专用技能的匹配分数
+                # 如果所有专用技能的分数都很低，说明它们也不适合，应该允许 python.run
+                best_specialized_score = 0.0
+                for skill_name, spec in specialized_skills:
+                    spec_score = ExecutionGatekeeper.calculate_skill_match_score(intent, spec)
+                    best_specialized_score = max(best_specialized_score, spec_score)
+                
+                # 如果最好的专用技能分数也很低（< 0.4），说明没有真正适合的专用技能
+                if best_specialized_score < 0.4:
+                    logger.warning(f"[Gatekeeper] python.run score low ({match_score:.2f}), "
+                          f"but best specialized skill score also low ({best_specialized_score:.2f}), "
+                          f"allowing python.run as fallback")
+                    return True
+                
+                # 有高分的专用技能，拒绝 python.run
                 logger.info(f"[Gatekeeper] python.run score low ({match_score:.2f} < {min_threshold:.2f}), "
-                      f"and {len(specialized_skills)} specialized skill(s) available, blocking python.run")
-                return False  # ✅ 修改：不再允许作为 fallback
+                      f"and {len(specialized_skills)} specialized skill(s) available (best: {best_specialized_score:.2f}), blocking python.run")
+                return False
             else:
                 # 没有专用技能，python.run 是唯一选择
                 logger.warning(f"[Gatekeeper] python.run score low ({match_score:.2f} < {min_threshold:.2f}), "

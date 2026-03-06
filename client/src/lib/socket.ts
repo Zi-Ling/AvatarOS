@@ -20,6 +20,20 @@ export const getSocket = (): Socket => {
     });
     
     console.log("🔌 Socket instance created pointing to:", URL);
+    
+    // 注册审批事件监听器
+    socket.on("approval_request", (data) => {
+      console.log("📋 Approval request received:", data);
+      // 事件会被 ApprovalDialog 组件监听
+    });
+    
+    socket.on("approval.responded", (data) => {
+      console.log("✅ Approval responded:", data);
+    });
+    
+    socket.on("approval.error", (data) => {
+      console.error("❌ Approval error:", data);
+    });
   }
   return socket;
 };

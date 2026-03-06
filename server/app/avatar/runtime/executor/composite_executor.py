@@ -51,13 +51,14 @@ class CompositeTaskExecutor(BaseExecutor):
         memory_manager: Optional[Any] = None,
         learning_logger: Optional[Any] = None,
         event_bus: Optional[Any] = None,
+        llm_client: Optional[Any] = None,
     ):
         """
         初始化执行器
         
         Args:
             orchestration_service: 编排服务（核心依赖）
-            planner: 任务规划器
+            planner: 任务规划器（AgentLoop 传入的，可能是 InteractiveLLMPlanner）
             dag_runner: DAG 执行器
             skill_context: 技能上下文
             skill_guard: 技能守卫
@@ -65,10 +66,10 @@ class CompositeTaskExecutor(BaseExecutor):
             memory_manager: 记忆管理器
             learning_logger: 学习日志记录器
             event_bus: 事件总线
+            llm_client: LLM 客户端（用于创建 SimpleLLMPlanner）
         """
         super().__init__(event_bus=event_bus)
         self._orchestration = orchestration_service
-        self._planner = planner
         self._dag_runner = dag_runner
         self._skill_context = skill_context
         self._skill_guard = skill_guard
@@ -76,11 +77,30 @@ class CompositeTaskExecutor(BaseExecutor):
         self._memory_manager = memory_manager
         self._learning_logger = learning_logger
         
+        # 🎯 架构优化：CompositeExecutor 使用独立的 SimpleLLMPlanner
+        # 原因：
+        # 1. 编排任务的子任务有显式依赖关系（depends_on），不需要动态探索
+        # 2. SimpleLLMPlanner 一次性规划所有步骤，性能更好
+        # 3. AgentLoop 继续使用 InteractiveLLMPlanner（ReAct）处理任务间隐式依赖
+        if llm_client and memory_manager:
+            from app.avatar.planner.registry import create_planner
+            self._planner = create_planner(
+                "simple_llm",
+                llm_client=llm_client,
+                memory_manager=memory_manager,
+                learning_manager=None  # CompositeExecutor 不需要 learning_manager
+            )
+            logger.info("[CompositeExecutor] Created SimpleLLMPlanner for subtask planning")
+        else:
+            # Fallback：使用传入的 planner（可能是 InteractiveLLMPlanner）
+            self._planner = planner
+            logger.warning("[CompositeExecutor] Using fallback planner (may return empty tasks if InteractiveLLMPlanner)")
+        
         # 初始化 Replanner（用于子任务失败重规划）
         from app.avatar.runtime.recovery.replanner import Replanner
         from app.core.config import config
         self._replanner = Replanner(
-            planner=planner,
+            planner=self._planner,  # 使用 CompositeExecutor 自己的 planner
             max_replan_attempts=config.max_replan_attempts
         )
     
@@ -378,6 +398,19 @@ class CompositeTaskExecutor(BaseExecutor):
                 memory=None
             )
             
+            # 🎯 【关键修复】检查空 Task（InteractiveLLMPlanner 会返回空 Task）
+            if not task.steps or len(task.steps) == 0:
+                error_msg = (
+                    f"Planner returned empty task (0 steps) for subtask {subtask.id}. "
+                    f"This usually means:\n"
+                    f"1. InteractiveLLMPlanner is being used (ReAct mode) but CompositeExecutor expects SimpleLLMPlanner\n"
+                    f"2. The planner failed to generate any steps\n"
+                    f"3. The goal is too vague or unclear\n"
+                    f"\nSubtask goal: {subtask.goal}"
+                )
+                logger.error(f"[CompositeExecutor] ❌ {error_msg}")
+                raise RuntimeError(error_msg)
+            
             # 发送规划完成事件
             self._emit_event(EventType.PLAN_GENERATED, payload={
                 "subtask_id": subtask.id,
@@ -436,7 +469,7 @@ class CompositeTaskExecutor(BaseExecutor):
                     logger.error(f"[CompositeExecutor] ❌ Subtask {subtask.id} failed: {subtask.error}")
                     return
             
-            # 3. 执行子任务
+            # 3. 执行子任务 - 创建 TaskContext
             context = TaskContext.from_task(task, env=env_context)
             if self._memory_manager:
                 context.attach("memory_manager", self._memory_manager)
@@ -459,6 +492,22 @@ class CompositeTaskExecutor(BaseExecutor):
                                 f"[CompositeExecutor] Injected upstream output from {dep_id} "
                                 f"via SessionContext (blackboard)"
                             )
+            
+            # 🎯 【架构优化】传递上游 Task 引用，而非复制变量
+            if subtask.depends_on:
+                upstream_tasks = []
+                for dep_id in subtask.depends_on:
+                    # 找到依赖的子任务
+                    dep_subtask = next((st for st in composite.subtasks if st.id == dep_id), None)
+                    if dep_subtask and hasattr(dep_subtask, 'task_result') and dep_subtask.task_result:
+                        upstream_tasks.append(dep_subtask.task_result)
+                
+                if upstream_tasks:
+                    context.attach('upstream_tasks', upstream_tasks)
+                    logger.debug(
+                        f"[CompositeExecutor] Attached {len(upstream_tasks)} upstream tasks "
+                        f"for on-demand lookup by ParameterEngine"
+                    )
             
             if hasattr(self._skill_context, "execution_context"):
                 self._skill_context.execution_context = context
@@ -592,6 +641,22 @@ class CompositeTaskExecutor(BaseExecutor):
                         context.attach("memory_manager", self._memory_manager)
                     if session_context:
                         context.attach("session_context", session_context)
+                    
+                    # 🎯 【架构优化】传递上游 Task 引用（重规划后也使用相同逻辑）
+                    if subtask.depends_on:
+                        upstream_tasks = []
+                        for dep_id in subtask.depends_on:
+                            dep_subtask = next((st for st in composite.subtasks if st.id == dep_id), None)
+                            if dep_subtask and hasattr(dep_subtask, 'task_result') and dep_subtask.task_result:
+                                upstream_tasks.append(dep_subtask.task_result)
+                        
+                        if upstream_tasks:
+                            context.attach('upstream_tasks', upstream_tasks)
+                            logger.debug(
+                                f"[CompositeExecutor] Attached {len(upstream_tasks)} upstream tasks "
+                                f"for replanned subtask {subtask.id}"
+                            )
+                    
                     if hasattr(self._skill_context, "execution_context"):
                         self._skill_context.execution_context = context
                     
@@ -662,6 +727,96 @@ class CompositeTaskExecutor(BaseExecutor):
                 })
         
         except Exception as e:
+            # 🎯 【修复】特殊处理 RetryablePlanningError：触发 replanner
+            from app.avatar.planner.extractor import RetryablePlanningError
+            
+            if isinstance(e, RetryablePlanningError):
+                logger.warning(
+                    f"[CompositeExecutor] Planner returned retryable error for subtask {subtask.id}: {e.reason}. "
+                    f"Triggering replanner..."
+                )
+                
+                # 创建一个假的 Task 和 failed_step 用于 replanner
+                # 注意：这里的 task 可能是 None（如果 make_task 抛出异常）
+                # 所以我们需要创建一个最小的 Task 对象
+                # TaskStatus 已经在文件顶部导入，不需要重复导入
+                
+                dummy_task = Task(
+                    id=f"dummy_{subtask.id}",
+                    goal=subtask.goal,
+                    steps=[],
+                    intent_id=None,
+                    metadata={}
+                )
+                dummy_task.status = TaskStatus.FAILED
+                
+                # 尝试重规划
+                replan_success = await self._replanner.replan(dummy_task, None, env_context)
+                
+                if replan_success and dummy_task.steps:
+                    # Replan 成功，使用新的 task 执行
+                    logger.info(f"[CompositeExecutor] ⚡ Replanned subtask {subtask.id} after RetryablePlanningError")
+                    
+                    # 执行重规划后的任务
+                    context = TaskContext.from_task(dummy_task, env=env_context)
+                    if self._memory_manager:
+                        context.attach("memory_manager", self._memory_manager)
+                    if session_context:
+                        context.attach("session_context", session_context)
+                    
+                    # 🎯 【架构优化】传递上游 Task 引用（RetryablePlanningError 后也使用相同逻辑）
+                    if subtask.depends_on:
+                        upstream_tasks = []
+                        for dep_id in subtask.depends_on:
+                            dep_subtask = next((st for st in composite.subtasks if st.id == dep_id), None)
+                            if dep_subtask and hasattr(dep_subtask, 'task_result') and dep_subtask.task_result:
+                                upstream_tasks.append(dep_subtask.task_result)
+                        
+                        if upstream_tasks:
+                            context.attach('upstream_tasks', upstream_tasks)
+                            logger.debug(
+                                f"[CompositeExecutor] Attached {len(upstream_tasks)} upstream tasks "
+                                f"for replanned subtask {subtask.id} (after RetryablePlanningError)"
+                            )
+                    
+                    if hasattr(self._skill_context, "execution_context"):
+                        self._skill_context.execution_context = context
+                    
+                    dummy_task.status = TaskStatus.RUNNING
+                    context.mark_running()
+                    
+                    await self._dag_runner.run(
+                        dummy_task,
+                        ctx=self._skill_context,
+                        state=None,
+                        skill_guard=self._skill_guard,
+                        event_bus=self.event_bus
+                    )
+                    
+                    # 检查执行结果
+                    if dummy_task.status == TaskStatus.SUCCESS:
+                        outputs = self._orchestration.collect_subtask_outputs(subtask, dummy_task, composite)
+                        outputs = self._ensure_files_written(subtask, outputs)
+                        subtask.status = SubTaskStatus.SUCCESS
+                        subtask.task_id = dummy_task.id
+                        subtask.task_result = dummy_task
+                        logger.info(f"[CompositeExecutor] ✅ Subtask {subtask.id} succeeded after replan from RetryablePlanningError")
+                        self._emit_subtask_complete(subtask, dummy_task, composite)
+                        return
+                
+                # Replan 失败，标记为失败
+                logger.error(f"[CompositeExecutor] ❌ Replan failed for subtask {subtask.id} after RetryablePlanningError")
+                subtask.status = SubTaskStatus.FAILED
+                subtask.error = f"Planning failed and replan exhausted: {e.reason}"
+                
+                self._emit_event(EventType.SUBTASK_FAILED, payload={
+                    "subtask_id": subtask.id,
+                    "goal": subtask.goal,
+                    "error": subtask.error,
+                    "session_id": composite.metadata.get("session_id")
+                })
+                return
+            
             # 🎯 【防止 python.run 乱入】步骤3：禁止所有类型约束错误的 type 改写重试
             error_msg = str(e)
             is_type_constraint_error = (
