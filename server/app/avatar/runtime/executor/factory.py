@@ -30,7 +30,7 @@ from .kata import KataExecutor
 from .firecracker import FirecrackerExecutor
 from .sandbox import SandboxExecutor
 from .wasm_plugin import WasmPluginExecutor
-from app.avatar.skills.base import SkillRiskLevel, ExecutionClass
+from app.avatar.skills.base import SkillRiskLevel, SideEffect
 
 logger = logging.getLogger(__name__)
 
@@ -72,133 +72,28 @@ class ExecutorFactory:
     def get_executor(cls, skill: Any) -> SkillExecutor:
         """
         获取适合该 Skill 的执行器
-        
-        路由逻辑（按优先级）：
-        1. **安全 Guardrail（不可绕过）**：
-           - 如果是动态代码（risk_level >= EXECUTE 且输入有 code 字段）→ 强制 SANDBOX
-        
-        2. **显式声明**：
-           - 如果 exec_class != AUTO → 按 exec_class 路由
-           - WASM_PLUGIN 默认 fail closed（插件缺失直接报错）
-        
-        3. **自动推导**：
-           - 如果 exec_class == AUTO → 按 risk_level 路由
-        
-        Args:
-            skill: Skill 实例
-        
-        Returns:
-            SkillExecutor 实例
-        
-        Raises:
-            RuntimeError: 如果没有可用的执行器或 WASM 插件缺失
+
+        路由逻辑：
+        1. Guardrail: EXEC side_effect → 强制 SANDBOX
+        2. 按 risk_level 自动路由
         """
-        # 获取元数据
         try:
-            risk_level = skill.spec.meta.risk_level
-            exec_class = getattr(skill.spec.meta, 'exec_class', ExecutionClass.AUTO)
+            risk_level = skill.spec.risk_level
+            side_effects = skill.spec.side_effects
         except Exception as e:
-            logger.warning(f"[ExecutorFactory] Failed to get metadata: {e}, using defaults")
+            logger.warning(f"[ExecutorFactory] Failed to get spec metadata: {e}, using defaults")
             risk_level = SkillRiskLevel.SAFE
-            exec_class = ExecutionClass.AUTO
-        
-        api_name = skill.spec.api_name
-        logger.debug(f"[ExecutorFactory] Selecting executor for {api_name} (risk_level={risk_level}, exec_class={exec_class})")
-        
-        # ========================================
-        # Guardrail 1: 动态代码强制 SANDBOX（不可绕过）
-        # ========================================
-        if cls._is_dynamic_code(skill, risk_level):
-            logger.warning(
-                f"[ExecutorFactory] 🔒 GUARDRAIL: {api_name} is dynamic code, "
-                f"forcing SANDBOX execution (risk_level={risk_level})"
-            )
+            side_effects = set()
+
+        skill_name = skill.spec.name
+        logger.debug(f"[ExecutorFactory] Selecting executor for {skill_name} (risk={risk_level}, side_effects={side_effects})")
+
+        # Guardrail: EXEC side_effect → 强制 SANDBOX
+        if SideEffect.EXEC in side_effects:
+            logger.debug(f"[ExecutorFactory] {skill_name} has EXEC side_effect, forcing SANDBOX")
             return cls._get_sandbox_executor()
-        
-        # ========================================
-        # 路由 2: 显式声明的 exec_class
-        # ========================================
-        if exec_class != ExecutionClass.AUTO:
-            return cls._route_by_exec_class(skill, exec_class, api_name)
-        
-        # ========================================
-        # 路由 3: 自动推导（基于 risk_level）
-        # ========================================
-        return cls._route_by_risk_level(skill, risk_level, api_name)
-    
-    @classmethod
-    def _is_dynamic_code(cls, skill: Any, risk_level: SkillRiskLevel) -> bool:
-        """
-        判断是否为动态代码（需要强制隔离）
-        
-        判断条件：
-        1. risk_level >= EXECUTE
-        2. 输入模型包含 'code' 或 'command' 或 'script' 字段
-        
-        这是系统级 Guardrail，防止开发者忘记标注 SANDBOX
-        """
-        if risk_level not in [SkillRiskLevel.EXECUTE, SkillRiskLevel.SYSTEM]:
-            return False
-        
-        # 检查输入模型是否包含代码字段
-        try:
-            input_model = skill.spec.input_model
-            field_names = set(input_model.model_fields.keys())
-            code_fields = {'code', 'command', 'script', 'cmd'}
-            
-            has_code_field = bool(field_names & code_fields)
-            
-            if has_code_field:
-                logger.debug(f"[ExecutorFactory] Detected dynamic code field in {skill.spec.api_name}")
-            
-            return has_code_field
-        except Exception as e:
-            logger.warning(f"[ExecutorFactory] Failed to check code field: {e}")
-            # 保守策略：如果检查失败且 risk_level 高，则认为是动态代码
-            return risk_level == SkillRiskLevel.SYSTEM
-    
-    @classmethod
-    def _route_by_exec_class(cls, skill: Any, exec_class: ExecutionClass, api_name: str) -> SkillExecutor:
-        """根据显式声明的 exec_class 路由"""
-        
-        if exec_class == ExecutionClass.SANDBOX:
-            logger.debug(f"[ExecutorFactory] {api_name} explicitly requests SANDBOX")
-            return cls._get_sandbox_executor()
-        
-        elif exec_class == ExecutionClass.WASM_PLUGIN:
-            # 尝试使用真正的 WASM 插件执行器
-            wasm_plugin_executor = cls._get_wasm_plugin_executor()
-            
-            if wasm_plugin_executor and wasm_plugin_executor.supports(skill):
-                logger.debug(f"[ExecutorFactory] {api_name} using WasmPluginExecutor")
-                return wasm_plugin_executor
-            
-            # Guardrail 2: WASM_PLUGIN fail closed
-            logger.error(
-                f"[ExecutorFactory] ❌ {api_name} requests WASM_PLUGIN but plugin not found. "
-                f"Plugin file should be at: wasm_plugins/{api_name.replace('.', '_')}.wasm"
-            )
-            
-            if ALLOW_WASM_PLUGIN_FALLBACK:
-                logger.warning(f"[ExecutorFactory] ⚠️  Falling back to SANDBOX (dev mode)")
-                return cls._get_sandbox_executor()
-            else:
-                raise RuntimeError(
-                    f"WASM plugin not available for {api_name}. "
-                    f"Set ALLOW_WASM_PLUGIN_FALLBACK=True in dev environment to use SANDBOX fallback."
-                )
-        
-        elif exec_class == ExecutionClass.PROCESS:
-            logger.debug(f"[ExecutorFactory] {api_name} explicitly requests PROCESS")
-            return cls._get_process_executor()
-        
-        elif exec_class == ExecutionClass.LOCAL:
-            logger.debug(f"[ExecutorFactory] {api_name} explicitly requests LOCAL")
-            return cls._get_local_executor()
-        
-        else:
-            logger.warning(f"[ExecutorFactory] Unknown exec_class: {exec_class}, using AUTO")
-            return cls._route_by_risk_level(skill, skill.spec.meta.risk_level, api_name)
+
+        return cls._route_by_risk_level(skill, risk_level, skill_name)
     
     @classmethod
     def _route_by_risk_level(cls, skill: Any, risk_level: SkillRiskLevel, api_name: str) -> SkillExecutor:

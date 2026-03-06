@@ -45,6 +45,7 @@ class GraphExecutor:
         granted_permissions: Optional[List[str]] = None,
         base_path: Optional[Any] = None,
         memory_manager: Optional[Any] = None,
+        workspace: Optional[Any] = None,   # SessionWorkspace — 传给 SkillContext.extra
         # Legacy params kept for backward compat during transition
         capability_registry: Optional[Any] = None,
         type_registry: Optional[Any] = None,
@@ -54,6 +55,7 @@ class GraphExecutor:
         self.granted_permissions: List[str] = granted_permissions or []
         self.base_path = base_path
         self.memory_manager = memory_manager
+        self.workspace = workspace
         logger.info("GraphExecutor initialized")
 
     async def execute_node(
@@ -219,10 +221,17 @@ class GraphExecutor:
             )
 
         base_path = Path(self.base_path) if self.base_path else Path(".")
+
+        # workspace.root 作为 base_path：读写都基于 workspace 根目录
+        # 写操作由 Planner 负责指定 output/ 前缀路径
+        if self.workspace is not None:
+            base_path = self.workspace.root
+
         ctx = SkillContext(
             base_path=base_path,
             dry_run=False,
             memory_manager=self.memory_manager,
+            extra={"workspace": self.workspace} if self.workspace is not None else {},
         )
 
         try:
@@ -265,7 +274,14 @@ class GraphExecutor:
                     )
 
                 base_path = Path(self.base_path) if self.base_path else Path(".")
-                ctx = SkillContext(base_path=base_path, dry_run=False, memory_manager=self.memory_manager)
+                if self.workspace is not None:
+                    base_path = self.workspace.root
+                ctx = SkillContext(
+                    base_path=base_path,
+                    dry_run=False,
+                    memory_manager=self.memory_manager,
+                    extra={"workspace": self.workspace} if self.workspace is not None else {},
+                )
 
                 try:
                     input_obj = skill_cls.spec.input_model(**current_params)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.db.logging import LLMCall
 from app.db.database import engine
@@ -96,11 +96,11 @@ class LLMCallStore:
                     llm_call.response = response
                     llm_call.error = error
                     llm_call.usage = usage
-                    llm_call.finished_at = datetime.utcnow()
+                    llm_call.finished_at = datetime.now(timezone.utc)
                     
                     # 计算延迟
                     if llm_call.started_at and llm_call.finished_at:
-                        delta = llm_call.finished_at - llm_call.started_at
+                        delta = llm_call.finished_at - llm_call.started_at.replace(tzinfo=timezone.utc) if llm_call.started_at.tzinfo is None else llm_call.finished_at - llm_call.started_at
                         llm_call.latency_ms = delta.total_seconds() * 1000
                     
                     session.add(llm_call)
@@ -115,11 +115,11 @@ class LLMCallStore:
                 llm_call.response = response
                 llm_call.error = error
                 llm_call.usage = usage
-                llm_call.finished_at = datetime.utcnow()
+                llm_call.finished_at = datetime.now(timezone.utc)
                 
                 # 计算延迟
                 if llm_call.started_at and llm_call.finished_at:
-                    delta = llm_call.finished_at - llm_call.started_at
+                    delta = llm_call.finished_at - llm_call.started_at.replace(tzinfo=timezone.utc) if llm_call.started_at.tzinfo is None else llm_call.finished_at - llm_call.started_at
                     llm_call.latency_ms = delta.total_seconds() * 1000
                 
                 db.add(llm_call)

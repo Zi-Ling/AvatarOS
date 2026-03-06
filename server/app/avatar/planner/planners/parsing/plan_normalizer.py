@@ -106,7 +106,7 @@ class PlanNormalizer:
         # 2. 解析技能别名
         resolved_skill = skill_registry.get(skill_name)
         if resolved_skill:
-            skill_name = resolved_skill.spec.api_name
+            skill_name = resolved_skill.spec.name
         
         # 3. 获取新 ID
         old_id = step.get("id") or f"step_{index}"

@@ -417,8 +417,7 @@ class WASMExecutor(SkillExecutor):
             return False
         
         try:
-            risk_level = skill.spec.meta.risk_level
-            return risk_level == SkillRiskLevel.EXECUTE
+            return skill.spec.risk_level == SkillRiskLevel.EXECUTE
         except Exception as e:
             logger.warning(f"[WASMExecutor] Failed to check support: {e}")
             return False
@@ -428,7 +427,7 @@ class WASMExecutor(SkillExecutor):
         
         # ⚠️  再次警告
         logger.error(
-            f"⚠️  UNSAFE: Executing {skill.spec.api_name} in FALLBACK mode (no isolation). "
+            f"⚠️  UNSAFE: Executing {skill.spec.name} in FALLBACK mode (no isolation). "
             f"This is NOT secure!"
         )
         
@@ -448,7 +447,7 @@ class WASMExecutor(SkillExecutor):
         if not is_compatible:
             raise RuntimeError(f"Code is not WASM compatible: {reason}")
         
-        logger.debug(f"[WASMExecutor] Executing {skill.spec.api_name}")
+        logger.debug(f"[WASMExecutor] Executing {skill.spec.name}")
         
         try:
             # 获取或创建 Pyodide 运行时（延迟初始化）
@@ -474,7 +473,7 @@ class WASMExecutor(SkillExecutor):
                 logger.error(f"[WASMExecutor] Execution failed: {stderr}")
                 raise RuntimeError(f"WASM execution failed: {stderr}")
             
-            logger.debug(f"[WASMExecutor] Success: {skill.spec.api_name}")
+            logger.debug(f"[WASMExecutor] Success: {skill.spec.name}")
             
             # 尝试从 stdout 解析 result（如果代码中有 result 变量）
             result = None
@@ -495,7 +494,7 @@ class WASMExecutor(SkillExecutor):
             }
             
         except Exception as e:
-            logger.error(f"[WASMExecutor] Failed: {skill.spec.api_name}, error: {e}")
+            logger.error(f"[WASMExecutor] Failed: {skill.spec.name}, error: {e}")
             raise
     
     def cleanup(self):

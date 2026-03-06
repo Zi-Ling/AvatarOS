@@ -1,7 +1,7 @@
 # server/app/core/user_config.py
 """
 用户配置加载器
-从 ~/.avatarOS/config.yaml 加载用户自定义配置
+从 ~/.avatar/config.yaml 加载用户自定义配置
 """
 import logging
 from pathlib import Path
@@ -11,7 +11,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # 默认配置路径
-DEFAULT_CONFIG_PATH = Path.home() / ".avatarOS" / "config.yaml"
+DEFAULT_CONFIG_PATH = Path.home() / ".avatar" / "config.yaml"
 
 
 class UserConfig:

@@ -85,32 +85,8 @@ class WasmPluginExecutor(SkillExecutor):
         return self._available
     
     def supports(self, skill: Any) -> bool:
-        """
-        检查是否支持该 Skill
-        
-        支持条件：
-        1. wasmtime 可用
-        2. exec_class == WASM_PLUGIN
-        3. 插件文件存在
-        """
-        if not self._available:
-            return False
-        
-        try:
-            # 检查 exec_class
-            from app.avatar.skills.base import ExecutionClass
-            exec_class = getattr(skill.spec.meta, 'exec_class', ExecutionClass.AUTO)
-            
-            if exec_class != ExecutionClass.WASM_PLUGIN:
-                return False
-            
-            # 检查插件文件是否存在
-            plugin_path = self._get_plugin_path(skill.spec.api_name)
-            return plugin_path.exists()
-            
-        except Exception as e:
-            logger.warning(f"[WasmPluginExecutor] Failed to check support: {e}")
-            return False
+        """WasmPlugin executor is not supported in the new skill system."""
+        return False
     
     def _get_plugin_path(self, api_name: str) -> Path:
         """
@@ -144,7 +120,7 @@ class WasmPluginExecutor(SkillExecutor):
         if not self._available:
             raise RuntimeError("wasmtime not available")
         
-        api_name = skill.spec.api_name
+        api_name = skill.spec.name
         plugin_path = self._get_plugin_path(api_name)
         
         if not plugin_path.exists():

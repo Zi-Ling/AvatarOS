@@ -9,7 +9,7 @@ from __future__ import annotations
 from sqlmodel import Session, select
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.db.task.task import Task, Run, Step
 from app.db.database import engine
@@ -183,7 +183,7 @@ class RunStore:
                 run = session.exec(statement).first()
                 if run:
                     run.status = status
-                    run.finished_at = datetime.utcnow() if status in ["completed", "failed"] else None
+                    run.finished_at = datetime.now(timezone.utc) if status in ["completed", "failed"] else None
                     if summary:
                         run.summary = summary
                     if error_message:
@@ -198,7 +198,7 @@ class RunStore:
             run = db.exec(statement).first()
             if run:
                 run.status = status
-                run.finished_at = datetime.utcnow() if status in ["completed", "failed"] else None
+                run.finished_at = datetime.now(timezone.utc) if status in ["completed", "failed"] else None
                 if summary:
                     run.summary = summary
                 if error_message:
@@ -253,7 +253,7 @@ class StepStore:
         db: Optional[Session] = None,
     ) -> Optional[Step]:
         """更新步骤状态"""
-        finished_at = datetime.utcnow() if status in ["completed", "failed"] else None
+        finished_at = datetime.now(timezone.utc) if status in ["completed", "failed"] else None
         
         if db is None:
             with Session(engine) as session:

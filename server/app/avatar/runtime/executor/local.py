@@ -34,8 +34,7 @@ class LocalExecutor(SkillExecutor):
     def supports(self, skill: Any) -> bool:
         """只支持 SAFE 级别的 Skill"""
         try:
-            risk_level = skill.spec.meta.risk_level
-            return risk_level == SkillRiskLevel.SAFE
+            return skill.spec.risk_level == SkillRiskLevel.SAFE
         except Exception as e:
             logger.warning(f"[LocalExecutor] Failed to get risk_level: {e}")
             return False
@@ -52,7 +51,7 @@ class LocalExecutor(SkillExecutor):
         Returns:
             执行结果
         """
-        logger.debug(f"[LocalExecutor] Executing {skill.spec.api_name}")
+        logger.debug(f"[LocalExecutor] Executing {skill.spec.name}")
         
         try:
             # 调用 Skill 的 run 方法
@@ -62,9 +61,9 @@ class LocalExecutor(SkillExecutor):
             if asyncio.iscoroutine(result):
                 result = await result
             
-            logger.debug(f"[LocalExecutor] Success: {skill.spec.api_name}")
+            logger.debug(f"[LocalExecutor] Success: {skill.spec.name}")
             return result
             
         except Exception as e:
-            logger.error(f"[LocalExecutor] Failed: {skill.spec.api_name}, error: {e}")
+            logger.error(f"[LocalExecutor] Failed: {skill.spec.name}, error: {e}")
             raise

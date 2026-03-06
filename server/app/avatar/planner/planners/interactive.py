@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import os
@@ -215,8 +216,9 @@ Please try a DIFFERENT approach:
 ## Your Next Move
 Return ONLY the JSON object.
 """
-        # Call LLM
-        raw_response = self._call_llm(prompt)
+        # Call LLM (run sync call in thread pool to avoid blocking event loop)
+        loop = asyncio.get_event_loop()
+        raw_response = await loop.run_in_executor(None, self._call_llm, prompt)
         
         # Parse
         try:
@@ -242,7 +244,7 @@ Return ONLY the JSON object.
             # Resolve skill name (Alias support)
             resolved_cls = skill_registry.get(skill_name)
             if resolved_cls:
-                skill_name = resolved_cls.spec.api_name or resolved_cls.spec.name
+                skill_name = resolved_cls.spec.name
 
             return Step(
                 id=f"step_{len(task.steps) + 1}",
@@ -340,6 +342,119 @@ Return ONLY the JSON object.
         self._last_thought = None
         self._last_action = None
         self._repeat_count = 0
+
+    # -----------------------------------------------------------------------
+    # Graph Runtime compatibility (Requirements: 6.3, 19.1-19.5)
+    # -----------------------------------------------------------------------
+
+    async def next_step_from_graph(
+        self,
+        graph: Any,
+        env_context: Dict[str, Any],
+        capability_registry: Optional[Any] = None,
+    ) -> Optional[Any]:
+        """
+        Graph Runtime compatible entry point.
+
+        Accepts an ExecutionGraph and returns a GraphPatch instead of a Step.
+        Internally converts ExecutionGraph → Task, calls next_step(), then
+        converts Step → GraphPatch.
+
+        This preserves all existing optimizations (loop detection, fs caching,
+        output truncation) while adding Graph Runtime support.
+
+        Args:
+            graph: ExecutionGraph instance
+            env_context: Environment context dict
+            capability_registry: Optional CapabilityRegistry for capability lookup
+
+        Returns:
+            GraphPatch or None if finished
+
+        Requirements: 6.3, 19.1, 19.2, 19.3, 19.4, 19.5
+        """
+        from app.avatar.runtime.graph.models.graph_patch import (
+            GraphPatch, PatchAction, PatchOperation,
+        )
+        from app.avatar.runtime.graph.models.step_node import StepNode, NodeStatus
+
+        # Build env_context with capabilities if registry provided
+        if capability_registry is not None and "available_skills" not in env_context:
+            env_context = dict(env_context)
+            env_context["available_skills"] = capability_registry.describe_capabilities()
+
+        # Convert ExecutionGraph → Task
+        task = self._execution_graph_to_task(graph)
+
+        # Call existing next_step (preserves all optimizations)
+        step = await self.next_step(task, env_context)
+
+        if step is None:
+            return GraphPatch(
+                actions=[PatchAction(operation=PatchOperation.FINISH)],
+                reasoning="Task completed",
+            )
+
+        # Convert Step → GraphPatch (ADD_NODE)
+        node = StepNode(
+            id=step.id,
+            capability_name=step.skill_name,
+            params=step.params,
+            status=NodeStatus.PENDING,
+            metadata={"description": step.description or ""},
+        )
+        return GraphPatch(
+            actions=[PatchAction(operation=PatchOperation.ADD_NODE, node=node)],
+            reasoning=step.description or "",
+        )
+
+    def _execution_graph_to_task(self, graph: Any) -> Task:
+        """
+        Convert ExecutionGraph to Task for use with next_step().
+
+        Requirements: 19.1
+        """
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+
+        steps = []
+        for node in graph.nodes.values():
+            step = Step(
+                id=node.id,
+                order=len(steps),
+                skill_name=node.capability_name,
+                params=node.params,
+                description=node.metadata.get("description", "") if node.metadata else "",
+            )
+
+            # Map node status → step status
+            try:
+                from app.avatar.planner.models import StepStatus, StepResult
+                if node.status == NodeStatus.SUCCESS:
+                    step.status = StepStatus.SUCCESS
+                    step.result = StepResult(
+                        success=True,
+                        output=node.outputs.get("output", node.outputs),
+                    )
+                elif node.status == NodeStatus.FAILED:
+                    step.status = StepStatus.FAILED
+                    step.result = StepResult(
+                        success=False,
+                        error=node.error_message or "Unknown error",
+                    )
+                elif node.status == NodeStatus.RUNNING:
+                    step.status = StepStatus.RUNNING
+            except Exception:
+                pass  # Keep default PENDING status
+
+            steps.append(step)
+
+        return Task(
+            id=str(graph.id),
+            goal=graph.goal,
+            steps=steps,
+            intent_id=None,
+        )
+
 
 register_planner("interactive_llm", InteractiveLLMPlanner)
 

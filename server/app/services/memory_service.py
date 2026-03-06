@@ -10,8 +10,10 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+from app.core.config import AVATAR_MEMORY_DIR
+
 # 向量库路径
-MEMORY_DB_PATH = Path.home() / ".avatarOS" / "memory"
+MEMORY_DB_PATH = AVATAR_MEMORY_DIR
 
 
 class MemoryService:
@@ -50,7 +52,7 @@ class MemoryService:
             
             # 获取或创建默认集合
             self.collection = self.client.get_or_create_collection(
-                name="avatarOS_memory",
+                name="avatar_memory",
                 metadata={"description": "Long-term memory storage"}
             )
             
@@ -183,9 +185,9 @@ class MemoryService:
     def clear_all(self) -> bool:
         """清空所有记忆（危险操作）"""
         try:
-            self.client.delete_collection("avatarOS_memory")
+            self.client.delete_collection("avatar_memory")
             self.collection = self.client.create_collection(
-                name="avatarOS_memory",
+                name="avatar_memory",
                 metadata={"description": "Long-term memory storage"}
             )
             logger.warning("All memories cleared")

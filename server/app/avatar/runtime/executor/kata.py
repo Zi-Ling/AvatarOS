@@ -108,109 +108,81 @@ class KataExecutor(SkillExecutor):
             logger.warning(f"[KataExecutor] Failed to check Kata availability: {e}")
     
     def supports(self, skill: Any) -> bool:
-        """
-        支持 EXECUTE/SYSTEM 级别的 Skill
-        
-        检查逻辑：
-        1. Kata Runtime 是否可用
-        2. Skill 风险级别是否为 EXECUTE 或 SYSTEM
-        """
         if not self._available:
             return False
         
         try:
-            risk_level = skill.spec.meta.risk_level
-            return risk_level in [SkillRiskLevel.EXECUTE, SkillRiskLevel.SYSTEM]
+            return skill.spec.risk_level in [SkillRiskLevel.EXECUTE, SkillRiskLevel.SYSTEM]
         except Exception as e:
             logger.warning(f"[KataExecutor] Failed to get risk_level: {e}")
             return False
     
     async def execute(self, skill: Any, input_data: Any, context: Any) -> Any:
-        """
-        在 Kata Container 中执行 Skill
-        
-        Args:
-            skill: Skill 实例
-            input_data: 输入数据（Pydantic 模型或字典，包含 code 字段）
-            context: SkillContext
-        
-        Returns:
-            执行结果
-        """
         if not self._available:
             raise RuntimeError("Kata Runtime is not available")
         
-        # 从 Pydantic 模型或字典获取代码
         code = input_data.code if hasattr(input_data, 'code') else input_data.get("code", "")
         if not code:
             raise ValueError("No code provided")
         
-        logger.debug(f"[KataExecutor] Executing {skill.spec.api_name}")
+        logger.debug(f"[KataExecutor] Executing {skill.spec.name}")
+
+        # 从 context 获取 workspace 挂载配置（如果有）
+        workspace_volumes = None
+        if hasattr(context, "extra") and context.extra.get("workspace") is not None:
+            workspace_volumes = context.extra["workspace"].get_docker_volumes()
+        elif hasattr(context, "workspace") and context.workspace is not None:
+            workspace_volumes = context.workspace.get_docker_volumes()
         
         try:
-            # 如果启用容器池，使用池中的容器
             if self.use_pool and self._pool:
-                return await self._execute_with_pool(code)
-            
-            # 否则，创建新容器
+                return await self._execute_with_pool(code, workspace_volumes)
             return await self._execute_without_pool(code)
-            
         except Exception as e:
-            logger.error(f"[KataExecutor] Failed: {skill.spec.api_name}, error: {e}")
+            logger.error(f"[KataExecutor] Failed: {skill.spec.name}, error: {e}")
             raise
     
-    async def _execute_with_pool(self, code: str) -> dict:
+    async def _execute_with_pool(self, code: str, workspace_volumes: Optional[dict] = None) -> dict:
         """使用容器池执行"""
         import asyncio
-        
+        from .container_pool import SandboxFailure
+
         loop = asyncio.get_event_loop()
-        
-        # 在线程池中获取容器
-        container = await loop.run_in_executor(
-            None,
-            self._pool.acquire,
-            self.timeout
-        )
-        
-        if not container:
-            raise RuntimeError("Failed to acquire container from pool")
-        
+
+        container = await loop.run_in_executor(None, self._pool.acquire, self.timeout)
+
+        exec_failed = False
         try:
-            # 保存容器 ID（用于内存监控）
             self._last_container_id = container.id
-            
-            # 在容器中执行命令
+
             exit_code, output = await loop.run_in_executor(
                 None,
                 lambda: container.exec_run(
                     cmd=["python", "-c", code],
-                    demux=True,  # 分离 stdout 和 stderr
+                    demux=True,
                 )
             )
-            
+
             stdout = output[0].decode("utf-8") if output[0] else ""
             stderr = output[1].decode("utf-8") if output[1] else ""
-            
+
             logger.debug(f"[KataExecutor] Success")
-            
-            if exit_code == 0:
-                return {
-                    "success": True,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "result": None
-                }
-            else:
-                return {
-                    "success": False,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "result": None
-                }
-        
+
+            return {
+                "success": exit_code == 0,
+                "stdout": stdout,
+                "stderr": stderr,
+                "result": None,
+                "output": stdout if exit_code == 0 else stderr,
+            }
+
+        except SandboxFailure:
+            raise
+        except Exception as e:
+            exec_failed = True
+            raise
         finally:
-            # 归还容器到池中
-            await loop.run_in_executor(None, self._pool.release, container)
+            await loop.run_in_executor(None, self._pool.release, container, exec_failed)
     
     async def _execute_without_pool(self, code: str) -> dict:
         """不使用容器池执行（创建新容器）"""

@@ -8,6 +8,32 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, model_validator
 import logging
 
+# ---------------------------------------------------------------------------
+# 系统根目录（固定，不随用户 workspace 变化）
+# ---------------------------------------------------------------------------
+AVATAR_HOME = Path.home() / ".avatar"
+
+# 系统子目录
+AVATAR_DB_PATH      = AVATAR_HOME / "avatar.db"
+AVATAR_MEMORY_DIR   = AVATAR_HOME / "memory"
+AVATAR_SESSIONS_DIR = AVATAR_HOME / "sessions"
+AVATAR_ARTIFACTS_DIR= AVATAR_HOME / "artifacts"
+AVATAR_LOGS_DIR     = AVATAR_HOME / "logs"
+AVATAR_TMP_DIR      = AVATAR_HOME / ".tmp"
+
+
+def ensure_avatar_home() -> None:
+    """确保系统目录存在（启动时调用一次）"""
+    for d in (
+        AVATAR_HOME,
+        AVATAR_MEMORY_DIR,
+        AVATAR_SESSIONS_DIR,
+        AVATAR_ARTIFACTS_DIR,
+        AVATAR_LOGS_DIR,
+        AVATAR_TMP_DIR,
+    ):
+        d.mkdir(parents=True, exist_ok=True)
+
 
 class Config(BaseSettings):
     """应用配置 — 自动从 .env 文件和环境变量加载"""
@@ -23,7 +49,7 @@ class Config(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com"
     llm_api_key: str = ""
 
-    # Avatar 工作目录
+    # 用户工作目录（用户可随时切换，只含 input/ output/）
     avatar_workspace: Path = Path("./workspace")
 
     # 服务器配置
@@ -74,6 +100,7 @@ class Config(BaseSettings):
     @model_validator(mode="after")
     def _ensure_directories(self) -> "Config":
         """确保工作目录和临时目录存在"""
+        ensure_avatar_home()
         self.avatar_workspace.mkdir(parents=True, exist_ok=True)
         self.temp_audio_dir.mkdir(parents=True, exist_ok=True)
         if not self.llm_api_key:

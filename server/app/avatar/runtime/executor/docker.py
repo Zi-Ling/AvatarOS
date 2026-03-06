@@ -106,65 +106,42 @@ class DockerExecutor(SkillExecutor):
                 self._healthy = False
     
     def supports(self, skill: Any) -> bool:
-        """
-        支持 EXECUTE 级别的 Skill
-        
-        当前主要支持 python.run
-        """
-        if not self._available:  # 使用 _available
+        if not self._available:
             return False
         
         try:
-            risk_level = skill.spec.meta.risk_level
-            # 支持 EXECUTE 和 SYSTEM 级别
+            risk_level = skill.spec.risk_level
             if risk_level not in [SkillRiskLevel.EXECUTE, SkillRiskLevel.SYSTEM]:
                 return False
-            
-            # 当前只支持 python.run
-            api_name = skill.spec.api_name
-            return api_name == "python.run"
-            
+            return skill.spec.name == "python.run"
         except Exception as e:
             logger.warning(f"[DockerExecutor] Failed to check support: {e}")
             return False
     
     async def execute(self, skill: Any, input_data: Any, context: Any) -> Any:
-        """
-        在 Docker 容器中执行 Skill
-        
-        Args:
-            skill: Skill 实例
-            input_data: 输入数据
-            context: SkillContext
-        
-        Returns:
-            执行结果（Skill 的输出模型）
-        """
-        if not self._available:  # 使用 _available
+        if not self._available:
             raise RuntimeError("Docker is not available")
         
-        api_name = skill.spec.api_name
+        api_name = skill.spec.name
         logger.debug(f"[DockerExecutor] Executing {api_name}")
         
-        # 当前只支持 python.run
         if api_name != "python.run":
             raise ValueError(f"DockerExecutor only supports python.run, got {api_name}")
         
-        # 获取代码
         code = input_data.code
+
+        # 从 context 获取 workspace 挂载配置
+        workspace_volumes = None
+        if hasattr(context, "extra") and context.extra.get("workspace") is not None:
+            workspace_volumes = context.extra["workspace"].get_docker_volumes()
         
-        # 在容器中执行
         try:
-            result_dict = await self._run_python_in_container(code)
+            result_dict = await self._run_python_in_container(code, workspace_volumes)
             logger.debug(f"[DockerExecutor] Success: {api_name}")
-            
-            # 将字典转换为 Skill 的输出模型
             output_model = skill.spec.output_model
             return output_model(**result_dict)
-            
         except Exception as e:
             logger.error(f"[DockerExecutor] Failed: {api_name}, error: {e}")
-            # 返回失败的输出模型
             output_model = skill.spec.output_model
             return output_model(
                 success=False,
@@ -173,97 +150,72 @@ class DockerExecutor(SkillExecutor):
                 stderr=str(e)
             )
     
-    async def _run_python_in_container(self, code: str) -> dict:
-        """
-        在 Docker 容器中执行 Python 代码
-        
-        Args:
-            code: Python 代码
-        
-        Returns:
-            执行结果字典
-        """
+    async def _run_python_in_container(self, code: str, workspace_volumes: Optional[dict] = None) -> dict:
+        """在 Docker 容器中执行 Python 代码"""
         import docker
         
-        # 创建临时目录
         with tempfile.TemporaryDirectory() as tmpdir:
-            # 写入代码文件
             code_file = os.path.join(tmpdir, "script.py")
             with open(code_file, "w", encoding="utf-8") as f:
                 f.write(code)
             
             try:
-                # 运行容器
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(
                     None,
                     self._run_container_sync,
-                    tmpdir
+                    tmpdir,
+                    workspace_volumes,
                 )
                 return result
-                
             except docker.errors.ContainerError as e:
-                # 容器执行失败（非零退出码）
                 return {
                     "success": False,
                     "message": f"Container execution failed: {str(e)}",
                     "stdout": e.stdout.decode("utf-8") if e.stdout else "",
                     "stderr": e.stderr.decode("utf-8") if e.stderr else str(e),
                     "result": None,
+                    "output": "",
                     "variables": {},
                 }
             except Exception as e:
-                # 其他错误
                 return {
                     "success": False,
                     "message": f"Docker execution error: {str(e)}",
                     "stdout": "",
                     "stderr": str(e),
                     "result": None,
+                    "output": "",
                     "variables": {},
                 }
     
-    def _run_container_sync(self, tmpdir: str) -> dict:
-        """
-        同步运行容器（在线程池中执行）
-        
-        Args:
-            tmpdir: 临时目录路径
-        
-        Returns:
-            执行结果字典
-        """
-        # 如果启用容器池，使用池中的容器
+    def _run_container_sync(self, tmpdir: str, workspace_volumes: Optional[dict] = None) -> dict:
+        """同步运行容器（在线程池中执行）"""
         if self.use_pool and self._pool:
             return self._run_with_pool(tmpdir)
-        
-        # 否则，创建新容器
-        return self._run_without_pool(tmpdir)
+        return self._run_without_pool(tmpdir, workspace_volumes)
     
     def _run_with_pool(self, tmpdir: str) -> dict:
         """使用容器池执行"""
+        # acquire 超时直接抛 SandboxFailure，不再返回 None
         container = self._pool.acquire(timeout=self.timeout)
-        if not container:
-            raise RuntimeError("Failed to acquire container from pool")
-        
+
+        exec_failed = False
         try:
-            # 保存容器 ID（用于内存监控）
             self._last_container_id = container.id
-            
-            # 读取代码文件
+
             code_file = os.path.join(tmpdir, "script.py")
             with open(code_file, "r", encoding="utf-8") as f:
                 code = f.read()
-            
-            # 在容器中执行命令（直接传递代码）
+
             exit_code, output = container.exec_run(
                 cmd=["python", "-c", code],
-                demux=True,  # 分离 stdout 和 stderr
+                demux=True,
             )
-            
+
             stdout = output[0].decode("utf-8") if output[0] else ""
             stderr = output[1].decode("utf-8") if output[1] else ""
-            
+
             if exit_code == 0:
                 return {
                     "success": True,
@@ -271,6 +223,7 @@ class DockerExecutor(SkillExecutor):
                     "stdout": stdout,
                     "stderr": stderr,
                     "result": stdout.strip() if stdout.strip() else None,
+                    "output": stdout.strip() if stdout.strip() else "",
                     "variables": {},
                 }
             else:
@@ -280,64 +233,53 @@ class DockerExecutor(SkillExecutor):
                     "stdout": stdout,
                     "stderr": stderr,
                     "result": None,
+                    "output": stderr,
                     "variables": {},
                 }
-        
+
+        except Exception:
+            exec_failed = True
+            raise
         finally:
-            # 归还容器到池中
-            self._pool.release(container)
+            self._pool.release(container, failed=exec_failed)
     
-    def _run_without_pool(self, tmpdir: str) -> dict:
-        """不使用容器池执行（创建新容器）"""
-        # 创建容器（不自动删除，以便获取 stats）
+    def _run_without_pool(self, tmpdir: str, workspace_volumes: Optional[dict] = None) -> dict:
+        """不使用容器池执行（创建新容器），支持 workspace 挂载"""
+        # 基础 volumes：代码文件
+        volumes = {tmpdir: {"bind": "/workspace", "mode": "ro"}}
+
+        # 如果有 session workspace，覆盖挂载（rw，容器可写 /workspace/output）
+        if workspace_volumes:
+            volumes = workspace_volumes
+
         container = self._client.containers.create(
             image=self.image,
-            command=["python", "/workspace/script.py"],
-            volumes={tmpdir: {"bind": "/workspace", "mode": "ro"}},
+            command=["python", "/workspace/script.py"] if not workspace_volumes else ["python", "-c", open(os.path.join(tmpdir, "script.py")).read()],
+            volumes=volumes,
             mem_limit=self.mem_limit,
             cpu_quota=self.cpu_quota,
-            network_mode="none",  # 禁用网络
+            network_mode="none",
             detach=True,
         )
         
         try:
-            # 保存容器 ID（用于内存监控）
             self._last_container_id = container.id
-            
-            # 启动容器
             container.start()
-            
-            # 等待容器完成
             result = container.wait(timeout=self.timeout)
-            
-            # 获取输出
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8")
-            
-            # 检查退出码
             exit_code = result.get("StatusCode", 0)
             
-            if exit_code == 0:
-                return {
-                    "success": True,
-                    "message": "Execution completed",
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "result": stdout.strip() if stdout.strip() else None,
-                    "variables": {},
-                }
-            else:
-                return {
-                    "success": False,
-                    "message": f"Container exited with code {exit_code}",
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "result": None,
-                    "variables": {},
-                }
-        
+            return {
+                "success": exit_code == 0,
+                "message": "Execution completed" if exit_code == 0 else f"Container exited with code {exit_code}",
+                "stdout": stdout,
+                "stderr": stderr,
+                "result": stdout.strip() if stdout.strip() and exit_code == 0 else None,
+                "output": stdout.strip() if exit_code == 0 else stderr,
+                "variables": {},
+            }
         finally:
-            # 清理容器
             try:
                 container.remove(force=True)
             except Exception as e:

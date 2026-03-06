@@ -13,7 +13,7 @@ Requirements: 5.1, 5.2, 5.7, 9.1, 9.2, 9.3
 """
 
 from __future__ import annotations
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
 import logging
 import asyncio
 from datetime import datetime
@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from app.avatar.runtime.graph.models.step_node import StepNode, NodeStatus
     from app.avatar.runtime.graph.context.execution_context import ExecutionContext
     from app.avatar.runtime.graph.executor.graph_executor import GraphExecutor
+    from app.avatar.runtime.workspace.session_workspace import SessionWorkspace
+    from app.avatar.runtime.workspace.artifact_collector import ArtifactCollector, CollectedArtifact
+    from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,19 +35,17 @@ logger = logging.getLogger(__name__)
 class NodeResult:
     """
     Result of node execution.
-    
-    Attributes:
-        success: Whether execution succeeded
-        outputs: Node outputs (if successful)
-        error_message: Error message (if failed)
-        retry_count: Number of retries attempted
-        execution_time: Total execution time in seconds
     """
     success: bool
     outputs: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
     retry_count: int = 0
     execution_time: float = 0.0
+    artifact_ids: List[str] = None  # artifact IDs produced by this node
+
+    def __post_init__(self):
+        if self.artifact_ids is None:
+            self.artifact_ids = []
 
 
 class NodeRunner:
@@ -53,26 +54,21 @@ class NodeRunner:
     
     NodeRunner provides clean separation of concerns:
     - GraphRuntime: Orchestration (scheduling, parallel execution, graph state)
-    - NodeRunner: Node lifecycle (retry, streaming, status updates)
+    - NodeRunner: Node lifecycle (retry, streaming, status updates, artifact collection)
     - GraphExecutor: Capability execution (parameter resolution, execution)
-    
-    Requirements:
-    - 5.1: Handle parameter resolution via DataEdge traversal
-    - 5.2: Delegate to Executor for actual Capability execution
-    - 5.7: Store outputs in ExecutionContext
-    - 9.1: Handle retry logic with exponential backoff
-    - 9.2: Calculate delay: initial_delay * (backoff_multiplier ^ retry_count)
-    - 9.3: Increment retry_count in node metadata
     """
     
-    def __init__(self, executor: 'GraphExecutor'):
-        """
-        Initialize NodeRunner.
-        
-        Args:
-            executor: GraphExecutor for capability execution
-        """
+    def __init__(
+        self,
+        executor: 'GraphExecutor',
+        workspace: Optional['SessionWorkspace'] = None,
+        artifact_collector: Optional['ArtifactCollector'] = None,
+        trace_store: Optional['StepTraceStore'] = None,
+    ):
         self.executor = executor
+        self.workspace = workspace
+        self.artifact_collector = artifact_collector
+        self.trace_store = trace_store
         logger.info("NodeRunner initialized")
     
     async def run_node(
@@ -82,106 +78,125 @@ class NodeRunner:
         context: 'ExecutionContext'
     ) -> NodeResult:
         """
-        Execute a single node with retry logic and output storage.
-        
-        This method:
-        1. Attempts to execute the node
-        2. Handles retries with exponential backoff on failure
-        3. Collects streaming output events
-        4. Updates node status and metadata
-        5. Stores outputs in ExecutionContext
-        
-        Args:
-            graph: ExecutionGraph containing the node
-            node: StepNode to execute
-            context: ExecutionContext for output storage
-            
-        Returns:
-            NodeResult with execution outcome
-            
-        Requirements: 5.1, 5.2, 5.7, 9.1, 9.2, 9.3
+        Execute a single node with retry logic, output storage, and artifact collection.
         """
         start_time = datetime.now()
         logger.info(f"[NodeRunner] Starting execution of node {node.id}")
-        
+
+        # --- workspace snapshot（执行前）---
+        before_snapshot: Dict[str, float] = {}
+        if self.workspace:
+            before_snapshot = self.workspace.snapshot_workspace()
+
         # Main execution loop with retry logic
         while True:
             try:
-                # Attempt execution (Requirement 5.1, 5.2)
                 await self.executor.execute_node(graph, node, context)
-                
-                # If we get here, execution succeeded
+
                 execution_time = (datetime.now() - start_time).total_seconds()
-                
-                # Note: Outputs already stored in ExecutionContext by GraphExecutor (Requirement 5.7)
-                
+
+                # --- artifact collection（执行后）---
+                artifact_ids: List[str] = []
+                if self.workspace and self.artifact_collector:
+                    session_id = getattr(context, "session_id", node.id)
+                    try:
+                        collected = await self.artifact_collector.collect(
+                            workspace=self.workspace,
+                            before_snapshot=before_snapshot,
+                            node_id=node.id,
+                            session_id=session_id,
+                        )
+                        artifact_ids = [a.artifact_id for a in collected]
+                        if artifact_ids:
+                            # 把 artifact_ids 挂到 node outputs
+                            if node.outputs is None:
+                                node.outputs = {}
+                            node.outputs["__artifacts__"] = artifact_ids
+                            context.set_node_output(node.id, node.outputs)
+                            logger.info(
+                                f"[NodeRunner] Node {node.id} produced "
+                                f"{len(artifact_ids)} artifact(s)"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"[NodeRunner] Artifact collection failed for node {node.id}: {e}"
+                        )
+
                 logger.info(
                     f"[NodeRunner] Node {node.id} completed successfully "
                     f"after {node.retry_count} retries in {execution_time:.2f}s"
                 )
-                
+
+                # --- trace 记录 ---
+                self._write_trace(
+                    context=context,
+                    node=node,
+                    status="success",
+                    started_at=start_time,
+                    ended_at=datetime.now(),
+                    execution_time_s=execution_time,
+                    artifact_ids=artifact_ids,
+                    output_summary=self._summarize(node.outputs),
+                )
+
                 return NodeResult(
                     success=True,
                     outputs=node.outputs,
                     retry_count=node.retry_count,
-                    execution_time=execution_time
+                    execution_time=execution_time,
+                    artifact_ids=artifact_ids,
                 )
-                
+
             except Exception as e:
-                # Execution failed
                 error_message = str(e)
                 logger.warning(
                     f"[NodeRunner] Node {node.id} failed (attempt {node.retry_count + 1}): {error_message}"
                 )
-                
-                # Check if we should retry (before marking as failed)
-                # Note: can_retry() checks if retry_count < max_retries
+
                 should_retry = node.retry_count < node.retry_policy.max_retries
-                
+
                 if should_retry:
-                    # Increment retry count (Requirement 9.3)
                     node.retry_count += 1
-                    
-                    # Calculate retry delay with exponential backoff (Requirement 9.2)
                     delay = node.get_retry_delay()
-                    
+
                     logger.info(
                         f"[NodeRunner] Retrying node {node.id} "
                         f"(attempt {node.retry_count + 1}/{node.retry_policy.max_retries + 1}) "
                         f"after {delay:.2f}s delay"
                     )
-                    
-                    # Add retry event to stream
+
                     node.add_stream_event(
                         "retry",
-                        {
-                            "attempt": node.retry_count,
-                            "delay": delay,
-                            "error": error_message
-                        }
+                        {"attempt": node.retry_count, "delay": delay, "error": error_message}
                     )
-                    
-                    # Wait before retrying
                     await asyncio.sleep(delay)
-                    
-                    # Continue to next iteration (retry)
                     continue
-                    
+
                 else:
-                    # Retries exhausted - mark as failed
                     node.mark_failed(error_message)
                     execution_time = (datetime.now() - start_time).total_seconds()
-                    
+
                     logger.error(
                         f"[NodeRunner] Node {node.id} failed permanently "
                         f"after {node.retry_count} retries in {execution_time:.2f}s: {error_message}"
                     )
-                    
+
+                    # --- trace 记录 ---
+                    self._write_trace(
+                        context=context,
+                        node=node,
+                        status="failed",
+                        started_at=start_time,
+                        ended_at=datetime.now(),
+                        execution_time_s=execution_time,
+                        error_message=error_message,
+                    )
+
                     return NodeResult(
                         success=False,
                         error_message=error_message,
                         retry_count=node.retry_count,
-                        execution_time=execution_time
+                        execution_time=execution_time,
                     )
     
     async def run_node_with_streaming(
@@ -299,3 +314,57 @@ class NodeRunner:
         results = await asyncio.gather(*tasks, return_exceptions=False)
         
         return results
+
+    # ------------------------------------------------------------------
+    # 内部工具
+    # ------------------------------------------------------------------
+
+    def _write_trace(
+        self,
+        context: 'ExecutionContext',
+        node: 'StepNode',
+        status: str,
+        started_at: datetime,
+        ended_at: datetime,
+        execution_time_s: float = 0.0,
+        artifact_ids: Optional[List[str]] = None,
+        error_message: Optional[str] = None,
+        output_summary: Optional[str] = None,
+    ) -> None:
+        """写一条 step trace，失败时静默（不影响主流程）"""
+        if self.trace_store is None:
+            return
+        try:
+            session_id = getattr(context, "session_id", None) or node.id
+            graph_id   = getattr(context, "graph_id", None)
+            workspace_path = str(self.workspace.root) if self.workspace else None
+
+            self.trace_store.record_step(
+                session_id=session_id,
+                graph_id=graph_id,
+                step_id=node.id,
+                step_type=node.capability_name,
+                status=status,
+                started_at=started_at,
+                ended_at=ended_at,
+                execution_time_s=execution_time_s,
+                retry_count=node.retry_count,
+                error_message=error_message,
+                workspace_path=workspace_path,
+                artifact_ids=artifact_ids or [],
+                output_summary=output_summary,
+            )
+        except Exception as e:
+            logger.warning(f"[NodeRunner] Trace write failed for node {node.id}: {e}")
+
+    @staticmethod
+    def _summarize(data: Optional[Dict[str, Any]], max_len: int = 200) -> Optional[str]:
+        """把 outputs 转成简短摘要字符串"""
+        if not data:
+            return None
+        try:
+            import json
+            s = json.dumps(data, default=str, ensure_ascii=False)
+            return s[:max_len] + "..." if len(s) > max_len else s
+        except Exception:
+            return str(data)[:max_len]

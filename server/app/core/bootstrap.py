@@ -94,6 +94,14 @@ class AppBootstrap:
         self.app.state.workspace_manager = workspace_mgr
         logger.info(f"  ├─ 当前工作目录: {workspace_mgr.get_workspace()}")
 
+        # 初始化 SessionWorkspaceManager（sandbox session IO 边界）
+        from app.avatar.runtime.workspace import init_session_workspace_manager
+        from pathlib import Path
+        session_ws_base = Path(config.avatar_workspace) / "sessions"
+        session_ws_mgr = init_session_workspace_manager(base_path=session_ws_base)
+        self.app.state.session_workspace_manager = session_ws_mgr
+        logger.info(f"  └─ Session workspace base: {session_ws_base}")
+
     def _init_database(self):
         logger.info("🔧 初始化数据库...")
         init_db()

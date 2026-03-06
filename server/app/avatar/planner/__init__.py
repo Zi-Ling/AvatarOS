@@ -19,7 +19,7 @@ from .registry import (
     get_planner_for_intent,
     register_intent_mapping,
 )
-from .runners.dag_runner import DagRunner
+# DagRunner removed - replaced by GraphRuntime
 
 # 导入 planners 模块以触发注册
 from .planners import simple_llm  # noqa: F401
@@ -43,6 +43,4 @@ __all__ = [
     "create_planner",
     "get_planner_for_intent",
     "register_intent_mapping",
-    # 内置实现
-    "DagRunner",
 ]

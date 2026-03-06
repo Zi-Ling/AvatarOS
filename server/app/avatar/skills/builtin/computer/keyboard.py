@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 from typing import List, Optional, Union
-from ...base import BaseSkill, SkillSpec, SkillOutput, SkillCategory, SkillMetadata, SkillDomain, SkillCapability
+from ...base import BaseSkill, SkillSpec, SkillOutput, SideEffect, SkillRiskLevel
 from ...registry import register_skill
 from ....actions.gui.drivers import KeyboardDriver
 
@@ -24,31 +24,12 @@ class KeyboardPressInput(BaseModel):
 class KeyboardTypeSkill(BaseSkill):
     spec = SkillSpec(
         name="computer.keyboard.type",
-        api_name="computer.keyboard.type",
-        internal_name="computer.keyboard.type_v1",
-        aliases=["keyboard.type", "type_text", "input_text", "keyboard_input", "write_text"],
-        description="Type text string using the keyboard simulation. Use this to input text into active windows. 使用键盘模拟输入文本。",
-        category=SkillCategory.COMPUTER,
+        description="Type text string using keyboard simulation. 使用键盘模拟输入文本。",
         input_model=KeyboardTypeInput,
         output_model=SkillOutput,
-        
-        # Capability Routing
-        meta=SkillMetadata(
-            domain=SkillDomain.UI,
-            capabilities={SkillCapability.WRITE},
-            risk_level="normal"
-        ),
-        
-        synonyms=[
-            "type string",
-            "input text",
-            "write with keyboard",
-            "simulate typing",
-            "输入文本",
-            "键盘打字",
-            "模拟输入"
-        ],
-        tags=["computer", "keyboard", "input", "键盘", "输入", "打字"]
+        side_effects=set(),
+        risk_level=SkillRiskLevel.WRITE,
+        aliases=["keyboard.type", "type_text", "input_text", "write_text"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: KeyboardTypeInput) -> SkillOutput:
@@ -60,34 +41,35 @@ class KeyboardTypeSkill(BaseSkill):
 class KeyboardHotkeySkill(BaseSkill):
     spec = SkillSpec(
         name="computer.keyboard.hotkey",
-        api_name="computer.keyboard.hotkey",
-        internal_name="computer.keyboard.hotkey_v1",
-        aliases=["keyboard.hotkey", "hotkey", "press_combo"],
-        description="Press a combination of keys simultaneously (e.g. Ctrl+C). 按下组合键（如Ctrl+C）。",
-        category=SkillCategory.COMPUTER,
+        description="Press a combination of keys simultaneously (e.g. Ctrl+C). 按下组合键。",
         input_model=KeyboardHotkeyInput,
         output_model=SkillOutput,
-        
-        # Capability Routing
-        meta=SkillMetadata(
-            domain=SkillDomain.UI,
-            capabilities={SkillCapability.EXECUTE, SkillCapability.WRITE}, # Hotkeys often execute actions or edit
-            risk_level="normal"
-        ),
-        
-        synonyms=[
-            "press shortcut",
-            "keyboard combo",
-            "hotkey press",
-            "send keys",
-            "按组合键",
-            "快捷键",
-            "热键"
-        ],
-        tags=["computer", "keyboard", "hotkey", "键盘", "快捷键", "组合键"]
+        side_effects=set(),
+        risk_level=SkillRiskLevel.WRITE,
+        aliases=["keyboard.hotkey", "hotkey", "press_combo"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: KeyboardHotkeyInput) -> SkillOutput:
         driver = KeyboardDriver()
         driver.hotkey(*input_data.keys)
         return SkillOutput(success=True, message=f"Executed hotkey: {'+'.join(input_data.keys)}")
+
+@register_skill
+class KeyboardPressSkill(BaseSkill):
+    spec = SkillSpec(
+        name="computer.keyboard.press",
+        description="Press keys in sequence. 按顺序按下按键。",
+        input_model=KeyboardPressInput,
+        output_model=SkillOutput,
+        side_effects=set(),
+        risk_level=SkillRiskLevel.WRITE,
+        aliases=["keyboard.press", "press_keys", "key_sequence"],
+    )
+
+    async def run(self, ctx: "SkillContext", input_data: KeyboardPressInput) -> SkillOutput:
+        import asyncio
+        driver = KeyboardDriver()
+        for key in input_data.keys:
+            driver.press_key(key)
+            await asyncio.sleep(input_data.interval)
+        return SkillOutput(success=True, message=f"Pressed keys: {input_data.keys}")

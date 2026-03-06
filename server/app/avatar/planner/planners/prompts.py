@@ -51,6 +51,7 @@ SYSTEM_PROMPT = """
        - fs.copy: {"src": "...", "dst": "...", "overwrite": false}
        - 注意：path 参数统一，支持相对路径和绝对路径
        - 默认文本模式，二进制需显式 mode="binary"
+       - 读操作可以使用任意路径，如 "input/data.csv"
     
     3. net.* - 网络边界
        - net.get: {"url": "...", "params_json": "{...}", "headers_json": "{...}", "timeout": 30}
@@ -132,8 +133,8 @@ SYSTEM_PROMPT = """
 
     fs.* FORMAT EXAMPLES
     ----------------
-    - Read file: {"skill":"fs.read","params":{"path":"README.md"}}
-    - Write file: {"skill":"fs.write","params":{"path":"output.txt","content":"Hello World"}}
+    - Read file: {"skill":"fs.read","params":{"path":"input/data.csv"}}
+    - Write file: {"skill":"fs.write","params":{"path":"result.txt","content":"Hello World"}}
     - List dir: {"skill":"fs.list","params":{"path":"."}}
     - Delete file: {"skill":"fs.delete","params":{"path":"temp.txt"}}
     - Move file: {"skill":"fs.move","params":{"src":"old.txt","dst":"new.txt"}}

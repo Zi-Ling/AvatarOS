@@ -110,8 +110,7 @@ class SandboxExecutor(SkillExecutor):
             return False
         
         try:
-            risk_level = skill.spec.meta.risk_level
-            return risk_level in [SkillRiskLevel.EXECUTE, SkillRiskLevel.SYSTEM]
+            return skill.spec.risk_level in [SkillRiskLevel.EXECUTE, SkillRiskLevel.SYSTEM]
         except Exception as e:
             logger.warning(f"[SandboxExecutor] Failed to check support: {e}")
             return False
@@ -138,7 +137,7 @@ class SandboxExecutor(SkillExecutor):
         if self._backend is None:
             raise RuntimeError("No sandbox backend available")
         
-        api_name = skill.spec.api_name
+        api_name = skill.spec.name
         
         # ========================================
         # 审计 1: 输入审计

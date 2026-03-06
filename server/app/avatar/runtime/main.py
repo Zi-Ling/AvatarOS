@@ -15,14 +15,20 @@ from app.avatar.intent import IntentSpec, IntentExtractor # Replaced IntentTaskC
 from app.avatar.planner.models import Task, TaskStatus, Step, StepStatus
 from app.avatar.planner.models.step import StepResult
 from app.avatar.planner.models.subtask import CompositeTask
-from app.avatar.planner.runners.dag_runner import DagRunner
+try:
+    from app.avatar.planner.runners.dag_runner import DagRunner  # deprecated
+except ImportError:
+    DagRunner = None  # type: ignore
 from app.avatar.skills import SkillContext
 from app.avatar.skills.registry import skill_registry
 from app.db import TaskStore, RunStore, StepStore, Run as RunRecord
 from app.avatar.runtime.monitoring import StepLogger
 from app.avatar.runtime.monitoring.loggers import DatabaseStepLogger
 from app.avatar.runtime.core import TaskContext, StepContext, ExecutionContext, SessionContext
-from app.avatar.runtime.loop import AgentLoop
+try:
+    from app.avatar.runtime.loop import AgentLoop  # deprecated, replaced by GraphController
+except ImportError:
+    AgentLoop = None  # type: ignore
 from app.avatar.memory.manager import MemoryManager
 from app.avatar.memory.provider import MemoryProvider
 # Use new perception manager
@@ -112,20 +118,9 @@ class _SkillCaller:
             } if step_ctx else {"user_request": self.user_request}
         )
         
-        # Parameter Alias Mapping (智能容错机制 - 元数据驱动)
-        # 根据 SkillSpec 中配置的别名自动映射参数
-        if hasattr(skill_cls.spec, 'param_aliases') and skill_cls.spec.param_aliases:
-            mapped_params = {}
-            for key, value in params.items():
-                # 如果参数名是别名，映射到标准名称
-                if key in skill_cls.spec.param_aliases:
-                    standard_key = skill_cls.spec.param_aliases[key]
-                    logger.info(f"[ParamMapper] {name}: Mapping alias '{key}' -> '{standard_key}'")
-                    mapped_params[standard_key] = value
-                else:
-                    mapped_params[key] = value
-            params = mapped_params
-        
+        # Parameter Alias Mapping — 基于 spec.aliases 做参数名容错
+        # aliases 是 skill 名称别名，不是参数别名，所以这里直接跳过
+
         # Pydantic Validation
         try:
             input_obj = skill_cls.spec.input_model(**params)
@@ -146,7 +141,7 @@ class AvatarMain:
         *,
         memory_manager: Optional[MemoryManager] = None,
         learning_manager: Optional[Any] = None,
-        runner: Optional[DagRunner] = None,
+        runner: Optional[Any] = None,
         task_planner: Optional[Any] = None,
         llm_client: Optional[Any] = None,
         state_store: Optional[Any] = None,
@@ -206,7 +201,8 @@ class AvatarMain:
             from app.avatar.planner.runners.tool_runner import ToolRunner
             self.runner = ToolRunner(event_bus=self.event_bus)
         else:
-            self.runner = DagRunner(event_bus=self.event_bus)
+            # DagRunner deleted - use GraphRuntime via GraphController
+            self.runner = None
         
         if task_planner is not None:
             self.task_planner = task_planner
@@ -249,7 +245,8 @@ class AvatarMain:
         self.perception.register_backend(PlaywrightPerceptionBackend())
         
         self.skill_guard = PolicySkillGuard()
-        self.learning_logger = FileLearningLogger(self.base_path / "logs" / "learning.log")
+        from app.core.config import AVATAR_LOGS_DIR
+        self.learning_logger = FileLearningLogger(AVATAR_LOGS_DIR / "learning.log")
 
         self._base_skill_caller = _SkillCaller(
             base_path=self.base_path,
@@ -261,30 +258,80 @@ class AvatarMain:
         )
 
         if self.task_planner:
-             self._agent_loop = AgentLoop(
-                planner=self.task_planner,
-                dag_runner=self.runner,
-                skill_context=self._base_skill_caller,
-                memory_provider=self.memory_provider,
-                memory_manager=self.memory_manager,  # 新增：传递 Memory Manager
-                learning_manager=self.learning_manager,  # 新增：传递 Learning Manager
-                perception=self.perception,
-                skill_guard=self.skill_guard,
-                learning_logger=self.learning_logger,
-                state_store=self.state,
-                event_bus=self.event_bus,
-                # compiler 已移除 - Router 负责意图理解
-                llm_client=self.llm_client, # Pass LLM client for self-correction
-            )
+            # Use GraphController (new architecture) instead of AgentLoop
+            try:
+                from app.avatar.runtime.graph.controller.graph_controller import GraphController
+                from app.avatar.runtime.graph.scheduler.scheduler import Scheduler
+                from app.avatar.runtime.graph.executor.graph_executor import GraphExecutor
+                from app.avatar.runtime.graph.executor.node_runner import NodeRunner
+                from app.avatar.runtime.graph.runtime.graph_runtime import GraphRuntime
+                from app.avatar.runtime.graph.planner.graph_planner import GraphPlanner
+
+                scheduler = Scheduler()
+
+                # SessionWorkspace + ArtifactCollector + StepTraceStore
+                _workspace = None
+                _artifact_collector = None
+                _trace_store = None
+                try:
+                    from app.avatar.runtime.workspace import get_session_workspace_manager
+                    from app.avatar.runtime.workspace.artifact_collector import ArtifactCollector
+                    from app.avatar.runtime.graph.storage.artifact_store import ArtifactStore
+                    from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
+                    from app.avatar.runtime.graph.storage.artifact_store import LocalStorageBackend
+                    from app.core.config import AVATAR_ARTIFACTS_DIR
+
+                    _ws_mgr = get_session_workspace_manager()
+                    _workspace = _ws_mgr.get_or_create("default")
+                    _artifact_backend = LocalStorageBackend(
+                        base_path=str(AVATAR_ARTIFACTS_DIR)
+                    )
+                    _artifact_store = ArtifactStore(backend=_artifact_backend)
+                    _artifact_collector = ArtifactCollector(artifact_store=_artifact_store)
+                    _trace_store = StepTraceStore()
+                    logger.info("[AvatarMain] Workspace + ArtifactCollector + StepTraceStore ready")
+                except Exception as ws_err:
+                    logger.warning(f"[AvatarMain] Workspace/Artifact/Trace init failed: {ws_err}")
+
+                graph_executor = GraphExecutor(
+                    base_path=self.base_path,
+                    memory_manager=self.memory_manager,
+                    workspace=_workspace,
+                )
+                node_runner = NodeRunner(
+                    executor=graph_executor,
+                    workspace=_workspace,
+                    artifact_collector=_artifact_collector,
+                    trace_store=_trace_store,
+                )
+                graph_runtime = GraphRuntime(
+                    scheduler=scheduler,
+                    node_runner=node_runner,
+                    event_bus=self.event_bus,
+                )
+                graph_planner = GraphPlanner(llm_client=self.llm_client)
+                self._graph_controller = GraphController(
+                    planner=graph_planner,
+                    runtime=graph_runtime,
+                )
+            except Exception as gc_err:
+                logger.warning(f"[AvatarMain] GraphController init failed: {gc_err}")
+                self._graph_controller = None
+            # AgentLoop removed - _agent_loop kept as None for backward compat
+            self._agent_loop = None
         else:
+            self._graph_controller = None
             self._agent_loop = None
 
     def handle_request(self, user_request: str) -> Any:
-        if not self._agent_loop:
-            raise RuntimeError("AgentLoop not initialized (missing LLM/TaskPlanner)")
-        # [Roadmap Phase 3] Pass user_request to enable Skill RAG
+        if not self._graph_controller:
+            raise RuntimeError("GraphController not initialized (missing LLM/TaskPlanner)")
         env_context = self._build_env_context(user_request=user_request)
-        return self._agent_loop.run(user_request, env_context)
+        # Delegate to GraphController for new architecture
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(
+            self._graph_controller.execute(user_request, mode="react")
+        )
 
     def _create_or_load_context(self, task: Task, env: Dict[str, Any]) -> TaskContext:
         """
@@ -386,118 +433,28 @@ class AvatarMain:
         try:
             RunStore.update_status(run_record.id, "running")
             
-            if self._agent_loop:
-                # [Robustness Fix] Restore metadata to ensure AgentLoop has full context
-                # This fixes the "History Lost" bug where session_id vanished after DB persistence
+            if self._graph_controller:
+                # New architecture: use GraphController
                 if original_metadata:
                     intent.metadata.update(original_metadata)
 
-                # [Roadmap Phase 3] Pass intent goal to enable Skill RAG
                 env_context = self._build_env_context(user_request=intent.goal)
                 env_context["run_id"] = run_record.id
-                
-                # 传递取消事件到环境上下文
                 if cancel_event:
                     env_context["cancel_event"] = cancel_event
-                
-                # Use the interactive loop
-                loop_result = await self._agent_loop.run(intent, env_context)
-                
-                # === FIX: Handle Loop Failure Gracefully ===
-                if not loop_result.success and loop_result.error:
-                    # 🎯 新增：尝试 fallback（针对编排任务失败）
-                    logger.warning(f"[Runtime] Loop failed: {loop_result.error[:200]}")
-                    
-                    # 检查是否是编排任务失败
-                    is_orchestrated_failure = (
-                        "Orchestrated task failed" in str(loop_result.error) or
-                        loop_result.plan is None
-                    )
-                    
-                    if is_orchestrated_failure:
-                        logger.info("[Runtime] Attempting fallback for orchestrated task failure...")
-                        fallback_result = await self._try_runtime_fallback(
-                            intent.goal,
-                            str(loop_result.error),
-                            env_context
-                        )
-                        
-                        # 检查 fallback 是否返回了有用的内容
-                        # 注意：fallback skill 的 success 总是 False，所以检查是否有 response
-                        if fallback_result and (fallback_result.get("response_zh") or fallback_result.get("message")):
-                            # Fallback 执行成功，创建一个包含 fallback 结果的虚拟任务
-                            logger.info("[Runtime] ✅ Fallback executed")
-                            
-                            # 创建虚拟 fallback step
-                            fallback_step = Step(
-                                id="fallback_1",
-                                skill_name="llm.fallback",
-                                params={"user_message": intent.goal, "reason": str(loop_result.error)[:300]},
-                                depends_on=[],
-                                order=0
-                            )
-                            fallback_step.status = StepStatus.SUCCESS
-                            fallback_step.result = StepResult(
-                                success=True,
-                                output=fallback_result,
-                                error=None
-                            )
-                            
-                            # 创建虚拟 task
-                            final_task = Task(
-                                id=str(uuid.uuid4()),
-                                goal=intent.goal,
-                                steps=[fallback_step],
-                                intent_id=intent.id  # 🎯 修复：补充必需的 intent_id 参数
-                            )
-                            final_task.status = TaskStatus.SUCCESS  # 标记为成功（因为 fallback 执行了）
-                            
-                            # 继续正常流程
-                        else:
-                            # Fallback 也失败，抛出原始错误
-                            raise RuntimeError(loop_result.error)
-                    else:
-                        # 非编排任务失败，直接抛出
-                        raise RuntimeError(loop_result.error)
-                else:
-                    final_task = loop_result.plan
-                    if not final_task:
-                        raise RuntimeError("Task planning failed (No plan generated).")
-                # ===========================================
-                
-                # AgentLoop 已经通过 task_service.update_step_status() 逐步持久化了每个 step
-                # 这里只需要同步 CompositeTask 的子任务步骤（AgentLoop 不处理这种情况）
-                if isinstance(final_task, CompositeTask):
-                    all_steps = []
-                    for subtask in final_task.subtasks:
-                        if subtask.task_result:
-                            all_steps.extend(subtask.task_result.steps)
-                    self._persist_steps(run_record.id, all_steps)
-                
-                # 状态映射
-                if isinstance(final_task, CompositeTask):
-                    status_map = {
-                        "success": ("completed", "✅ 成功完成任务"),
-                        "partial_success": ("completed", "⚠️ 部分完成任务"),
-                        "failed": ("failed", "❌ 任务失败"),
-                    }
-                    status, summary = status_map.get(final_task.status, ("failed", "未知状态"))
-                else:
-                    status_map = {
-                        TaskStatus.SUCCESS: ("completed", "✅ 成功完成任务"),
-                        TaskStatus.PARTIAL_SUCCESS: ("completed", "⚠️ 部分完成任务"),
-                        TaskStatus.FAILED: ("failed", "❌ 任务失败"),
-                    }
-                    status, summary = status_map.get(final_task.status, ("failed", "未知状态"))
-                
-                RunStore.update_status(run_record.id, status, summary=f"{summary}：{task_record.title}")
+
+                graph_result = await self._graph_controller.execute(
+                    intent.goal, mode="react", config={"env": env_context}
+                )
+
+                if graph_result.final_status == "FAILED":
+                    raise RuntimeError(graph_result.error_message or "GraphController execution failed")
+
+                RunStore.update_status(run_record.id, "completed", summary=f"✅ 成功完成任务：{task_record.title}")
             elif self.task_planner is not None:
-                # Fallback to old manual planner call if AgentLoop is somehow not init (should not happen)
-                # ... (old logic) ...
-                pass # Simplified for brevity as we enforce AgentLoop usage
+                pass  # no planner without controller
             else:
-                # Legacy path: run_intent without planner is no longer supported in V2
-                raise RuntimeError("Cannot execute intent without an active AgentLoop/Planner.")
+                raise RuntimeError("Cannot execute intent without an active GraphController/Planner.")
 
             if self.learning_logger:
                 self.learning_logger.record(
@@ -533,8 +490,8 @@ class AvatarMain:
         available_skills = {}
         for skill_cls in skill_registry.iter_skills():
             spec = skill_cls.spec
-            skill_name = spec.api_name or spec.internal_name
-            
+            skill_name = spec.name
+
             # 获取参数 schema
             params_schema = {}
             if spec.input_model:

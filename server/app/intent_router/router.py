@@ -69,9 +69,7 @@ class AvatarRouter:
         try:
             skill_selector.initialize()
         except Exception as e:
-            # Don't block startup if model loading fails (e.g. network issues)
-            # It will retry on first use or log warnings
-            logger.warning(f"SkillSelector initialization failed: {e}")
+            logging.getLogger(__name__).warning(f"SkillSelector initialization failed: {e}")
 
     # ---- 新版核心 API（推荐） ----
 

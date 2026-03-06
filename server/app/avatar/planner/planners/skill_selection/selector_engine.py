@@ -158,7 +158,7 @@ class SkillSelectorEngine:
         # 5. 自适应截断
         final_k = AdaptiveTopKCalculator.calculate_with_cutoff(relevant_specs, initial_k)
         relevant_specs = relevant_specs[:final_k]
-        relevant_api_names = {s.api_name for s in relevant_specs}
+        relevant_api_names = {s.name for s in relevant_specs}
         
         logger.debug(f"SkillSelector: After adaptive cutoff: {final_k} skills")
         
@@ -344,17 +344,15 @@ class SkillSelectorEngine:
             new_filtered = {}
             
             # 保留语义搜索的 top-1 作为安全锚点
-            top_search_skill = relevant_specs[0].api_name if relevant_specs else None
+            top_search_skill = relevant_specs[0].name if relevant_specs else None
             
             for name in selected_names:
-                # 尝试精确匹配
                 if name in skills:
                     new_filtered[name] = skills[name]
                 else:
-                    # 尝试通过别名解析
                     resolved = self.skill_registry.get(name)
-                    if resolved and resolved.spec.api_name in skills:
-                        new_filtered[resolved.spec.api_name] = skills[resolved.spec.api_name]
+                    if resolved and resolved.spec.name in skills:
+                        new_filtered[resolved.spec.name] = skills[resolved.spec.name]
             
             # 确保 top-1 被包含
             if top_search_skill and top_search_skill in skills:

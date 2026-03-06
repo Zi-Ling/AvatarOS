@@ -18,6 +18,13 @@ from app.avatar.skills.base import SkillRiskLevel
 logger = logging.getLogger(__name__)
 
 
+def _warmup_task():
+    """模块级空任务，用于预热进程池（必须在模块级才能被 pickle 序列化）"""
+    import time
+    time.sleep(0.01)
+    return "warmed"
+
+
 class ProcessExecutor(SkillExecutor):
     """
     进程执行器
@@ -58,13 +65,6 @@ class ProcessExecutor(SkillExecutor):
         # 创建进程池
         self._ensure_pool()
         
-        # 提交空任务到每个 worker（预热）
-        def _warmup_task():
-            """空任务，用于预热进程"""
-            import time
-            time.sleep(0.01)
-            return "warmed"
-        
         # 提交 max_workers 个任务，确保所有进程都启动
         futures = []
         for i in range(self.max_workers):
@@ -84,8 +84,7 @@ class ProcessExecutor(SkillExecutor):
     def supports(self, skill: Any) -> bool:
         """支持 READ/WRITE 级别的 Skill"""
         try:
-            risk_level = skill.spec.meta.risk_level
-            return risk_level in [SkillRiskLevel.READ, SkillRiskLevel.WRITE]
+            return skill.spec.risk_level in [SkillRiskLevel.READ, SkillRiskLevel.WRITE]
         except Exception as e:
             logger.warning(f"[ProcessExecutor] Failed to get risk_level: {e}")
             return False
@@ -121,7 +120,7 @@ class ProcessExecutor(SkillExecutor):
         Returns:
             执行结果
         """
-        logger.debug(f"[ProcessExecutor] Executing {skill.spec.api_name}")
+        logger.debug(f"[ProcessExecutor] Executing {skill.spec.name}")
         
         self._ensure_pool()
         
@@ -158,14 +157,14 @@ class ProcessExecutor(SkillExecutor):
                 skill_context
             )
             
-            logger.debug(f"[ProcessExecutor] Success: {skill.spec.api_name}")
+            logger.debug(f"[ProcessExecutor] Success: {skill.spec.name}")
             return result
             
         except FutureTimeoutError:
-            logger.error(f"[ProcessExecutor] Timeout: {skill.spec.api_name}")
+            logger.error(f"[ProcessExecutor] Timeout: {skill.spec.name}")
             raise TimeoutError(f"Skill execution timeout after {self.timeout}s")
         except Exception as e:
-            logger.error(f"[ProcessExecutor] Failed: {skill.spec.api_name}, error: {e}")
+            logger.error(f"[ProcessExecutor] Failed: {skill.spec.name}, error: {e}")
             raise
     
     def cleanup(self):

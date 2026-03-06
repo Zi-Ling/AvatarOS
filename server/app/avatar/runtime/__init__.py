@@ -15,7 +15,7 @@ from .core import (
 
 # 主入口
 from .main import AvatarMain
-from .loop import AgentLoop
+# AgentLoop removed - replaced by GraphController
 
 # 监控日志
 from .monitoring import StepLogger, TaskLog
@@ -47,7 +47,6 @@ __all__ = [
     "ErrorClassifier",
     # 主入口
     "AvatarMain",
-    "AgentLoop",
     # 监控
     "StepLogger",
     "TaskLog",

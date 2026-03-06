@@ -97,12 +97,10 @@ class SkillSelector:
             specs.append(spec)
             
             # 构建富语义文本
-            text = f"{spec.api_name}: {spec.description}"
+            text = f"{spec.name}: {spec.description}"
             
-            if spec.synonyms:
-                text += f" Synonyms: {', '.join(spec.synonyms)}"
             if spec.aliases:
-                text += f" Aliases: {', '.join(spec.aliases)}"
+                text += f" Synonyms: {', '.join(spec.aliases)}"
             
             texts.append(text)
 
@@ -166,7 +164,7 @@ class SkillSelector:
                 spec = self._skill_specs[idx]
                 results.append(spec)
                 
-                logger.debug(f"  [{score:.3f}] {spec.api_name}")
+                logger.debug(f"  [{score:.3f}] {spec.name}")
             
             if results:
                 logger.debug(f"Semantic search found {len(results)} skills for: {query}")
@@ -220,7 +218,7 @@ class SkillSelector:
             score = 0.0
             
             # 技能名称匹配（高权重）
-            if any(word in spec.api_name.lower() for word in query_words):
+            if any(word in spec.name.lower() for word in query_words):
                 score += 10.0
             
             # 描述匹配（中权重）
@@ -230,16 +228,9 @@ class SkillSelector:
                     score += 2.0
             
             # 同义词匹配（中权重）
-            if spec.synonyms:
-                for synonym in spec.synonyms:
-                    if any(word in synonym.lower() for word in query_words):
-                        score += 3.0
-            
-            # 标签匹配（低权重）
-            if spec.tags:
-                for tag in spec.tags:
-                    if any(word in tag.lower() for word in query_words):
-                        score += 1.0
+            for alias in spec.aliases:
+                if any(word in alias.lower() for word in query_words):
+                    score += 3.0
             
             if score > 0:
                 scored_specs.append((spec, score))

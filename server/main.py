@@ -20,8 +20,9 @@ import socketio
 
 # 配置日志系统（在导入其他模块之前）
 from app.core.logging_config import setup_logging
+from app.core.config import AVATAR_LOGS_DIR
 setup_logging(
-    log_dir=Path("logs"),
+    log_dir=AVATAR_LOGS_DIR,
     log_level=os.getenv("LOG_LEVEL", "INFO"),
     enable_json=os.getenv("LOG_FORMAT", "text") == "json",
     enable_console=True,
