@@ -7,99 +7,42 @@ import {
   Edge,
 } from 'reactflow';
 import dagre from 'dagre';
-import { TaskData, TaskStep } from '@/app/(modules)/graph/types';
+import { TaskData, GraphState } from '@/app/(modules)/graph/types';
 
-const nodeWidth = 172;
-const nodeHeight = 36;
+const nodeWidth = 180;
+const nodeHeight = 40;
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[]) => {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
-
-  dagreGraph.setGraph({ rankdir: 'TB' }); // Top to Bottom
+  dagreGraph.setGraph({ rankdir: 'TB' });
 
   nodes.forEach((node) => {
     dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
   });
-
   edges.forEach((edge) => {
     dagreGraph.setEdge(edge.source, edge.target);
   });
 
   dagre.layout(dagreGraph);
 
-  const layoutedNodes = nodes.map((node) => {
-    const nodeWithPosition = dagreGraph.node(node.id);
-    
-    // 微调位置，使其居中
-    return {
-      ...node,
-      targetPosition: Position.Top,
-      sourcePosition: Position.Bottom,
-      position: {
-        x: nodeWithPosition.x - nodeWidth / 2,
-        y: nodeWithPosition.y - nodeHeight / 2,
-      },
-    };
-  });
-
-  return { nodes: layoutedNodes, edges };
-};
-
-export const useGraphLayout = (task: TaskData | null) => {
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-
-  useEffect(() => {
-    if (!task) {
-      setNodes([]);
-      setEdges([]);
-      return;
-    }
-
-    // 1. Convert TaskSteps to Nodes
-    const initialNodes: Node[] = task.steps.map((step) => ({
-      id: step.id,
-      data: { label: step.skill_name, status: step.status },
-      position: { x: 0, y: 0 }, // layout will set this
-      type: 'default', // or custom type
-      style: getNodeStyle(step.status),
-    }));
-
-    // 2. Convert Dependencies to Edges
-    const initialEdges: Edge[] = [];
-    task.steps.forEach((step, index) => {
-        // 简单的线性依赖假设：如果后端没有返回 explicitly 的 depends_on，
-        // 我们可以默认它是顺序执行的，或者暂时不连线。
-        // 这里假设 index > 0 的节点依赖 index - 1 (简单序列模式)
-        // 如果后续有真实的 DAG 依赖，这里需要解析 step.depends_on
-        if (index > 0) {
-            initialEdges.push({
-                id: `e-${task.steps[index-1].id}-${step.id}`,
-                source: task.steps[index-1].id,
-                target: step.id,
-                animated: step.status === 'running',
-                style: { stroke: '#94a3b8' },
-            });
-        }
-    });
-
-    // 3. Apply Layout
-    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-      initialNodes,
-      initialEdges
-    );
-
-    setNodes(layoutedNodes);
-    setEdges(layoutedEdges);
-  }, [task, setNodes, setEdges]);
-
-  return { nodes, edges, onNodesChange, onEdgesChange };
+  return {
+    nodes: nodes.map((node) => {
+      const pos = dagreGraph.node(node.id);
+      return {
+        ...node,
+        targetPosition: Position.Top,
+        sourcePosition: Position.Bottom,
+        position: { x: pos.x - nodeWidth / 2, y: pos.y - nodeHeight / 2 },
+      };
+    }),
+    edges,
+  };
 };
 
 const getNodeStyle = (status: string) => {
-  const baseStyle = {
-    padding: '10px',
+  const base = {
+    padding: '8px 12px',
     borderRadius: '8px',
     fontSize: '12px',
     width: nodeWidth,
@@ -107,16 +50,81 @@ const getNodeStyle = (status: string) => {
     background: 'white',
     color: '#1e293b',
   };
-
   switch (status) {
     case 'running':
-      return { ...baseStyle, border: '2px solid #3b82f6', boxShadow: '0 0 10px rgba(59, 130, 246, 0.2)' };
+      return { ...base, border: '2px solid #3b82f6', boxShadow: '0 0 10px rgba(59,130,246,0.25)' };
     case 'completed':
-      return { ...baseStyle, border: '1px solid #22c55e', background: '#f0fdf4', color: '#15803d' };
+    case 'success':
+      return { ...base, border: '1px solid #22c55e', background: '#f0fdf4', color: '#15803d' };
     case 'failed':
-      return { ...baseStyle, border: '1px solid #ef4444', background: '#fef2f2', color: '#b91c1c' };
-    default: // pending
-      return baseStyle;
+      return { ...base, border: '1px solid #ef4444', background: '#fef2f2', color: '#b91c1c' };
+    case 'skipped':
+      return { ...base, border: '1px solid #94a3b8', background: '#f8fafc', color: '#64748b' };
+    default:
+      return base;
   }
 };
 
+/** Accepts either legacy TaskData or live GraphState */
+export const useGraphLayout = (data: TaskData | GraphState | null) => {
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+
+  useEffect(() => {
+    if (!data) {
+      setNodes([]);
+      setEdges([]);
+      return;
+    }
+
+    let initialNodes: Node[] = [];
+    let initialEdges: Edge[] = [];
+
+    if ('steps' in data) {
+      // Legacy TaskData
+      initialNodes = data.steps.map((step) => ({
+        id: step.id,
+        data: { label: step.skill_name, status: step.status },
+        position: { x: 0, y: 0 },
+        style: getNodeStyle(step.status),
+      }));
+      data.steps.forEach((step, index) => {
+        if (index > 0) {
+          initialEdges.push({
+            id: `e-${data.steps[index - 1].id}-${step.id}`,
+            source: data.steps[index - 1].id,
+            target: step.id,
+            animated: step.status === 'running',
+            style: { stroke: '#94a3b8' },
+          });
+        }
+      });
+    } else {
+      // Live GraphState
+      const nodeList = Object.values(data.nodes);
+      initialNodes = nodeList.map((node) => ({
+        id: node.id,
+        data: { label: node.capability || node.id, status: node.status },
+        position: { x: 0, y: 0 },
+        style: getNodeStyle(node.status),
+      }));
+      nodeList.forEach((node) => {
+        (node.depends_on ?? []).forEach((depId) => {
+          initialEdges.push({
+            id: `e-${depId}-${node.id}`,
+            source: depId,
+            target: node.id,
+            animated: node.status === 'running',
+            style: { stroke: '#94a3b8' },
+          });
+        });
+      });
+    }
+
+    const { nodes: layouted, edges: layoutedEdges } = getLayoutedElements(initialNodes, initialEdges);
+    setNodes(layouted);
+    setEdges(layoutedEdges);
+  }, [data, setNodes, setEdges]);
+
+  return { nodes, edges, onNodesChange, onEdgesChange };
+};

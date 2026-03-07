@@ -75,23 +75,15 @@ class SocketBridge:
         Converts the Event dataclass to a JSON-ready dictionary.
         Handles non-serializable fields if necessary.
         """
-        # Basic serialization using asdict
         data = asdict(event)
-        
-        # Convert enum to string for frontend consumption
         data['type'] = event.type.value
-        
-        # Ensure step_id is at the top level for frontend compatibility
-        # 前端期望: event.step_id
+
         if event.step_id:
             data['step_id'] = event.step_id
-        
-        # Ensure timestamp is ISO string
-        if isinstance(data.get('timestamp'), (int, float)):
-            # If timestamp is unix time
-            pass 
-        # Note: Event class uses default_factory=lambda: time.time() which returns float
-        
-        # If the event payload has complex objects, we might need more processing here.
-        # For now, we assume payload is JSON serializable.
+
+        # Hoist session_id from payload to top-level for frontend filtering
+        payload = event.payload or {}
+        if 'session_id' not in data and 'session_id' in payload:
+            data['session_id'] = payload['session_id']
+
         return data

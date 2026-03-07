@@ -83,17 +83,16 @@ class EventBus:
         
         # 3. Broadcast to WebSocket clients (Requirement 21.2)
         if self._websocket_broadcaster:
-            # Only broadcast specific events
+            from .types import EventType as ET
             broadcast_events = {
-                'node_started',
-                'node_completed',
-                'node_failed',
-                'graph_completed',
-                'graph_started',
-                'graph_failed',
+                ET.GRAPH_STARTED,
+                ET.GRAPH_COMPLETED,
+                ET.GRAPH_FAILED,
+                ET.NODE_STARTED,
+                ET.NODE_COMPLETED,
+                ET.NODE_FAILED,
             }
-            
-            if event.type in broadcast_events or isinstance(event.type, str) and event.type in broadcast_events:
+            if event.type in broadcast_events:
                 try:
                     self._websocket_broadcaster(event)
                 except Exception as e:

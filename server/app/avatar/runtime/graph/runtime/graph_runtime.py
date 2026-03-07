@@ -597,30 +597,44 @@ class GraphRuntime:
     def _emit_event(self, event_type: str, data: Dict) -> None:
         """
         Emit an event via EventBus if available.
-        
-        Args:
-            event_type: Type of event
-            data: Event data
-            
-        Requirements: 3.7
+        node_started / node_completed / node_failed 同时映射为前端可识别的
+        step.start / step.end / step.failed 事件，实现实时进度推送。
         """
         if self.event_bus:
             try:
                 from app.avatar.runtime.events.types import Event, EventType
-                
-                # Try to map string to EventType enum; skip if not a known type
-                try:
-                    et = EventType(event_type)
-                except ValueError:
-                    # event_type is a graph-internal string not in EventType enum, skip
-                    return
-                
+                et = EventType(event_type)
                 event = Event(
                     type=et,
                     source="graph_runtime",
                     payload=data
                 )
                 self.event_bus.publish(event)
+
+                # 映射 node 事件 → 前端 step 事件
+                _NODE_TO_STEP = {
+                    "node_started":   EventType.STEP_START,
+                    "node_completed": EventType.STEP_END,
+                    "node_failed":    EventType.STEP_FAILED,
+                }
+                if event_type in _NODE_TO_STEP:
+                    node_id = data.get("node_id", "")
+                    step_payload = {
+                        "session_id":  data.get("session_id", ""),
+                        "skill_name":  data.get("capability", ""),
+                        "status":      "running" if event_type == "node_started" else (
+                                       "failed"    if event_type == "node_failed" else "completed"),
+                        "raw_output":  data.get("outputs"),
+                        "error":       data.get("error"),
+                    }
+                    step_event = Event(
+                        type=_NODE_TO_STEP[event_type],
+                        source="graph_runtime",
+                        payload=step_payload,
+                        step_id=str(node_id),
+                    )
+                    self.event_bus.publish(step_event)
+
             except Exception as e:
                 logger.warning(f"[GraphRuntime] Failed to emit event {event_type}: {e}")
     

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type WorkbenchTab = 'active' | 'logs' | 'preview' | 'history' | 'editor';
+export type WorkbenchTab = 'active' | 'logs' | 'history' | 'editor';
 
 interface WorkbenchState {
   activeTab: WorkbenchTab;
@@ -8,8 +8,10 @@ interface WorkbenchState {
   activeFile: string | null;
   unsavedFiles: Set<string>; 
   fileContents: Record<string, string>; // 存储文件内容缓存
+  selectedStepId: string | null; // 左右联动：当前选中的步骤
   
   setActiveTab: (tab: WorkbenchTab) => void;
+  setSelectedStepId: (id: string | null) => void;
   openFile: (path: string) => void;
   closeFile: (path: string) => void;
   setActiveFile: (path: string) => void;
@@ -25,8 +27,10 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
   activeFile: null,
   unsavedFiles: new Set(),
   fileContents: {},
+  selectedStepId: null,
   
   setActiveTab: (tab) => set({ activeTab: tab }),
+  setSelectedStepId: (id) => set({ selectedStepId: id }),
   
   openFile: (path) => set((state) => {
     if (state.openFiles.includes(path)) {

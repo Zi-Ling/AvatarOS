@@ -1,16 +1,16 @@
 "use client";
 
 import React from "react";
-import { Workflow, Terminal, Wifi, WifiOff, FileText, History, LucideIcon, Code2 } from "lucide-react";
+import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/components/providers/SocketProvider";
 import { ActiveTaskView } from "./_components/ActiveTaskView";
 import { LogsView } from "./_components/LogsView";
-import { PreviewView } from "./_components/PreviewView";
 import { HistoryView } from "./_components/HistoryView";
 import { useTaskExecution } from "@/lib/hooks/useTaskExecution";
 import { useWorkbenchStore, type WorkbenchTab } from "@/stores/workbenchStore";
+import { useTaskStore } from "@/stores/taskStore";
 import { WorkbenchEditor } from "./_components/WorkbenchEditor";
 
 interface TabConfig {
@@ -25,12 +25,20 @@ export default function Workbench() {
   const { isConnected } = useSocket();
   const { activeTab, setActiveTab, openFiles } = useWorkbenchStore();
   const { task, logs } = useTaskExecution();
+  const { pendingApprovals } = useTaskStore();
 
   const tabs: TabConfig[] = [
-    { id: "active", label: "Active Task", icon: Workflow, badge: task?.status === "executing" ? "●" : undefined, color: "text-indigo-500" },
+    {
+      id: "active",
+      label: "Active Task",
+      icon: Workflow,
+      badge: pendingApprovals.length > 0
+        ? `⏸ ${pendingApprovals.length}`
+        : task?.status === "executing" ? "●" : undefined,
+      color: "text-indigo-500",
+    },
     { id: "editor", label: "Editor", icon: Code2, badge: openFiles.length > 0 ? openFiles.length : undefined, color: "text-orange-500" },
     { id: "logs", label: "Logs", icon: Terminal, badge: logs.length > 0 ? logs.length : undefined, color: "text-blue-500" },
-    { id: "preview", label: "Preview", icon: FileText, color: "text-emerald-500" },
     { id: "history", label: "History", icon: History, color: "text-purple-500" },
   ];
 
@@ -123,7 +131,6 @@ export default function Workbench() {
                 </div>
               )}
               {activeTab === "logs" && <LogsView logs={logs} />}
-              {activeTab === "preview" && <PreviewView />}
               {activeTab === "history" && <HistoryView />}
             </motion.div>
           )}

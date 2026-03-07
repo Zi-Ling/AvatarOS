@@ -292,129 +292,135 @@ async def _emit_plan_and_steps(run_record, intent, session_id: str):
     # 优先从 ExecutionGraph 读取节点（GraphController 不写 StepStore）
     graph = getattr(run_record, "_graph", None)
 
-    if graph and graph.nodes:
-        # 从 ExecutionGraph.nodes 构建 steps_payload
-        nodes = list(graph.nodes.values())
-        steps_payload = []
-        for i, node in enumerate(nodes):
-            steps_payload.append({
-                "id": str(node.id),
-                "skill": node.capability_name,
-                "skill_name": node.capability_name,
-                "description": node.capability_name.replace(".", " → "),
-                "status": "pending",
-                "order": i,
-                "params": node.params or {},
-                "depends_on": [],
-            })
-
-        # 发 plan.generated
-        await socket_manager.emit("server_event", {
-            "type": "plan.generated",
-            "payload": {
-                "session_id": session_id,
-                "plan": {
-                    "id": plan_id,
-                    "goal": goal,
-                    "steps": steps_payload,
-                },
-            },
-        })
-
-        # 逐节点发 step.end / step.failed
-        from app.avatar.runtime.graph.models.step_node import NodeStatus
-        for node in nodes:
-            is_failed = node.status == NodeStatus.FAILED
-            event_type = "step.failed" if is_failed else "step.end"
-
-            outputs = node.outputs or {}
-            b64_image = None
-            if isinstance(outputs, dict):
-                b64_image = outputs.get("base64_image")
-
-            await socket_manager.emit("server_event", {
-                "type": event_type,
-                "step_id": str(node.id),
-                "payload": {
-                    "session_id": session_id,
+    try:
+        if graph and graph.nodes:
+            # 从 ExecutionGraph.nodes 构建 steps_payload
+            nodes = list(graph.nodes.values())
+            steps_payload = []
+            for i, node in enumerate(nodes):
+                steps_payload.append({
+                    "id": str(node.id),
+                    "skill": node.capability_name,
                     "skill_name": node.capability_name,
-                    "status": "failed" if is_failed else "completed",
-                    "raw_output": outputs,
-                    "base64_image": b64_image,
-                    "error": node.error_message if is_failed else None,
-                },
-            })
+                    "description": node.capability_name.replace(".", " → "),
+                    "status": "pending",
+                    "order": i,
+                    "params": node.params or {},
+                    "depends_on": [],
+                })
 
-    elif run_record.steps:
-        # Fallback: 从 DB steps 读取（旧架构兼容）
-        steps_payload = []
-        for i, step in enumerate(run_record.steps):
-            skill_name = getattr(step, "skill_name", "unknown")
-            step_id = getattr(step, "id", f"step_{i}")
-            input_params = getattr(step, "input_params", {}) or {}
-            steps_payload.append({
-                "id": str(step_id),
-                "skill": skill_name,
-                "skill_name": skill_name,
-                "description": skill_name.replace(".", " → "),
-                "status": "pending",
-                "order": i,
-                "params": input_params,
-                "depends_on": [],
-            })
-
-        await socket_manager.emit("server_event", {
-            "type": "plan.generated",
-            "payload": {
-                "session_id": session_id,
-                "plan": {"id": plan_id, "goal": goal, "steps": steps_payload},
-            },
-        })
-
-        for i, step in enumerate(run_record.steps):
-            skill_name = getattr(step, "skill_name", "unknown")
-            step_id = getattr(step, "id", f"step_{i}")
-            status = getattr(step, "status", "completed")
-            output_result = getattr(step, "output_result", {}) or {}
-            error_message = getattr(step, "error_message", None)
-            is_failed = str(status).lower() == "failed"
-
-            b64_image = None
-            if isinstance(output_result, dict):
-                val = output_result.get("value", output_result)
-                if isinstance(val, dict):
-                    b64_image = val.get("base64_image")
-
+            # 发 plan.generated
             await socket_manager.emit("server_event", {
-                "type": "step.failed" if is_failed else "step.end",
-                "step_id": str(step_id),
+                "type": "plan.generated",
                 "payload": {
                     "session_id": session_id,
-                    "skill_name": skill_name,
-                    "status": "failed" if is_failed else "completed",
-                    "raw_output": output_result,
-                    "base64_image": b64_image,
-                    "error": error_message,
+                    "plan": {
+                        "id": plan_id,
+                        "goal": goal,
+                        "steps": steps_payload,
+                    },
                 },
             })
-    else:
-        # 没有任何步骤信息，跳过
-        logger.warning(f"[_emit_plan_and_steps] No graph nodes or DB steps found for run {plan_id}")
-        return
 
-    # 发 task.completed
-    final_status = getattr(run_record, "status", "completed")
-    await socket_manager.emit("server_event", {
-        "type": "task.completed",
-        "payload": {
-            "session_id": session_id,
-            "task": {
-                "id": plan_id,
-                "status": "FAILED" if final_status != "completed" else "SUCCESS",
+            # 逐节点发 step.end / step.failed
+            from app.avatar.runtime.graph.models.step_node import NodeStatus
+            for node in nodes:
+                is_failed = node.status == NodeStatus.FAILED
+                event_type = "step.failed" if is_failed else "step.end"
+
+                outputs = node.outputs or {}
+                b64_image = None
+                if isinstance(outputs, dict):
+                    b64_image = outputs.get("base64_image")
+
+                await socket_manager.emit("server_event", {
+                    "type": event_type,
+                    "step_id": str(node.id),
+                    "payload": {
+                        "session_id": session_id,
+                        "skill_name": node.capability_name,
+                        "status": "failed" if is_failed else "completed",
+                        "raw_output": outputs,
+                        "base64_image": b64_image,
+                        "error": node.error_message if is_failed else None,
+                    },
+                })
+
+        elif run_record.steps:
+            # Fallback: 从 DB steps 读取（旧架构兼容）
+            steps_payload = []
+            for i, step in enumerate(run_record.steps):
+                skill_name = getattr(step, "skill_name", "unknown")
+                step_id = getattr(step, "id", f"step_{i}")
+                input_params = getattr(step, "input_params", {}) or {}
+                steps_payload.append({
+                    "id": str(step_id),
+                    "skill": skill_name,
+                    "skill_name": skill_name,
+                    "description": skill_name.replace(".", " → "),
+                    "status": "pending",
+                    "order": i,
+                    "params": input_params,
+                    "depends_on": [],
+                })
+
+            await socket_manager.emit("server_event", {
+                "type": "plan.generated",
+                "payload": {
+                    "session_id": session_id,
+                    "plan": {"id": plan_id, "goal": goal, "steps": steps_payload},
+                },
+            })
+
+            for i, step in enumerate(run_record.steps):
+                skill_name = getattr(step, "skill_name", "unknown")
+                step_id = getattr(step, "id", f"step_{i}")
+                status = getattr(step, "status", "completed")
+                output_result = getattr(step, "output_result", {}) or {}
+                error_message = getattr(step, "error_message", None)
+                is_failed = str(status).lower() == "failed"
+
+                b64_image = None
+                if isinstance(output_result, dict):
+                    val = output_result.get("value", output_result)
+                    if isinstance(val, dict):
+                        b64_image = val.get("base64_image")
+
+                await socket_manager.emit("server_event", {
+                    "type": "step.failed" if is_failed else "step.end",
+                    "step_id": str(step_id),
+                    "payload": {
+                        "session_id": session_id,
+                        "skill_name": skill_name,
+                        "status": "failed" if is_failed else "completed",
+                        "raw_output": output_result,
+                        "base64_image": b64_image,
+                        "error": error_message,
+                    },
+                })
+        else:
+            logger.warning(f"[_emit_plan_and_steps] No graph nodes or DB steps found for run {plan_id}")
+
+    except Exception as e:
+        logger.error(f"[_emit_plan_and_steps] Failed to emit plan/steps: {e}", exc_info=True)
+
+    # task.completed 无论如何都要发，保证前端状态机能推进
+    try:
+        final_status = getattr(run_record, "status", "completed")
+        step_count = len(graph.nodes) if (graph and graph.nodes) else (len(run_record.steps) if run_record.steps else 0)
+        await socket_manager.emit("server_event", {
+            "type": "task.completed",
+            "payload": {
+                "session_id": session_id,
+                "task": {
+                    "id": plan_id,
+                    "status": "FAILED" if final_status != "completed" else "SUCCESS",
+                },
+                "step_count": step_count,
             },
-            "step_count": len(graph.nodes) if graph else len(run_record.steps),
-        },
-    })
+        })
+    except Exception as e:
+        logger.error(f"[_emit_plan_and_steps] Failed to emit task.completed: {e}", exc_info=True)
 
 
 async def _handle_planning_failure(error, avatar_router, decision, user_message, session_id, prefix_content):

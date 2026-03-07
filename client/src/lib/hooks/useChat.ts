@@ -150,10 +150,16 @@ export function useChat() {
           }
           if (data && data.done) {
             const isTaskPlanning =
+              accumulatedContent.includes("正在规划任务") ||
               accumulatedContent.includes("正在为您规划任务") ||
               accumulatedContent.includes("Planning task");
             if (isTaskPlanning) {
-              console.log("Async Task started: Keeping message in streaming state.");
+              // 升级为 task_progress（indeterminate），等待 plan.generated 覆盖
+              updateMessage(aiMessageId, {
+                messageType: "task_progress",
+                content: "",
+                isStreaming: true,
+              });
             } else {
               updateMessage(aiMessageId, { isStreaming: false });
               setCurrentTaskMessageId(null);

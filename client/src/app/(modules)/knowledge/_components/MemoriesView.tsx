@@ -1,183 +1,237 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import { Brain, Trash2, Edit2, Tag, ChevronDown, ChevronUp, Clock, CheckCircle2, XCircle } from "lucide-react";
-import { knowledgeApi, MemoryItem } from "@/lib/api/knowledge";
+import React, { useEffect, useState, useCallback } from "react";
+import {
+  User, Clock, CheckCircle2, XCircle, Search, Trash2, ChevronDown, ChevronUp,
+} from "lucide-react";
+import { knowledgeApi, UserPrefItem, EpisodicItem, MemorySearchResult } from "@/lib/api/knowledge";
+
+type StatusFilter = "all" | "success" | "failed";
 
 export function MemoriesView({ searchQuery = "" }: { searchQuery?: string }) {
-  const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [userPrefs, setUserPrefs] = useState<UserPrefItem[]>([]);
+  const [episodic, setEpisodic] = useState<EpisodicItem[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Semantic search state
+  const [semanticQuery, setSemanticQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<MemorySearchResult[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  // Filter
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // Filter memories based on search query
-  const filteredMemories = memories.filter(mem => 
-    !searchQuery || 
-    mem.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    mem.category.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  useEffect(() => {
-    loadData();
-  }, []);
+  useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
     setLoading(true);
-    try {
-      const data = await knowledgeApi.listMemories();
-      setMemories(data);
-    } finally {
-      setLoading(false);
-    }
+    const { data } = await knowledgeApi.listMemories();
+    setUserPrefs(data.user_prefs);
+    setEpisodic(data.episodic);
+    setLoading(false);
   };
 
-  const toggleExpand = (id: string) => {
-    setExpandedId(expandedId === id ? null : id);
+  const handleSemanticSearch = async () => {
+    if (!semanticQuery.trim()) { setSearchResults(null); return; }
+    setSearching(true);
+    const results = await knowledgeApi.searchMemories(semanticQuery, 10);
+    setSearchResults(results);
+    setSearching(false);
   };
+
+  const handleDeletePref = async (key: string) => {
+    await knowledgeApi.deleteMemory(`user:default:prefs/${key}`);
+    setUserPrefs((prev) => prev.filter((p) => p.key !== key));
+  };
+
+  const filteredEpisodic = (searchResults
+    ? searchResults.map((r) => ({
+        id: r.id,
+        summary: r.summary,
+        status: r.status as EpisodicItem["status"],
+        created_at: r.created_at,
+      }))
+    : episodic
+  ).filter((e) => {
+    const matchesStatus = statusFilter === "all" || e.status === statusFilter;
+    const matchesText =
+      !searchQuery ||
+      e.summary.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesStatus && matchesText;
+  });
+
+  if (loading) {
+    return <div className="h-full flex items-center justify-center text-slate-400">加载中...</div>;
+  }
 
   return (
-    <div className="h-full flex flex-col">
-      <div className="grid grid-cols-1 gap-4 overflow-y-auto pb-20">
-        {searchQuery && (
-          <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mb-2">
-            <p className="text-sm text-blue-700 dark:text-blue-300">
-              Found <strong>{filteredMemories.length}</strong> result{filteredMemories.length !== 1 ? 's' : ''} for "{searchQuery}"
-            </p>
+    <div className="h-full flex flex-col gap-6 overflow-y-auto pb-4">
+      {/* ── Block 1: User Profile ── */}
+      <section>
+        <div className="flex items-center gap-2 mb-3">
+          <User className="w-4 h-4 text-purple-500" />
+          <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">用户画像</h3>
+          <span className="text-xs text-slate-400">来自学习到的偏好</span>
+        </div>
+
+        {userPrefs.length === 0 ? (
+          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700/50 p-6 text-center text-slate-400 text-sm">
+            暂无用户偏好记录，继续使用系统来积累数据
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {userPrefs.map((pref) => (
+              <div
+                key={pref.key}
+                className="group bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700/50 p-4 flex items-start justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <p className="text-xs text-slate-400 mb-1">{formatPrefKey(pref.key)}</p>
+                  <p className="text-sm font-medium text-slate-700 dark:text-slate-200 truncate">{pref.value}</p>
+                </div>
+                <button
+                  onClick={() => handleDeletePref(pref.key)}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-md flex-shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                </button>
+              </div>
+            ))}
           </div>
         )}
-        {filteredMemories.map((mem) => {
-          const isExpanded = expandedId === mem.id;
-          return (
-            <div 
-              key={mem.id}
-              className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700/50 shadow-sm hover:shadow-md transition-all group"
-            >
-              {/* Main Card Content */}
-              <div 
-                className="p-5 cursor-pointer"
-                onClick={() => toggleExpand(mem.id)}
+      </section>
+
+      {/* ── Block 2: Task Memory ── */}
+      <section className="flex-1 flex flex-col min-h-0">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-blue-500" />
+            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">任务记忆</h3>
+            <span className="text-xs text-slate-400">{episodic.length} 条记录</span>
+          </div>
+
+          {/* Status filter */}
+          <div className="flex gap-1">
+            {(["all", "success", "failed"] as StatusFilter[]).map((f) => (
+              <button
+                key={f}
+                onClick={() => setStatusFilter(f)}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  statusFilter === f
+                    ? "bg-indigo-500 text-white"
+                    : "bg-slate-100 dark:bg-slate-800 text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700"
+                }`}
               >
-                {/* Header */}
-                <div className="flex justify-between items-start mb-3">
-                  <div className="flex items-center gap-2">
-                    <span className={`
-                      px-2 py-1 rounded-md text-xs font-medium flex items-center gap-1
-                      ${getCategoryStyle(mem.category)}
-                    `}>
-                      <Tag className="w-3 h-3" />
-                      {mem.category}
-                    </span>
-                    {mem.confidence >= 0.9 ? (
-                      <CheckCircle2 className="w-4 h-4 text-green-500" />
-                    ) : mem.confidence < 0.7 ? (
-                      <XCircle className="w-4 h-4 text-red-500" />
-                    ) : null}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400 flex items-center gap-1">
-                      <Clock className="w-3 h-3" />
-                      {mem.created_at}
-                    </span>
-                    {isExpanded ? (
-                      <ChevronUp className="w-4 h-4 text-slate-400" />
-                    ) : (
-                      <ChevronDown className="w-4 h-4 text-slate-400" />
-                    )}
-                  </div>
-                </div>
+                {f === "all" ? "全部" : f === "success" ? "成功" : "失败"}
+              </button>
+            ))}
+          </div>
+        </div>
 
-                {/* Content */}
-                <p className={`
-                  text-slate-700 dark:text-slate-200 font-medium text-base
-                  ${isExpanded ? '' : 'line-clamp-2'}
-                `}>
-                  {mem.content}
-                </p>
+        {/* Semantic search bar */}
+        <div className="flex gap-2 mb-3">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+            <input
+              type="text"
+              value={semanticQuery}
+              onChange={(e) => {
+                setSemanticQuery(e.target.value);
+                if (!e.target.value) setSearchResults(null);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && handleSemanticSearch()}
+              placeholder="语义搜索历史任务..."
+              className="w-full pl-8 pr-4 py-1.5 text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            />
+          </div>
+          <button
+            onClick={handleSemanticSearch}
+            disabled={searching}
+            className="px-3 py-1.5 text-sm bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg transition-colors disabled:opacity-50"
+          >
+            {searching ? "搜索中..." : "搜索"}
+          </button>
+          {searchResults !== null && (
+            <button
+              onClick={() => { setSearchResults(null); setSemanticQuery(""); }}
+              className="px-3 py-1.5 text-sm bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors text-slate-600 dark:text-slate-400"
+            >
+              清除
+            </button>
+          )}
+        </div>
 
-                {/* Footer */}
-                <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100 dark:border-slate-700/50">
-                  <div className="flex items-center gap-2 text-xs text-slate-400">
-                    <Brain className="w-3 h-3" />
-                    Confidence: {(mem.confidence * 100).toFixed(0)}%
-                  </div>
-                  
-                  <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // TODO: Edit functionality
-                      }}
-                      className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-md text-slate-400 hover:text-blue-500"
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                    <button 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        knowledgeApi.deleteMemory(mem.id);
-                        setMemories(memories.filter(m => m.id !== mem.id));
-                      }}
-                      className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-md text-slate-400 hover:text-red-500"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
+        {searchResults !== null && (
+          <p className="text-xs text-slate-400 mb-2">
+            语义搜索结果：{searchResults.length} 条
+          </p>
+        )}
 
-              {/* Expanded Details */}
-              {isExpanded && (
-                <div className="px-5 pb-5 border-t border-slate-100 dark:border-slate-700/50 pt-4">
-                  <div className="bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4">
-                    <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
-                      Memory Details
-                    </h4>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 dark:text-slate-400">ID:</span>
-                        <span className="text-slate-700 dark:text-slate-200 font-mono text-xs">
-                          {mem.id.split(':').pop()?.substring(0, 16)}...
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 dark:text-slate-400">Category:</span>
-                        <span className="text-slate-700 dark:text-slate-200 capitalize">{mem.category}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 dark:text-slate-400">Created:</span>
-                        <span className="text-slate-700 dark:text-slate-200">{mem.created_at}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 dark:text-slate-400">Confidence:</span>
-                        <span className="text-slate-700 dark:text-slate-200">{(mem.confidence * 100).toFixed(1)}%</span>
-                      </div>
-                    </div>
-                    
-                    {/* Full Content */}
-                    <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
-                      <h5 className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2 uppercase">
-                        Full Content
-                      </h5>
-                      <p className="text-sm text-slate-600 dark:text-slate-300 whitespace-pre-wrap">
-                        {mem.content}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
+        {/* Episodic list */}
+        <div className="flex-1 overflow-y-auto space-y-2">
+          {filteredEpisodic.length === 0 ? (
+            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700/50 p-6 text-center text-slate-400 text-sm">
+              暂无任务记录
             </div>
-          );
-        })}
-      </div>
+          ) : (
+            filteredEpisodic.map((item) => {
+              const isExpanded = expandedId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700/50 overflow-hidden"
+                >
+                  <button
+                    className="w-full flex items-start gap-3 p-4 text-left hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors"
+                    onClick={() => setExpandedId(isExpanded ? null : item.id)}
+                  >
+                    <div className="flex-shrink-0 mt-0.5">
+                      {item.status === "success" ? (
+                        <CheckCircle2 className="w-4 h-4 text-green-500" />
+                      ) : item.status === "failed" ? (
+                        <XCircle className="w-4 h-4 text-red-500" />
+                      ) : (
+                        <div className="w-4 h-4 rounded-full bg-slate-300 dark:bg-slate-600" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm text-slate-700 dark:text-slate-200 ${isExpanded ? "" : "line-clamp-2"}`}>
+                        {item.summary}
+                      </p>
+                      <p className="text-xs text-slate-400 mt-1">{item.created_at}</p>
+                    </div>
+                    <div className="flex-shrink-0 text-slate-400">
+                      {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                    </div>
+                  </button>
+
+                  {isExpanded && (
+                    <div className="px-4 pb-4 border-t border-slate-100 dark:border-slate-700/50 pt-3">
+                      <div className="bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3 text-xs space-y-1 text-slate-500 dark:text-slate-400 font-mono break-all">
+                        <div>ID: {item.id}</div>
+                        <div>状态: {item.status}</div>
+                        <div>时间: {item.created_at}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </section>
     </div>
   );
 }
 
-function getCategoryStyle(category: string) {
-  switch (category) {
-    case 'fact': return 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400';
-    case 'preference': return 'bg-purple-50 text-purple-600 dark:bg-purple-900/20 dark:text-purple-400';
-    case 'relationship': return 'bg-pink-50 text-pink-600 dark:bg-pink-900/20 dark:text-pink-400';
-    default: return 'bg-slate-100 text-slate-600';
-  }
+function formatPrefKey(key: string): string {
+  const map: Record<string, string> = {
+    preferred_file_format: "文件格式偏好",
+    preferred_doc_format: "文档格式偏好",
+    preferred_language: "语言偏好",
+    user_level: "用户级别",
+    python_usage_count: "Python 使用次数",
+  };
+  return map[key] ?? key;
 }
-

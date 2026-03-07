@@ -1,0 +1,183 @@
+import React, { useMemo } from 'react';
+import {
+  Loader2,
+  Cpu,
+  FolderSearch,
+  FileText,
+  Code2,
+  Globe,
+  Database,
+  Zap,
+} from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { ResultRenderer } from '@/components/ui/ResultRenderer';
+
+export interface StepLike {
+  id: string;
+  skill_name?: string;
+  params?: Record<string, any>;
+  output_result?: any;
+  status: string;
+}
+
+export const SKILL_LABELS: Record<string, { label: string; icon: React.ElementType }> = {
+  'fs.list':        { label: '扫描目录',   icon: FolderSearch },
+  'fs.read':        { label: '读取文件',   icon: FileText },
+  'fs.write':       { label: '写入文件',   icon: FileText },
+  'fs.delete':      { label: '删除文件',   icon: FileText },
+  'python.run':     { label: '运行脚本',   icon: Code2 },
+  'web.search':     { label: '搜索网络',   icon: Globe },
+  'web.fetch':      { label: '抓取页面',   icon: Globe },
+  'db.query':       { label: '查询数据库', icon: Database },
+  'system.schedule.create': { label: '创建定时任务', icon: Zap },
+};
+
+export function getSkillMeta(skillName?: string) {
+  if (!skillName) return { label: '执行步骤', icon: Cpu };
+  return SKILL_LABELS[skillName] ?? { label: skillName.split('.').pop() ?? skillName, icon: Cpu };
+}
+
+export function StepPreview({ step }: { step: StepLike }) {
+  const { label } = getSkillMeta(step.skill_name);
+  const isRunning = step.status === 'running';
+
+  const parsed = useMemo(() => {
+    if (!step.output_result) return null;
+    try {
+      return typeof step.output_result === 'string'
+        ? JSON.parse(step.output_result)
+        : step.output_result;
+    } catch {
+      return typeof step.output_result === 'string' ? { text: step.output_result } : null;
+    }
+  }, [step.output_result]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <div className="w-7 h-7 rounded-lg bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center">
+          {(() => { const { icon: Icon } = getSkillMeta(step.skill_name); return <Icon className="w-4 h-4 text-indigo-500" />; })()}
+        </div>
+        <div>
+          <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">{label}</div>
+          <div className="text-[10px] font-mono text-slate-400">{step.skill_name}</div>
+        </div>
+        <div className="ml-auto">
+          {isRunning && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-indigo-500 bg-indigo-50 dark:bg-indigo-500/10 px-2 py-0.5 rounded-full">
+              <Loader2 className="w-3 h-3 animate-spin" /> 执行中
+            </span>
+          )}
+        </div>
+      </div>
+
+      {step.params && Object.keys(step.params).length > 0 && (
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+          <div className="px-3 py-1.5 border-b border-slate-100 dark:border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+            参数
+          </div>
+          <div className="p-3 font-mono text-xs space-y-1">
+            {Object.entries(step.params).map(([k, v]) => (
+              <div key={k} className="flex gap-2">
+                <span className="text-indigo-500 shrink-0">{k}:</span>
+                <span className="text-slate-600 dark:text-slate-400 break-all">
+                  {typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isRunning && !parsed && (
+        <div className="flex items-center gap-2 text-xs text-slate-400 py-4">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span>等待输出...</span>
+        </div>
+      )}
+
+      {parsed && <OutputBlock parsed={parsed} skillName={step.skill_name} />}
+    </div>
+  );
+}
+
+export function OutputBlock({ parsed, skillName }: { parsed: any; skillName?: string }) {
+  if (skillName === 'python.run') {
+    return (
+      <div className="space-y-2">
+        {parsed.stdout && (
+          <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-900 overflow-hidden">
+            <div className="px-3 py-1.5 border-b border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <Code2 className="w-3 h-3" /> 输出
+            </div>
+            <pre className="p-3 text-xs text-green-400 font-mono whitespace-pre-wrap break-all overflow-x-auto max-h-60">
+              {parsed.stdout}
+            </pre>
+          </div>
+        )}
+        {parsed.stderr && (
+          <div className="rounded-lg border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-900/10 p-3 text-xs text-red-600 dark:text-red-400 font-mono whitespace-pre-wrap break-all">
+            {parsed.stderr}
+          </div>
+        )}
+        {parsed.base64_image && <ResultRenderer content={parsed.base64_image} type="image" />}
+        {parsed.dataframe_csv && <ResultRenderer content={parsed.dataframe_csv} type="table" />}
+      </div>
+    );
+  }
+
+  if (skillName === 'fs.read') {
+    const content = parsed.content ?? parsed.result ?? parsed.text ?? JSON.stringify(parsed, null, 2);
+    return (
+      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+        <div className="px-3 py-1.5 border-b border-slate-100 dark:border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+          文件内容
+        </div>
+        <pre className="p-3 text-xs text-slate-700 dark:text-slate-300 font-mono whitespace-pre-wrap break-all overflow-x-auto max-h-80">
+          {String(content)}
+        </pre>
+      </div>
+    );
+  }
+
+  if (skillName === 'fs.list') {
+    const items: string[] = parsed.files ?? parsed.items ?? parsed.result ?? [];
+    if (Array.isArray(items)) {
+      return (
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+          <div className="px-3 py-1.5 border-b border-slate-100 dark:border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+            目录内容 ({items.length} 项)
+          </div>
+          <div className="p-2 max-h-60 overflow-y-auto">
+            {items.map((item, i) => (
+              <div key={i} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-mono text-slate-600 dark:text-slate-400">
+                <FileText className="w-3 h-3 text-slate-400 shrink-0" />
+                {String(item)}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+  }
+
+  const text = parsed.text ?? parsed.result ?? parsed.content ?? parsed.message;
+  if (text) {
+    return (
+      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 text-xs text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-all">
+        {String(text)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+      <div className="px-3 py-1.5 border-b border-slate-100 dark:border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+        原始输出
+      </div>
+      <pre className="p-3 text-xs text-slate-600 dark:text-slate-400 font-mono whitespace-pre-wrap break-all overflow-x-auto max-h-60">
+        {JSON.stringify(parsed, null, 2)}
+      </pre>
+    </div>
+  );
+}

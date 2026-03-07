@@ -8,20 +8,17 @@ import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import { cn } from "@/lib/utils";
 import { ResultRenderer } from "@/components/ui/ResultRenderer";
-import { ExecutionFlow, type ExecutionFlowData } from "@/components/ui/ExecutionFlow";
 
 interface MessageContentProps {
   content: string;
   isStreaming?: boolean;
   isUserMessage?: boolean;
-  executionFlow?: ExecutionFlowData;
 }
 
-export const MessageContent = React.memo(function MessageContent({ 
-  content, 
-  isStreaming, 
+export const MessageContent = React.memo(function MessageContent({
+  content,
+  isStreaming,
   isUserMessage,
-  executionFlow 
 }: MessageContentProps) {
   // Split content to isolate specific Artifact blocks if we implemented full protocol
   // For now, we inject ResultRenderer for the *entire* content if it looks structured and comes from Assistant
@@ -43,11 +40,6 @@ export const MessageContent = React.memo(function MessageContent({
         "dark:prose-invert",
         isUserMessage ? "prose-invert text-white" : "text-slate-800 dark:text-slate-200"
     )}>
-      {/* 执行流展示（仅在非用户消息且有执行流数据时显示） */}
-      {!isUserMessage && executionFlow && (
-        <ExecutionFlow data={executionFlow} />
-      )}
-      
       <ReactMarkdown
         remarkPlugins={[remarkMath, remarkGfm]}
         rehypePlugins={[rehypeKatex]}

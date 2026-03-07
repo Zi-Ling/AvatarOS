@@ -1,83 +1,97 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { FileText, Upload, Trash2, MoreVertical, FileType, Plus } from "lucide-react";
+import { FileText, Plus, Trash2, AlertCircle } from "lucide-react";
 import { knowledgeApi, KnowledgeDocument } from "@/lib/api/knowledge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
+type LoadState = "loading" | "error" | "empty" | "ok";
+
 export function DocumentsView({ searchQuery = "" }: { searchQuery?: string }) {
   const [docs, setDocs] = useState<KnowledgeDocument[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showUploadDialog, setShowUploadDialog] = useState(false);
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [showUpload, setShowUpload] = useState(false);
   const [deleteDialog, setDeleteDialog] = useState<{ isOpen: boolean; doc: KnowledgeDocument | null }>({
     isOpen: false,
     doc: null,
   });
 
-  // Filter documents based on search query
-  const filteredDocs = docs.filter(doc =>
-    !searchQuery ||
-    doc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    doc.type.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredDocs = docs.filter(
+    (d) =>
+      !searchQuery ||
+      d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      d.type.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  useEffect(() => {
-    loadDocs();
-  }, []);
+  useEffect(() => { loadDocs(); }, []);
 
   const loadDocs = async () => {
-    setLoading(true);
-    try {
-      const data = await knowledgeApi.listDocuments();
+    setLoadState("loading");
+    const { data, error } = await knowledgeApi.listDocuments();
+    if (error) {
+      setErrorMsg(error);
+      setLoadState("error");
+    } else if (data.length === 0) {
+      setDocs([]);
+      setLoadState("empty");
+    } else {
       setDocs(data);
-    } finally {
-      setLoading(false);
+      setLoadState("ok");
     }
-  };
-
-  const handleDeleteClick = (doc: KnowledgeDocument) => {
-    setDeleteDialog({ isOpen: true, doc });
   };
 
   const handleDeleteConfirm = async () => {
     if (!deleteDialog.doc) return;
-    
     try {
       await knowledgeApi.deleteDocument(deleteDialog.doc.id);
       await loadDocs();
-    } catch (error) {
-      console.error("Failed to delete document:", error);
+    } catch {
       alert("删除失败");
     }
   };
 
   return (
     <div className="h-full flex flex-col">
-      {/* Toolbar */}
       <div className="flex justify-between items-center mb-4">
-        <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-200">
-          文档知识库 (RAG)
-        </h2>
-        <button 
-          onClick={() => setShowUploadDialog(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition-all shadow-sm hover:shadow-md"
+        <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-200">文档知识库 (RAG)</h2>
+        <button
+          onClick={() => setShowUpload(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition-all shadow-sm"
         >
           <Plus className="w-4 h-4" />
           上传文档
         </button>
       </div>
 
-      {/* List */}
       <div className="flex-1 overflow-y-auto bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700/50 shadow-sm">
-        {loading ? (
+        {loadState === "loading" && (
           <div className="p-8 text-center text-slate-400">加载中...</div>
-        ) : filteredDocs.length === 0 ? (
+        )}
+
+        {loadState === "error" && (
+          <div className="p-8 text-center">
+            <AlertCircle className="w-12 h-12 mx-auto mb-3 text-red-400 opacity-70" />
+            <p className="text-slate-600 dark:text-slate-300 font-medium">加载失败</p>
+            <p className="text-xs text-slate-400 mt-1">{errorMsg}</p>
+            <button
+              onClick={loadDocs}
+              className="mt-4 px-4 py-1.5 text-sm bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+            >
+              重试
+            </button>
+          </div>
+        )}
+
+        {loadState === "empty" && (
           <div className="p-8 text-center text-slate-400">
             <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
             <p>暂无文档</p>
             <p className="text-xs mt-1">点击"上传文档"开始添加知识库内容</p>
           </div>
-        ) : (
+        )}
+
+        {loadState === "ok" && (
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 dark:bg-slate-700/30 text-slate-500 dark:text-slate-400 font-medium border-b border-slate-200 dark:border-slate-700/50">
               <tr>
@@ -96,18 +110,15 @@ export function DocumentsView({ searchQuery = "" }: { searchQuery?: string }) {
                       <FileText className="w-4 h-4" />
                     </div>
                   </td>
-                  <td className="px-6 py-4 font-medium text-slate-700 dark:text-slate-200">
-                    {doc.name}
-                  </td>
+                  <td className="px-6 py-4 font-medium text-slate-700 dark:text-slate-200">{doc.name}</td>
                   <td className="px-6 py-4 text-slate-500">{doc.chunks} 块</td>
                   <td className="px-6 py-4 text-slate-500">
-                    {new Date(doc.created_at).toLocaleDateString('zh-CN')}
+                    {new Date(doc.created_at).toLocaleDateString("zh-CN")}
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <button 
-                      onClick={() => handleDeleteClick(doc)}
+                    <button
+                      onClick={() => setDeleteDialog({ isOpen: true, doc })}
                       className="p-2 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
-                      title="删除"
                     >
                       <Trash2 className="w-4 h-4 text-red-500" />
                     </button>
@@ -119,24 +130,19 @@ export function DocumentsView({ searchQuery = "" }: { searchQuery?: string }) {
         )}
       </div>
 
-      {/* Upload Dialog */}
-      {showUploadDialog && (
-        <UploadDialog 
-          onClose={() => setShowUploadDialog(false)}
-          onSuccess={() => {
-            setShowUploadDialog(false);
-            loadDocs();
-          }}
+      {showUpload && (
+        <UploadDialog
+          onClose={() => setShowUpload(false)}
+          onSuccess={() => { setShowUpload(false); loadDocs(); }}
         />
       )}
 
-      {/* Delete Confirmation Dialog */}
       <ConfirmDialog
         isOpen={deleteDialog.isOpen}
         onClose={() => setDeleteDialog({ isOpen: false, doc: null })}
         onConfirm={handleDeleteConfirm}
         title="删除文档"
-        message={`确定要删除文档 "${deleteDialog.doc?.name}" 吗？\n\n⚠️ 警告：文档的所有内容和索引都将被永久删除！此操作无法撤销。`}
+        message={`确定要删除文档 "${deleteDialog.doc?.name}" 吗？此操作无法撤销。`}
         confirmText="删除"
         cancelText="取消"
         variant="danger"
@@ -153,17 +159,12 @@ function UploadDialog({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !content.trim()) {
-      alert("请填写文档名称和内容");
-      return;
-    }
-
+    if (!name.trim() || !content.trim()) { alert("请填写文档名称和内容"); return; }
     setUploading(true);
     try {
       await knowledgeApi.uploadDocument(name, content, docType);
       onSuccess();
-    } catch (error) {
-      console.error("Upload failed:", error);
+    } catch {
       alert("上传失败");
     } finally {
       setUploading(false);
@@ -176,9 +177,7 @@ function UploadDialog({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
         <h3 className="text-lg font-semibold mb-4 text-slate-800 dark:text-slate-200">上传文档</h3>
         <form onSubmit={handleSubmit}>
           <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              文档名称
-            </label>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">文档名称</label>
             <input
               type="text"
               value={name}
@@ -188,9 +187,7 @@ function UploadDialog({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
             />
           </div>
           <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              文档类型
-            </label>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">文档类型</label>
             <select
               value={docType}
               onChange={(e) => setDocType(e.target.value)}
@@ -201,9 +198,7 @@ function UploadDialog({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
             </select>
           </div>
           <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              文档内容
-            </label>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">文档内容</label>
             <textarea
               value={content}
               onChange={(e) => setContent(e.target.value)}
@@ -213,18 +208,10 @@ function UploadDialog({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
             />
           </div>
           <div className="flex justify-end gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
-            >
+            <button type="button" onClick={onClose} className="px-4 py-2 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
               取消
             </button>
-            <button
-              type="submit"
-              disabled={uploading}
-              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors disabled:opacity-50"
-            >
+            <button type="submit" disabled={uploading} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors disabled:opacity-50">
               {uploading ? "上传中..." : "上传"}
             </button>
           </div>
@@ -236,10 +223,8 @@ function UploadDialog({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
 
 function getTypeColor(type: string) {
   switch (type) {
-    case 'pdf': return 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400';
-    case 'md': return 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400';
-    case 'txt': return 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400';
-    default: return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
+    case "pdf": return "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400";
+    case "md": return "bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400";
+    default: return "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400";
   }
 }
-

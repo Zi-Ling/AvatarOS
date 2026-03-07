@@ -143,8 +143,9 @@ class KataExecutor(SkillExecutor):
             raise
     
     async def _execute_with_pool(self, code: str, workspace_volumes: Optional[dict] = None) -> dict:
-        """使用容器池执行"""
+        """使用容器池执行，执行后通过 docker cp 把产出文件复制到 session workspace"""
         import asyncio
+        import uuid
         from .container_pool import SandboxFailure
 
         loop = asyncio.get_event_loop()
@@ -152,13 +153,24 @@ class KataExecutor(SkillExecutor):
         container = await loop.run_in_executor(None, self._pool.acquire, self.timeout)
 
         exec_failed = False
+        run_id = uuid.uuid4().hex[:12]
+        workdir = f"/run/{run_id}"
+
         try:
             self._last_container_id = container.id
 
+            # 1. 在容器内创建隔离工作目录
+            await loop.run_in_executor(
+                None,
+                lambda: container.exec_run(cmd=["mkdir", "-p", workdir]),
+            )
+
+            # 2. 执行 Python 代码，workdir 作为 cwd，代码产出文件落在此目录
             exit_code, output = await loop.run_in_executor(
                 None,
                 lambda: container.exec_run(
                     cmd=["python", "-c", code],
+                    workdir=workdir,
                     demux=True,
                 )
             )
@@ -166,7 +178,18 @@ class KataExecutor(SkillExecutor):
             stdout = output[0].decode("utf-8") if output[0] else ""
             stderr = output[1].decode("utf-8") if output[1] else ""
 
-            logger.debug(f"[KataExecutor] Success")
+            # 3. 把容器内 workdir 的文件 docker cp 到 host session workspace
+            if workspace_volumes:
+                host_workspace = next(iter(workspace_volumes.keys()))
+                self._copy_from_container(container, workdir, host_workspace)
+
+            # 4. 清理容器内 run 目录
+            await loop.run_in_executor(
+                None,
+                lambda: container.exec_run(cmd=["rm", "-rf", workdir]),
+            )
+
+            logger.debug(f"[KataExecutor] Success (run_id={run_id})")
 
             return {
                 "success": exit_code == 0,
@@ -183,6 +206,34 @@ class KataExecutor(SkillExecutor):
             raise
         finally:
             await loop.run_in_executor(None, self._pool.release, container, exec_failed)
+
+    def _copy_from_container(self, container, container_dir: str, host_dir: str) -> None:
+        """把容器内目录的文件 docker cp 到宿主机目录（跳过空目录）"""
+        import io
+        import tarfile
+        from pathlib import Path
+
+        try:
+            bits, stat = container.get_archive(container_dir)
+            buf = io.BytesIO(b"".join(bits))
+            with tarfile.open(fileobj=buf) as tar:
+                members = [m for m in tar.getmembers() if m.isfile()]
+                if not members:
+                    return
+                host_path = Path(host_dir)
+                host_path.mkdir(parents=True, exist_ok=True)
+                for member in members:
+                    # 去掉 run_id 前缀目录，直接平铺到 host_dir
+                    parts = Path(member.name).parts
+                    filename = parts[-1] if len(parts) > 1 else member.name
+                    f = tar.extractfile(member)
+                    if f is None:
+                        continue
+                    dest = host_path / filename
+                    dest.write_bytes(f.read())
+                    logger.info(f"[KataExecutor] Copied {filename} → {dest}")
+        except Exception as e:
+            logger.warning(f"[KataExecutor] docker cp failed: {e}")
     
     async def _execute_without_pool(self, code: str) -> dict:
         """不使用容器池执行（创建新容器）"""

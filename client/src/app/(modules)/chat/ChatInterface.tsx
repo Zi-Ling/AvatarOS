@@ -7,7 +7,6 @@ import { VoiceRecording } from "./_components/VoiceRecording";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useLanguage } from "@/theme/i18n/LanguageContext";
 import { useChatStore } from "@/stores/chatStore";
-import { useExecutionFlow } from "@/lib/hooks/useExecutionFlow";
 import { useChat } from "@/lib/hooks/useChat";
 
 export default function ChatInterface() {
@@ -38,8 +37,6 @@ export default function ChatInterface() {
   useEffect(() => {
     initSession();
   }, [initSession]);
-
-  const { getExecutionFlow } = useExecutionFlow(storedSessionId || "");
 
   const [showNewChatDialog, setShowNewChatDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -146,7 +143,6 @@ export default function ChatInterface() {
       <MessageList
         messages={messages}
         isTyping={isTyping}
-        executionFlow={getExecutionFlow(storedSessionId || "")}
         onRegenerate={handleRegenerateMessage}
         onLike={handleLikeMessage}
         onDislike={handleDislikeMessage}

@@ -1,13 +1,11 @@
 # app/api/knowledge.py
 """
 Knowledge Base API
-
-提供 Memory、Habits、Skills 统计等数据的查询接口
 """
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -19,7 +17,6 @@ from app.avatar.learning.manager import LearningManager
 from app.avatar.learning.provider import get_learning_manager
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
-
 logger = logging.getLogger(__name__)
 
 
@@ -27,302 +24,7 @@ logger = logging.getLogger(__name__)
 # Response Models
 # ============================================================================
 
-class MemoryItemResponse(BaseModel):
-    """记忆项"""
-    id: str
-    content: str
-    category: str  # 'task', 'skill', 'user_pref'
-    created_at: str
-    confidence: float = 1.0
-
-
-class HabitItemResponse(BaseModel):
-    """习惯项（用户偏好）"""
-    id: str
-    description: str
-    trigger_count: int
-    is_active: bool
-    detected_at: str
-
-
-class SkillStatsResponse(BaseModel):
-    """技能统计"""
-    skill_name: str
-    total_uses: int
-    success_count: int
-    failed_count: int
-    success_rate: float
-    last_error: str | None = None
-
-
-class KnowledgeSummaryResponse(BaseModel):
-    """知识库概览"""
-    total_memories: int
-    total_habits: int
-    total_skills: int
-    episodic_count: int
-    knowledge_count: int
-
-
-# ============================================================================
-# API Endpoints
-# ============================================================================
-
-@router.get("/summary", response_model=KnowledgeSummaryResponse)
-async def get_knowledge_summary(
-    memory_manager: MemoryManager = Depends(get_memory_manager),
-    learning_manager: LearningManager = Depends(get_learning_manager),
-):
-    """获取知识库概览"""
-    
-    # 统计 Episodic Memory
-    episodic_records = memory_manager.query_task_episodes(task_id="", limit=1000)
-    
-    # 统计 Knowledge Memory
-    knowledge_records = memory_manager.query_knowledge(prefix="", limit=1000)
-    
-    # 统计用户偏好
-    user_prefs = memory_manager.get_user_preference("default") or {}
-    
-    # 统计技能
-    skill_stats_count = 0
-    try:
-        for module in learning_manager._modules:
-            if module.name == "skill_stats":
-                skill_stats_count = len(module.stats_snapshot)
-                break
-    except Exception:
-        pass
-    
-    return KnowledgeSummaryResponse(
-        total_memories=len(episodic_records),
-        total_habits=len(user_prefs),
-        total_skills=skill_stats_count,
-        episodic_count=len(episodic_records),
-        knowledge_count=len(knowledge_records),
-    )
-
-
-@router.get("/memories", response_model=List[MemoryItemResponse])
-async def list_memories(
-    limit: int = 50,
-    memory_manager: MemoryManager = Depends(get_memory_manager),
-):
-    """
-    获取记忆列表（Episodic Memory）
-    
-    返回最近的任务执行记录
-    """
-    records = memory_manager.query_task_episodes(task_id="", limit=limit)
-    
-    memories = []
-    for rec in records:
-        data = rec.data
-        
-        # 提取内容
-        content = data.get("summary", "")
-        if not content:
-            # 尝试从 extra 中提取用户请求
-            extra = data.get("extra", {})
-            content = extra.get("user_request", "Unknown task")
-        
-        # 确定类别
-        category = "task"
-        if rec.key.startswith("skill:"):
-            category = "skill"
-        
-        memories.append(MemoryItemResponse(
-            id=rec.key,
-            content=content[:200],  # 限制长度
-            category=category,
-            created_at=rec.created_at.strftime("%Y-%m-%d %H:%M"),
-            confidence=1.0 if data.get("status") == "success" else 0.5,
-        ))
-    
-    return memories
-
-
-@router.get("/habits", response_model=List[HabitItemResponse])
-async def list_habits(
-    learning_manager: LearningManager = Depends(get_learning_manager),
-):
-    """
-    获取用户习惯列表（User Preferences）
-    
-    完全重构：从 Learning 获取用户偏好，而不是直接从 Memory
-    """
-    user_prefs = learning_manager.get_user_preferences("default") or {}
-    
-    habits = []
-    
-    # 文件格式偏好
-    if "preferred_file_format" in user_prefs:
-        fmt = user_prefs["preferred_file_format"]
-        habits.append(HabitItemResponse(
-            id="pref_file_format",
-            description=f"处理数据时优先使用 {fmt.upper()} 格式",
-            trigger_count=user_prefs.get("python_usage_count", 1),
-            is_active=True,
-            detected_at=datetime.utcnow().strftime("%Y-%m-%d"),
-        ))
-    
-    # 文档格式偏好
-    if "preferred_doc_format" in user_prefs:
-        doc_fmt = user_prefs["preferred_doc_format"]
-        habits.append(HabitItemResponse(
-            id="pref_doc_format",
-            description=f"生成文档时优先使用 {doc_fmt.upper()} 格式",
-            trigger_count=1,
-            is_active=True,
-            detected_at=datetime.utcnow().strftime("%Y-%m-%d"),
-        ))
-    
-    # 用户级别（高级用户）
-    if user_prefs.get("user_level") == "advanced":
-        habits.append(HabitItemResponse(
-            id="pref_advanced_user",
-            description="遇到复杂任务时，自动使用 python.run 合并多个步骤",
-            trigger_count=user_prefs.get("python_usage_count", 5),
-            is_active=True,
-            detected_at=datetime.utcnow().strftime("%Y-%m-%d"),
-        ))
-    
-    # 语言偏好
-    if "preferred_language" in user_prefs:
-        lang = user_prefs["preferred_language"]
-        lang_name = "中文" if lang == "zh" else "English"
-        habits.append(HabitItemResponse(
-            id="pref_language",
-            description=f"生成内容时优先使用 {lang_name}",
-            trigger_count=1,
-            is_active=True,
-            detected_at=datetime.utcnow().strftime("%Y-%m-%d"),
-        ))
-    
-    # 如果没有任何偏好，返回空列表
-    if not habits:
-        habits.append(HabitItemResponse(
-            id="placeholder",
-            description="暂无学习到的习惯，继续使用系统来积累数据",
-            trigger_count=0,
-            is_active=False,
-            detected_at=datetime.utcnow().strftime("%Y-%m-%d"),
-        ))
-    
-    return habits
-
-
-@router.post("/habits/{habit_id}/toggle")
-async def toggle_habit(
-    habit_id: str,
-    is_active: bool,
-    memory_manager: MemoryManager = Depends(get_memory_manager),
-):
-    """
-    切换习惯的启用状态
-    
-    注意：这个功能暂时只是前端展示，后端还需要实现真正的"禁用偏好"逻辑
-    """
-    # TODO: 实现真正的禁用逻辑
-    # 可以在 user_prefs 中添加一个 "disabled_prefs" 列表
-    return {"success": True, "habit_id": habit_id, "is_active": is_active}
-
-
-@router.get("/skills/stats", response_model=List[SkillStatsResponse])
-async def get_skill_stats(
-    learning_manager: LearningManager = Depends(get_learning_manager),
-):
-    """
-    获取技能统计数据
-    
-    完全重构：使用 Learning 的对外接口，不直接访问内部模块
-    """
-    stats_list = []
-    
-    try:
-        # 使用 Learning 的对外接口
-        all_stats = learning_manager.get_skill_statistics()
-        
-        for skill_name, stat in all_stats.items():
-            stats_list.append(SkillStatsResponse(
-                skill_name=skill_name,
-                total_uses=stat["total"],
-                success_count=stat["success"],
-                failed_count=stat["failed"],
-                success_rate=stat["success_rate"],
-                last_error=stat.get("last_error"),
-            ))
-    except Exception as e:
-        logger.error(f"Failed to get skill stats: {e}")
-    
-    # 按使用次数排序
-    stats_list.sort(key=lambda x: x.total_uses, reverse=True)
-    
-    return stats_list
-
-
-@router.delete("/memories/{memory_id}")
-async def delete_memory(
-    memory_id: str,
-    memory_manager: MemoryManager = Depends(get_memory_manager),
-):
-    """
-    删除指定记忆
-    
-    注意：这个功能需要在 MemoryManager 中实现真正的删除逻辑
-    """
-    # TODO: 实现真正的删除逻辑
-    # 目前 JSONL 格式不支持删除，需要重写整个文件
-    return {"success": True, "memory_id": memory_id}
-
-
-@router.post("/cleanup")
-async def trigger_cleanup(
-    days_to_keep: int = 30,
-    memory_manager: MemoryManager = Depends(get_memory_manager),
-):
-    """
-    手动触发记忆清理
-    
-    删除超过 N 天的旧记录
-    """
-    try:
-        stats = memory_manager.cleanup_old_memories(
-            days_to_keep=days_to_keep,
-            keep_successful_tasks=True,
-        )
-        return {
-            "success": True,
-            "deleted_count": stats.get("episodic_deleted", 0),
-            "message": f"Cleaned up {stats.get('episodic_deleted', 0)} old records",
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============================================================================
-# Document Upload & Indexing (轻量级实现)
-# ============================================================================
-
-# ============================================================================
-# 旧的文档 API（已废弃，使用下面的新 API）
-# ============================================================================
-# 旧代码已删除，现在使用 Learning Manager 的 Document KB
-
-
-# ============================================================================
-# Document Knowledge Base API（完全重构新增）
-# ============================================================================
-
-class DocumentUploadRequest(BaseModel):
-    """上传文档请求"""
-    name: str
-    content: str
-    doc_type: str = "txt"  # txt, md
-
-
 class DocumentResponse(BaseModel):
-    """文档响应"""
     id: str
     name: str
     type: str
@@ -330,78 +32,108 @@ class DocumentResponse(BaseModel):
     created_at: str
 
 
+class DocumentUploadRequest(BaseModel):
+    name: str
+    content: str
+    doc_type: str = "txt"
+
+
 class DocumentSearchRequest(BaseModel):
-    """文档搜索请求"""
     query: str
     max_results: int = 5
 
 
 class DocumentSearchResult(BaseModel):
-    """文档搜索结果"""
     chunk_id: str
     content: str
     doc_name: str
-    distance: float | None = None
+    distance: Optional[float] = None
 
 
-@router.post("/documents/upload")
-async def upload_document(
-    request: DocumentUploadRequest,
+class KnowledgeStatusResponse(BaseModel):
+    document_kb_available: bool
+    vector_store_available: bool
+    episodic_count: int
+    knowledge_count: int
+
+
+class UserPrefItem(BaseModel):
+    key: str
+    value: str
+    updated_at: str
+
+
+class EpisodicItem(BaseModel):
+    id: str
+    summary: str
+    status: str   # success / failed
+    created_at: str
+
+
+class MemoriesResponse(BaseModel):
+    user_prefs: List[UserPrefItem]
+    episodic: List[EpisodicItem]
+
+
+class MemorySearchRequest(BaseModel):
+    query: str
+    n_results: int = 5
+
+
+class MemorySearchResult(BaseModel):
+    id: str
+    summary: str
+    status: str
+    created_at: str
+    distance: Optional[float] = None
+
+
+class SkillItem(BaseModel):
+    name: str
+    description: str
+    category: str
+    example_prompt: str
+    aliases: List[str] = []
+
+
+class McpTool(BaseModel):
+    name: str
+    description: str
+    server: str
+
+
+# ============================================================================
+# Status
+# ============================================================================
+
+@router.get("/status", response_model=KnowledgeStatusResponse)
+async def get_knowledge_status(
+    memory_manager: MemoryManager = Depends(get_memory_manager),
     learning_manager: LearningManager = Depends(get_learning_manager),
 ):
-    """
-    上传文档到知识库
-    
-    支持的文档类型：
-    - txt: 纯文本
-    - md: Markdown
-    
-    未来可扩展：
-    - pdf: PDF 文档
-    - docx: Word 文档
-    """
-    logger.debug(f"upload_document: name={request.name}, type={request.doc_type}, len={len(request.content)}")
-    
-    if not learning_manager.has_document_kb():
-        raise HTTPException(status_code=503, detail="Document KB is not available")
-    
-    try:
-        from app.avatar.learning.knowledge.document_kb import Document
-        
-        # 创建文档对象
-        doc = Document(
-            name=request.name,
-            content=request.content,
-            doc_type=request.doc_type,
-        )
-        
-        # 添加到知识库
-        result = learning_manager.document_kb.add_document(doc)
-        logger.info(f"Document '{request.name}' uploaded: {result['chunks_count']} chunks")
-        
-        return {
-            "success": True,
-            "doc_id": result["doc_id"],
-            "chunks_count": result["chunks_count"],
-            "message": f"Document '{request.name}' uploaded successfully"
-        }
-    
-    except Exception as e:
-        logger.error(f"Document upload failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to upload document: {e}")
+    episodic_records = memory_manager.query_task_episodes(task_id="", limit=1000)
+    knowledge_records = memory_manager.query_knowledge(prefix="", limit=1000)
+    return KnowledgeStatusResponse(
+        document_kb_available=learning_manager.has_document_kb(),
+        vector_store_available=memory_manager._vector_store is not None,
+        episodic_count=len(episodic_records),
+        knowledge_count=len(knowledge_records),
+    )
 
+
+# ============================================================================
+# Documents
+# ============================================================================
 
 @router.get("/documents", response_model=List[DocumentResponse])
 async def list_documents(
     learning_manager: LearningManager = Depends(get_learning_manager),
 ):
-    """列出所有文档"""
+    """列出所有文档。KB 不可用时返回空数组而非 503。"""
     if not learning_manager.has_document_kb():
-        raise HTTPException(status_code=503, detail="Document KB is not available")
-    
+        return []
     try:
         docs = learning_manager.document_kb.list_documents()
-        
         return [
             DocumentResponse(
                 id=doc["id"],
@@ -412,11 +144,30 @@ async def list_documents(
             )
             for doc in docs
         ]
-        return result
-    
     except Exception as e:
         logger.error(f"Failed to list documents: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list documents: {e}")
+        return []
+
+
+@router.post("/documents/upload")
+async def upload_document(
+    request: DocumentUploadRequest,
+    learning_manager: LearningManager = Depends(get_learning_manager),
+):
+    if not learning_manager.has_document_kb():
+        raise HTTPException(status_code=503, detail="Document KB is not available")
+    try:
+        from app.avatar.learning.knowledge.document_kb import Document
+        doc = Document(name=request.name, content=request.content, doc_type=request.doc_type)
+        result = learning_manager.document_kb.add_document(doc)
+        return {
+            "success": True,
+            "doc_id": result["doc_id"],
+            "chunks_count": result["chunks_count"],
+        }
+    except Exception as e:
+        logger.error(f"Document upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/documents/search", response_model=List[DocumentSearchResult])
@@ -424,28 +175,21 @@ async def search_documents(
     request: DocumentSearchRequest,
     learning_manager: LearningManager = Depends(get_learning_manager),
 ):
-    """语义搜索文档"""
     if not learning_manager.has_document_kb():
         raise HTTPException(status_code=503, detail="Document KB is not available")
-    
     try:
-        matches = learning_manager.document_kb.search(
-            query=request.query,
-            n_results=request.max_results,
-        )
-        
+        matches = learning_manager.document_kb.search(query=request.query, n_results=request.max_results)
         return [
             DocumentSearchResult(
-                chunk_id=match["chunk_id"],
-                content=match["content"],
-                doc_name=match["metadata"].get("doc_name", "Unknown"),
-                distance=match.get("distance"),
+                chunk_id=m["chunk_id"],
+                content=m["content"],
+                doc_name=m["metadata"].get("doc_name", "Unknown"),
+                distance=m.get("distance"),
             )
-            for match in matches
+            for m in matches
         ]
-    
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to search documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/documents/{doc_id}")
@@ -453,26 +197,17 @@ async def delete_document(
     doc_id: str,
     learning_manager: LearningManager = Depends(get_learning_manager),
 ):
-    """删除文档"""
     if not learning_manager.has_document_kb():
         raise HTTPException(status_code=503, detail="Document KB is not available")
-    
     try:
         deleted_count = learning_manager.document_kb.delete_document(doc_id)
-        
         if deleted_count == 0:
             raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
-        
-        return {
-            "success": True,
-            "deleted_chunks": deleted_count,
-            "message": f"Document '{doc_id}' deleted successfully"
-        }
-    
+        return {"success": True, "deleted_chunks": deleted_count}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete document: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/documents/{doc_id}/content")
@@ -480,23 +215,252 @@ async def get_document_content(
     doc_id: str,
     learning_manager: LearningManager = Depends(get_learning_manager),
 ):
-    """获取文档完整内容"""
     if not learning_manager.has_document_kb():
         raise HTTPException(status_code=503, detail="Document KB is not available")
-    
     try:
         content = learning_manager.document_kb.get_document_content(doc_id)
-        
         if content is None:
             raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
-        
-        return {
-            "doc_id": doc_id,
-            "content": content
-        }
-    
+        return {"doc_id": doc_id, "content": content}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get document content: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
+
+# ============================================================================
+# Memories — user_prefs + episodic
+# ============================================================================
+
+@router.get("/memories", response_model=MemoriesResponse)
+async def list_memories(
+    limit: int = 50,
+    memory_manager: MemoryManager = Depends(get_memory_manager),
+):
+    """返回用户画像偏好 + 任务执行历史（按时间倒序）。"""
+    # 1. User prefs from knowledge.json  key: "user:default:prefs"
+    user_prefs: List[UserPrefItem] = []
+    prefs_data = memory_manager.get_knowledge("user:default:prefs") or {}
+    for k, v in prefs_data.items():
+        if k.startswith("_"):
+            continue
+        user_prefs.append(UserPrefItem(
+            key=k,
+            value=str(v),
+            updated_at=datetime.utcnow().strftime("%Y-%m-%d"),
+        ))
+
+    # 2. Episodic from episodic.log — all task: records, newest first
+    records = memory_manager.query_task_episodes(task_id="", limit=limit)
+    records_sorted = sorted(records, key=lambda r: r.created_at, reverse=True)
+
+    episodic: List[EpisodicItem] = []
+    for rec in records_sorted:
+        data = rec.data
+        summary = data.get("summary", "")
+        if not summary:
+            extra = data.get("extra", {})
+            summary = extra.get("user_request", rec.key)
+        episodic.append(EpisodicItem(
+            id=rec.key,
+            summary=summary[:300],
+            status=data.get("status", "unknown"),
+            created_at=rec.created_at.strftime("%Y-%m-%d %H:%M"),
+        ))
+
+    return MemoriesResponse(user_prefs=user_prefs, episodic=episodic)
+
+
+@router.post("/memories/search", response_model=List[MemorySearchResult])
+async def search_memories(
+    request: MemorySearchRequest,
+    memory_manager: MemoryManager = Depends(get_memory_manager),
+):
+    """语义搜索历史任务（复用 vector_db）。"""
+    results = memory_manager.search_similar_tasks(
+        task_description=request.query,
+        n_results=request.n_results,
+    )
+    out = []
+    for r in results:
+        meta = r.get("metadata", {})
+        out.append(MemorySearchResult(
+            id=meta.get("key", ""),
+            summary=r.get("document", "")[:300],
+            status=meta.get("status", "unknown"),
+            created_at=meta.get("created_at", ""),
+            distance=r.get("distance"),
+        ))
+    return out
+
+
+@router.delete("/memories/{memory_id}")
+async def delete_memory(
+    memory_id: str,
+    memory_manager: MemoryManager = Depends(get_memory_manager),
+):
+    """删除用户偏好项（key 格式: user:default:prefs/<field>）。"""
+    if memory_id.startswith("user:default:prefs/"):
+        field = memory_id.split("/", 1)[1]
+        prefs = memory_manager.get_knowledge("user:default:prefs") or {}
+        if field in prefs:
+            del prefs[field]
+            memory_manager.set_knowledge("user:default:prefs", prefs)
+    return {"success": True, "memory_id": memory_id}
+
+
+# ============================================================================
+# Skills — static registry with example prompts
+# ============================================================================
+
+_SKILL_CATALOG: List[Dict[str, Any]] = [
+    # File System
+    {
+        "name": "fs.read",
+        "description": "读取文件内容",
+        "category": "文件系统",
+        "example_prompt": "读取 ~/Desktop/report.txt 的内容",
+        "aliases": ["read_file", "file.read"],
+    },
+    {
+        "name": "fs.write",
+        "description": "写入或创建文件",
+        "category": "文件系统",
+        "example_prompt": "把这段文字保存到 ~/notes.txt",
+        "aliases": ["write_file", "file.write"],
+    },
+    {
+        "name": "fs.list",
+        "description": "列出目录内容",
+        "category": "文件系统",
+        "example_prompt": "列出 ~/Documents 目录下的所有文件",
+        "aliases": ["ls", "dir", "list_files"],
+    },
+    {
+        "name": "fs.delete",
+        "description": "删除文件或目录",
+        "category": "文件系统",
+        "example_prompt": "删除 ~/temp 目录",
+        "aliases": ["rm", "remove_file"],
+    },
+    {
+        "name": "fs.move",
+        "description": "移动或重命名文件",
+        "category": "文件系统",
+        "example_prompt": "把 ~/old_name.txt 重命名为 ~/new_name.txt",
+        "aliases": ["mv", "rename_file"],
+    },
+    {
+        "name": "fs.copy",
+        "description": "复制文件或目录",
+        "category": "文件系统",
+        "example_prompt": "把 ~/report.pdf 复制到 ~/backup/",
+        "aliases": ["cp", "copy_file"],
+    },
+    # Python
+    {
+        "name": "python.run",
+        "description": "执行 Python 代码，支持数据分析和可视化",
+        "category": "代码执行",
+        "example_prompt": "用 Python 计算 1 到 100 的所有质数",
+        "aliases": ["run_python", "execute_python"],
+    },
+    # Network
+    {
+        "name": "net.get",
+        "description": "发送 HTTP GET 请求",
+        "category": "网络",
+        "example_prompt": "获取 https://api.github.com/users/octocat 的信息",
+        "aliases": ["http_get", "fetch"],
+    },
+    {
+        "name": "net.post",
+        "description": "发送 HTTP POST 请求",
+        "category": "网络",
+        "example_prompt": "向 https://httpbin.org/post 发送 JSON 数据",
+        "aliases": ["http_post"],
+    },
+    # Memory
+    {
+        "name": "memory.store",
+        "description": "存储信息到长期记忆",
+        "category": "记忆",
+        "example_prompt": "记住我的公司名叫 Acme Corp",
+        "aliases": ["remember", "save_memory"],
+    },
+    {
+        "name": "memory.search",
+        "description": "语义搜索历史记忆",
+        "category": "记忆",
+        "example_prompt": "查找我之前提到过的公司信息",
+        "aliases": ["recall", "search_memory"],
+    },
+    # Computer Control
+    {
+        "name": "screen.capture",
+        "description": "截取当前屏幕",
+        "category": "电脑控制",
+        "example_prompt": "截一张当前屏幕的图",
+        "aliases": ["screenshot"],
+    },
+    {
+        "name": "mouse.click",
+        "description": "模拟鼠标点击",
+        "category": "电脑控制",
+        "example_prompt": "点击屏幕坐标 (500, 300) 的位置",
+        "aliases": ["click"],
+    },
+    {
+        "name": "keyboard.type",
+        "description": "模拟键盘输入文字",
+        "category": "电脑控制",
+        "example_prompt": "在当前输入框输入 Hello World",
+        "aliases": ["type_text"],
+    },
+    # LLM Fallback
+    {
+        "name": "llm.fallback",
+        "description": "直接调用 LLM 回答问题或生成内容",
+        "category": "AI 推理",
+        "example_prompt": "帮我写一封请假邮件",
+        "aliases": ["ask", "chat", "generate"],
+    },
+]
+
+
+@router.get("/skills/list", response_model=List[SkillItem])
+async def list_skills():
+    """返回内置 skill 列表，含分类和示例 prompt。"""
+    return [SkillItem(**s) for s in _SKILL_CATALOG]
+
+
+# ============================================================================
+# MCP Tools — placeholder
+# ============================================================================
+
+@router.get("/mcp/tools", response_model=List[McpTool])
+async def list_mcp_tools():
+    """MCP Tools 预留接口，当前返回空数组。"""
+    return []
+
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+@router.post("/cleanup")
+async def trigger_cleanup(
+    days_to_keep: int = 30,
+    memory_manager: MemoryManager = Depends(get_memory_manager),
+):
+    try:
+        stats = memory_manager.cleanup_old_memories(
+            days_to_keep=days_to_keep,
+            keep_successful_tasks=True,
+        )
+        return {
+            "success": True,
+            "deleted_count": stats.get("episodic_deleted", 0),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

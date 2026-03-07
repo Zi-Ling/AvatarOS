@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { TaskStep, TaskState } from '@/types/task';
+import type { ApprovalRequest } from '@/types/chat';
 
 // Re-export types for backward compatibility
 export type { TaskStep, TaskState } from '@/types/task';
@@ -7,29 +8,38 @@ export type { TaskStep, TaskState } from '@/types/task';
 interface TaskStore {
   activeTask: TaskState | null;
   logs: string[];
-  isCancelling: boolean; // 任务是否正在取消中
-  
+  isCancelling: boolean;
+  pendingApprovals: ApprovalRequest[];
+  // Whether workbench was auto-switched to active tab for current task
+  autoSwitchedForTask: string | null;
+
   // Actions
   setActiveTask: (task: TaskState | null) => void;
   updateTaskStatus: (status: TaskState['status']) => void;
   updateStep: (stepId: string, updates: Partial<TaskStep>) => void;
   setSteps: (steps: TaskStep[]) => void;
+  setCurrentStepName: (name: string, completedCount?: number) => void;
   addLog: (log: string) => void;
   clearLogs: () => void;
   resetTask: () => void;
   setIsCancelling: (isCancelling: boolean) => void;
+  addPendingApproval: (req: ApprovalRequest) => void;
+  removePendingApproval: (requestId: string) => void;
+  setAutoSwitchedForTask: (taskId: string | null) => void;
 }
 
 export const useTaskStore = create<TaskStore>((set) => ({
   activeTask: null,
   logs: [],
   isCancelling: false,
+  pendingApprovals: [],
+  autoSwitchedForTask: null,
 
   setActiveTask: (task) => set({ activeTask: task }),
 
-  updateTaskStatus: (status) => 
+  updateTaskStatus: (status) =>
     set((state) => ({
-      activeTask: state.activeTask 
+      activeTask: state.activeTask
         ? { ...state.activeTask, status }
         : null
     })),
@@ -41,14 +51,25 @@ export const useTaskStore = create<TaskStore>((set) => ({
         : null
     })),
 
+  setCurrentStepName: (name, completedCount) =>
+    set((state) => ({
+      activeTask: state.activeTask
+        ? {
+            ...state.activeTask,
+            currentStepName: name,
+            ...(completedCount !== undefined ? { completedCount } : {}),
+          }
+        : null,
+    })),
+
   updateStep: (stepId, updates) =>
     set((state) => {
       if (!state.activeTask) return {};
-      
+
       const newSteps = state.activeTask.steps.map((step) =>
         step.id === stepId ? { ...step, ...updates } : step
       );
-      
+
       return {
         activeTask: {
           ...state.activeTask,
@@ -58,20 +79,28 @@ export const useTaskStore = create<TaskStore>((set) => ({
     }),
 
   addLog: (log) => set((state) => {
-      // Keep only last 500 logs (increased for better debugging)
-      const newLogs = [...state.logs, log];
-      if (newLogs.length > 500) {
-          return { logs: newLogs.slice(newLogs.length - 500) };
-      }
-      return { logs: newLogs };
+    const newLogs = [...state.logs, log];
+    if (newLogs.length > 500) {
+      return { logs: newLogs.slice(newLogs.length - 500) };
+    }
+    return { logs: newLogs };
   }),
 
   clearLogs: () => set({ logs: [] }),
 
-  // 只重置 activeTask (DAG 图)，不清空日志
-  // 日志应该在整个会话中累积，只在新建对话时清空
-  resetTask: () => set({ activeTask: null, isCancelling: false }),
-  
-  setIsCancelling: (isCancelling) => set({ isCancelling }),
-}));
+  resetTask: () => set({ activeTask: null, isCancelling: false, autoSwitchedForTask: null }),
 
+  setIsCancelling: (isCancelling) => set({ isCancelling }),
+
+  addPendingApproval: (req) =>
+    set((state) => ({
+      pendingApprovals: [...state.pendingApprovals.filter(r => r.request_id !== req.request_id), req],
+    })),
+
+  removePendingApproval: (requestId) =>
+    set((state) => ({
+      pendingApprovals: state.pendingApprovals.filter(r => r.request_id !== requestId),
+    })),
+
+  setAutoSwitchedForTask: (taskId) => set({ autoSwitchedForTask: taskId }),
+}));

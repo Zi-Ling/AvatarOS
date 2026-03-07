@@ -2,17 +2,16 @@
 
 import React, { useRef, useEffect } from "react";
 import { MessageContent } from "./MessageContent";
-import { CopyButton } from "@/components/ui/CopyButton";
-import { TaskProgress } from "./TaskProgress";
 import { MessageActions } from "./MessageActions";
+import { TaskProgressBar } from "./TaskProgressBar";
+import { ApprovalCard } from "./ApprovalCard";
+import { RunSummaryCard } from "./RunSummaryCard";
 import { cn } from "@/lib/utils";
 import { Message } from "@/stores/chatStore";
-import type { ExecutionFlowData } from "@/components/ui/ExecutionFlow";
 
 interface MessageListProps {
   messages: Message[];
   isTyping: boolean;
-  executionFlow?: ExecutionFlowData;
   onRegenerate: (id: string) => void;
   onLike: (id: string) => void;
   onDislike: (id: string) => void;
@@ -23,7 +22,6 @@ interface MessageListProps {
 export function MessageList({
   messages,
   isTyping,
-  executionFlow,
   onRegenerate,
   onLike,
   onDislike,
@@ -33,20 +31,12 @@ export function MessageList({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Fix #8: 用 debounce 替代 throttle，确保流式输出最后一条消息也能滚动到
   useEffect(() => {
-    if (scrollTimerRef.current) {
-      clearTimeout(scrollTimerRef.current);
-    }
+    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     scrollTimerRef.current = setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, 150);
-
-    return () => {
-      if (scrollTimerRef.current) {
-        clearTimeout(scrollTimerRef.current);
-      }
-    };
+    return () => { if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current); };
   }, [messages]);
 
   return (
@@ -56,7 +46,7 @@ export function MessageList({
           key={message.id}
           className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
         >
-          {/* AI 消息 */}
+          {/* AI message */}
           {message.role === "assistant" && (
             <div className="group flex items-start gap-2 max-w-[75%]">
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-xs font-bold text-white shadow-sm">
@@ -64,17 +54,59 @@ export function MessageList({
               </div>
               <div className="flex-1 space-y-2">
                 <div className="rounded-2xl rounded-tl-sm border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-3 py-2 text-slate-800 dark:text-slate-200 shadow-sm dark:shadow-none">
-                  <MessageContent
-                    content={message.content}
-                    isStreaming={message.isStreaming}
-                    isUserMessage={false}
-                    executionFlow={message.isStreaming ? executionFlow : undefined}
-                  />
-                  {message.isTask && message.taskSteps && message.taskSteps.length > 0 && (
-                    <TaskProgress steps={message.taskSteps} taskStatus={message.taskStatus} />
+
+                  {/* task_progress: progress bar while streaming, fallback text when done */}
+                  {message.messageType === 'task_progress' && (
+                    message.isStreaming ? (
+                      <TaskProgressBar
+                        currentStepName={message.currentStepName}
+                        completedCount={message.completedStepCount}
+                        totalCount={message.totalStepCount}
+                      />
+                    ) : (
+                      <MessageContent
+                        content={message.content || "⏳ 任务执行中..."}
+                        isStreaming={false}
+                        isUserMessage={false}
+                      />
+                    )
+                  )}
+
+                  {/* approval: inline card */}
+                  {message.messageType === 'approval' && message.approvalRequest && (
+                    <ApprovalCard
+                      messageId={message.id}
+                      request={message.approvalRequest}
+                      status={message.approvalStatus ?? 'pending'}
+                      comment={message.approvalComment}
+                    />
+                  )}
+
+                  {/* run_summary: text + summary card */}
+                  {message.messageType === 'run_summary' && (
+                    <>
+                      {message.content && (
+                        <MessageContent
+                          content={message.content}
+                          isStreaming={false}
+                          isUserMessage={false}
+                        />
+                      )}
+                      {message.runSummary && <RunSummaryCard data={message.runSummary} />}
+                    </>
+                  )}
+
+                  {/* default chat message */}
+                  {(!message.messageType || message.messageType === 'chat') && (
+                    <MessageContent
+                      content={message.content}
+                      isStreaming={message.isStreaming}
+                      isUserMessage={false}
+                    />
                   )}
                 </div>
-                {!message.isStreaming && (
+
+                {!message.isStreaming && message.messageType !== 'approval' && (
                   <MessageActions
                     messageId={message.id}
                     content={message.content}
@@ -91,7 +123,7 @@ export function MessageList({
             </div>
           )}
 
-          {/* 用户消息 */}
+          {/* User message */}
           {message.role === "user" && (
             <div className="group flex flex-row items-start gap-2 max-w-[75%]">
               <div className="flex-1 flex flex-col items-end space-y-2">
@@ -133,7 +165,7 @@ export function MessageList({
         </div>
       ))}
 
-      {/* AI 输入中提示 */}
+      {/* Typing indicator */}
       {isTyping && (
         <div className="flex justify-start">
           <div className="flex items-start gap-3">
@@ -146,6 +178,7 @@ export function MessageList({
                 <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 dark:bg-white/60 [animation-delay:150ms]" />
                 <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 dark:bg-white/60 [animation-delay:300ms]" />
               </div>
+              <span className="text-xs text-slate-400 dark:text-slate-500">正在分析任务...</span>
             </div>
           </div>
         </div>

@@ -239,6 +239,13 @@ class ExecutorFactory:
         except Exception as e:
             logger.warning(f"[ExecutorFactory] ⚠️  DockerExecutor preload failed: {e}")
         
+        # 预加载 SandboxExecutor（含 KataExecutor 容器池 warmup）
+        try:
+            cls._get_sandbox_executor()
+            logger.info("[ExecutorFactory] ✅ SandboxExecutor preloaded (container pool warming up)")
+        except Exception as e:
+            logger.warning(f"[ExecutorFactory] ⚠️  SandboxExecutor preload failed: {e}")
+
         # Local 无需预加载
         logger.info("[ExecutorFactory] ✅ LocalExecutor ready (no preload needed)")
         

@@ -15,12 +15,10 @@ import {
 } from "lucide-react";
 import { TimelineView, TimelineNode } from "./_components/TimelineView";
 import { CalendarView } from "./_components/CalendarView";
-import { TaskHistoryDrawer } from "./_components/TaskHistoryDrawer";
 import { EditScheduleDialog } from "./_components/EditScheduleDialog";
 import { StatsPanel } from "./_components/StatsPanel";
 import { DependencySelector } from "./_components/DependencySelector";
 import { scheduleApi, ScheduleItem } from "@/lib/api/schedule";
-import { historyApi, TaskHistoryItem } from "@/lib/api/history";
 
 export default function SchedulePage() {
   const [viewMode, setViewMode] = useState<'timeline' | 'calendar'>('timeline');
@@ -29,7 +27,6 @@ export default function SchedulePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null); // 新增：错误状态
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [editingSchedule, setEditingSchedule] = useState<ScheduleItem | null>(null);
   const [dependencySchedule, setDependencySchedule] = useState<ScheduleItem | null>(null);
   
@@ -50,24 +47,11 @@ export default function SchedulePage() {
         // 不崩溃，继续渲染空状态
       }
       
-      // 2. Fetch History (Past) - 带错误处理
-      let history = [];
-      let historyError = false;
-      try {
-        history = await historyApi.listTasks(20);
-      } catch (err) {
-        console.error('❌ Failed to fetch history:', err);
-        historyError = true;
-        // 不崩溃，继续渲染空状态
-      }
+      // 2. Fetch History — 不再需要，Schedule 只管计划
       
       // 设置友好的错误提示
-      if (schedulesError && historyError) {
+      if (schedulesError) {
         setError('无法连接到后端服务，请检查服务器是否正常运行');
-      } else if (schedulesError) {
-        setError('定时任务数据加载失败，但历史记录正常');
-      } else if (historyError) {
-        setError('历史记录加载失败，但定时任务正常');
       }
       
       // 3. Transform to TimelineNode
@@ -96,26 +80,8 @@ export default function SchedulePage() {
         };
       }).sort((a, b) => a.rawDate.getTime() - b.rawDate.getTime()); // 按时间排序
       
-      const pastNodes: TimelineNode[] = history.map(t => {
-        const lastRun = t.runs && t.runs[0];
-        const status = lastRun ? (lastRun.status === 'success' ? 'success' : lastRun.status === 'failed' ? 'failed' : 'running') : 'success';
-        const date = new Date(t.created_at);
-        
-        return {
-          id: t.id,
-          type: 'past',
-          // Force 24h format manually: HH:MM
-          timestamp: date.toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' }),
-          rawDate: date,
-          title: t.title || t.intent_spec.goal,
-          description: lastRun?.summary || t.intent_spec.goal,
-          status: status as any,
-          meta: lastRun?.finished_at ? 'Done' : 'Created' 
-        };
-      }).sort((a, b) => b.rawDate.getTime() - a.rawDate.getTime()); // 倒序：最新的在上面
-      
-      // 组合数据：未来任务在前，过去任务在后
-      setData([...futureNodes, ...pastNodes]);
+      // 只保留未来计划节点
+      setData([...futureNodes]);
     } catch (e) {
       console.error("Failed to load schedule data", e);
     } finally {
@@ -144,24 +110,19 @@ export default function SchedulePage() {
     setShowCreateDialog(true);
   };
   
-  const handleGoToChat = () => {
-    setShowCreateDialog(false);
-    // 导航到 Chat 页面
-    window.location.href = '/chat';
-  };
-  
   const handleEdit = (scheduleId: string) => {
     const schedule = schedules.find(s => s.id === scheduleId);
-    if (schedule) {
-      setEditingSchedule(schedule);
-    }
+    if (schedule) setEditingSchedule(schedule);
   };
   
   const handleSetDependency = (scheduleId: string) => {
     const schedule = schedules.find(s => s.id === scheduleId);
-    if (schedule) {
-      setDependencySchedule(schedule);
-    }
+    if (schedule) setDependencySchedule(schedule);
+  };
+
+  const handleGoToChat = () => {
+    setShowCreateDialog(false);
+    window.location.href = '/chat';
   };
 
   return (
@@ -325,7 +286,6 @@ export default function SchedulePage() {
             <TimelineView 
               data={data} 
               onRefresh={loadData}
-              onClickHistory={setSelectedTaskId}
               onEdit={handleEdit}
               onSetDependency={handleSetDependency}
             />
@@ -334,12 +294,6 @@ export default function SchedulePage() {
           )}
         </div>
       </div>
-
-      {/* 任务历史详情 Drawer */}
-      <TaskHistoryDrawer
-        taskId={selectedTaskId}
-        onClose={() => setSelectedTaskId(null)}
-      />
 
       {/* 编辑任务 Dialog */}
       <EditScheduleDialog

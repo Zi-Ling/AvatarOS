@@ -23,4 +23,6 @@ export type TaskState = {
   steps: TaskStep[];
   startTime?: string;
   endTime?: string;
+  currentStepName?: string;
+  completedCount?: number;
 };

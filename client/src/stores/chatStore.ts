@@ -83,15 +83,26 @@ export const useChatStore = create<ChatState>()(
       }),
     }),
     {
-      name: 'chat-storage', // unique name in localStorage
+      name: 'chat-storage',
       storage: createJSONStorage(() => localStorage),
-      partialize: (state) => ({ 
-        // Only persist these fields
+      partialize: (state) => ({
         messages: state.messages,
         inputValue: state.inputValue,
         isThinkEnabled: state.isThinkEnabled,
-        sessionId: state.sessionId // Persist session ID
+        sessionId: state.sessionId
       }),
+      // Migrate old messages that have isTask/taskSteps but no messageType
+      onRehydrateStorage: () => (state) => {
+        if (!state) return;
+        state.messages = state.messages.map((m) => {
+          if (m.messageType) return m;
+          // Old task messages with steps → treat as plain chat (history)
+          if (m.isTask || m.taskSteps?.length) {
+            return { ...m, messageType: 'chat' as const, taskSteps: undefined };
+          }
+          return m;
+        });
+      },
     }
   )
 );

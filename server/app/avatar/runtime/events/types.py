@@ -54,6 +54,14 @@ class EventType(str, Enum):
     DIR_CREATED = "dir.created"
     DIR_DELETED = "dir.deleted"
 
+    # Graph execution
+    GRAPH_STARTED = "graph_started"
+    GRAPH_COMPLETED = "graph_completed"
+    GRAPH_FAILED = "graph_failed"
+    NODE_STARTED = "node_started"
+    NODE_COMPLETED = "node_completed"
+    NODE_FAILED = "node_failed"
+
 
 @dataclass
 class Event:

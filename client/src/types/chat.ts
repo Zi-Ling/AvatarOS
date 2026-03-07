@@ -24,6 +24,30 @@ export type Attachment = {
   file?: File;
 };
 
+export type ApprovalRequest = {
+  request_id: string;
+  message: string;
+  operation: string;
+  details?: Record<string, any>;
+  created_at: string;
+  expires_at: string;
+};
+
+export type ApprovalStatus = "pending" | "submitting" | "approved" | "rejected" | "expired";
+
+export type RunSummaryData = {
+  taskId: string;
+  goal: string;
+  totalSteps: number;
+  completedSteps: number;
+  failedSteps: number;
+  durationMs: number;
+  hadApproval: boolean;
+  keyOutputs: Array<{ stepName: string; skillName?: string; summary?: string }>;
+};
+
+export type MessageType = "chat" | "task_progress" | "approval" | "run_summary";
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -37,4 +61,14 @@ export type Message = {
   taskId?: string;
   taskSteps?: TaskStep[];
   taskStatus?: "planning" | "executing" | "completed" | "failed";
+  // Extended message types
+  messageType?: MessageType;
+  approvalRequest?: ApprovalRequest;
+  approvalStatus?: ApprovalStatus;
+  approvalComment?: string;
+  runSummary?: RunSummaryData;
+  // Progress tracking (for task_progress messages)
+  currentStepName?: string;
+  completedStepCount?: number;
+  totalStepCount?: number;
 };

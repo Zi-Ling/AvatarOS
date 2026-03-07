@@ -32,11 +32,10 @@ export interface TimelineNode {
   isActive?: boolean; // 新增：任务是否激活（仅 future 类型）
 }
 
-function TimelineItem({ node, isLast, onAction, onClickHistory, onEdit, onSetDependency }: { 
+function TimelineItem({ node, isLast, onAction, onEdit, onSetDependency }: { 
   node: TimelineNode; 
   isLast: boolean;
   onAction?: (action: 'delete' | 'toggle' | 'run', id: string) => void;
-  onClickHistory?: (id: string) => void;
   onEdit?: (id: string) => void;
   onSetDependency?: (id: string) => void;
 }) {
@@ -57,9 +56,7 @@ function TimelineItem({ node, isLast, onAction, onClickHistory, onEdit, onSetDep
   };
 
   const handleCardClick = () => {
-    if (isPast && onClickHistory) {
-      onClickHistory(node.id);
-    }
+    // past 节点不再有点击行为，历史在 Workbench History tab 查看
   };
 
   return (
@@ -105,13 +102,11 @@ function TimelineItem({ node, isLast, onAction, onClickHistory, onEdit, onSetDep
         isFuture ? "opacity-80 group-hover:opacity-100" : "opacity-100"
       )}>
         <div 
-          onClick={handleCardClick}
           className={cn(
             "relative p-4 rounded-xl border transition-all duration-300",
             isRunning 
               ? "bg-indigo-50/50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/30 shadow-lg shadow-indigo-500/10 scale-[1.01]" 
-              : "bg-white dark:bg-slate-800 border-slate-200 dark:border-white/5 hover:shadow-md hover:border-indigo-200 dark:hover:border-indigo-500/30 hover:-translate-y-0.5",
-            isPast && "cursor-pointer"
+              : "bg-white dark:bg-slate-800 border-slate-200 dark:border-white/5 hover:shadow-md hover:border-indigo-200 dark:hover:border-indigo-500/30 hover:-translate-y-0.5"
           )}
         >
           {/* Header */}
@@ -235,10 +230,9 @@ function TimelineItem({ node, isLast, onAction, onClickHistory, onEdit, onSetDep
   );
 }
 
-export function TimelineView({ data, onRefresh, onClickHistory, onEdit, onSetDependency }: { 
+export function TimelineView({ data, onRefresh, onEdit, onSetDependency }: { 
   data: TimelineNode[];
   onRefresh?: () => void;
-  onClickHistory?: (taskId: string) => void;
   onEdit?: (scheduleId: string) => void;
   onSetDependency?: (scheduleId: string) => void;
 }) {
@@ -310,7 +304,6 @@ export function TimelineView({ data, onRefresh, onClickHistory, onEdit, onSetDep
                  node={node} 
                  isLast={index === data.length - 1}
                  onAction={handleAction}
-                 onClickHistory={onClickHistory}
                  onEdit={onEdit}
                  onSetDependency={onSetDependency}
                />

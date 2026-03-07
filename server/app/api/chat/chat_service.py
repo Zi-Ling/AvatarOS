@@ -132,9 +132,7 @@ async def handle_message_with_route(
         return prefix_content + response_text
     
     elif decision.intent_kind == "task":
-        confirm_msg = decision.llm_explanation or f"PLANNING TASK : **{decision.goal or user_message}**..."
-        if not confirm_msg.startswith(("👌", "✅", "🤖")):
-            confirm_msg = f"🤖 {confirm_msg}"
+        confirm_msg = "⚙️ 正在规划任务..."
         
         asyncio.create_task(
             execute_task(
@@ -209,9 +207,7 @@ async def stream_chat_response(
                     await asyncio.sleep(0.02)
             else:
                 # TASK MODE: Fire-and-Forget
-                confirm_msg = decision.llm_explanation or f"PLANNING TASK : **{decision.goal or user_input}**..."
-                if not confirm_msg.startswith(("👌", "✅", "🤖")):
-                    confirm_msg = f"🤖 {confirm_msg}"
+                confirm_msg = "⚙️ 正在规划任务..."
                 full_response_content += confirm_msg
                 yield f"data: {StreamChunk(content=confirm_msg, done=False, session_id=session_id).model_dump_json()}\n\n"
                 

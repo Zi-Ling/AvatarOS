@@ -310,7 +310,10 @@ class GraphController:
             
             # 3. Apply patch to graph
             self._apply_patch(patch, graph)
-            
+
+            # 发 plan.generated，让前端实时看到步骤列表
+            self._emit_plan_generated(graph, env_context)
+
             # 4. Execute ready nodes
             result = await self.runtime.execute_ready_nodes(graph)
             
@@ -806,6 +809,42 @@ class GraphController:
         # Only treat as multi-goal if we actually split into 2+
         return sub_goals if len(sub_goals) > 1 else [goal]
 
+    def _emit_plan_generated(self, graph: 'ExecutionGraph', env_context: Dict[str, Any]) -> None:
+        """patch apply 后实时向前端发 plan.generated，让进度条显示步骤列表"""
+        if not self.runtime.event_bus:
+            return
+        try:
+            from app.avatar.runtime.events.types import Event, EventType
+            nodes = list(graph.nodes.values())
+            steps = [
+                {
+                    "id": str(n.id),
+                    "skill": n.capability_name,
+                    "skill_name": n.capability_name,
+                    "description": n.capability_name.replace(".", " → "),
+                    "status": "pending",
+                    "order": i,
+                    "params": n.params or {},
+                    "depends_on": [],
+                }
+                for i, n in enumerate(nodes)
+            ]
+            event = Event(
+                type=EventType.PLAN_GENERATED,
+                source="graph_controller",
+                payload={
+                    "session_id": env_context.get("session_id", ""),
+                    "plan": {
+                        "id": graph.id,
+                        "goal": graph.goal,
+                        "steps": steps,
+                    },
+                },
+            )
+            self.runtime.event_bus.publish(event)
+        except Exception as e:
+            logger.warning(f"[GraphController] Failed to emit plan.generated: {e}")
+
     def _get_uncovered_sub_goals(
         self,
         sub_goals: List[str],
@@ -874,3 +913,40 @@ class GraphController:
                 uncovered.append(sub_goal)
 
         return uncovered
+    def _emit_plan_generated(self, graph: 'ExecutionGraph', env_context: Dict[str, Any]) -> None:
+        """patch apply 后实时向前端发 plan.generated，让进度条显示步骤列表"""
+        if not self.runtime.event_bus:
+            return
+        try:
+            from app.avatar.runtime.events.types import Event, EventType
+            nodes = list(graph.nodes.values())
+            steps = [
+                {
+                    "id": str(n.id),
+                    "skill": n.capability_name,
+                    "skill_name": n.capability_name,
+                    "description": n.capability_name.replace(".", " → "),
+                    "status": "pending",
+                    "order": i,
+                    "params": n.params or {},
+                    "depends_on": [],
+                }
+                for i, n in enumerate(nodes)
+            ]
+            event = Event(
+                type=EventType.PLAN_GENERATED,
+                source="graph_controller",
+                payload={
+                    "session_id": env_context.get("session_id", ""),
+                    "plan": {
+                        "id": graph.id,
+                        "goal": graph.goal,
+                        "steps": steps,
+                    },
+                },
+            )
+            self.runtime.event_bus.publish(event)
+        except Exception as e:
+            logger.warning(f"[GraphController] Failed to emit plan.generated: {e}")
+
+
