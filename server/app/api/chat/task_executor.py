@@ -465,6 +465,7 @@ async def execute_task(
         task_cancel_event = cancellation_mgr.register_task(initial_intent.id, session_id)
         logger.info(f"[TaskExecution] 已注册任务: {initial_intent.id}")
 
+        task_start_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         try:
             run_record = await runtime.run_intent(
                 initial_intent, task_mode=decision.task_mode, cancel_event=task_cancel_event,
@@ -497,6 +498,7 @@ async def execute_task(
     # 格式化结果并推送
     return await _format_and_push_result(
         run_record, decision, avatar_router, session_id, prefix_content, memory_manager,
+        task_start_ms=task_start_ms,
     )
 
 
@@ -691,7 +693,61 @@ async def _handle_planning_failure(error, avatar_router, decision, user_message,
     })
 
 
-async def _format_and_push_result(run_record, decision, avatar_router, session_id, prefix_content, memory_manager=None):
+def _build_run_summary_payload(graph, run_record, start_time_ms: int = 0) -> dict:
+    """
+    从 ExecutionGraph 构建 run_summary payload，直接在后端计算，
+    前端不再依赖 taskStore 运行时状态来统计步骤。
+    """
+    from app.avatar.runtime.graph.models.step_node import NodeStatus
+
+    if graph and graph.nodes:
+        nodes = list(graph.nodes.values())
+        total = len(nodes)
+        completed = sum(1 for n in nodes if n.status == NodeStatus.COMPLETED)
+        failed = sum(1 for n in nodes if n.status == NodeStatus.FAILED)
+        duration_ms = int((datetime.now(timezone.utc).timestamp() * 1000) - start_time_ms) if start_time_ms else 0
+
+        key_outputs = []
+        for n in nodes:
+            if n.status == NodeStatus.COMPLETED and n.outputs:
+                outputs = n.outputs
+                summary_val = (
+                    outputs.get("stdout") or outputs.get("output") or
+                    outputs.get("content") or outputs.get("message")
+                )
+                if summary_val and isinstance(summary_val, str) and summary_val.strip():
+                    key_outputs.append({
+                        "skill_name": n.capability_name,
+                        "step_name": n.capability_name.split(".")[-1],
+                        "summary": summary_val.strip()[:120],
+                    })
+
+        return {
+            "total_steps": total,
+            "completed_steps": completed,
+            "failed_steps": failed,
+            "duration_ms": duration_ms,
+            "key_outputs": key_outputs[-3:],  # 最多 3 个
+        }
+
+    # fallback: DB steps
+    if hasattr(run_record, "steps") and run_record.steps:
+        steps = run_record.steps
+        total = len(steps)
+        completed = sum(1 for s in steps if getattr(s, "status", "") == "completed")
+        failed = sum(1 for s in steps if getattr(s, "status", "") == "failed")
+        return {
+            "total_steps": total,
+            "completed_steps": completed,
+            "failed_steps": failed,
+            "duration_ms": 0,
+            "key_outputs": [],
+        }
+
+    return {"total_steps": 0, "completed_steps": 0, "failed_steps": 0, "duration_ms": 0, "key_outputs": []}
+
+
+async def _format_and_push_result(run_record, decision, avatar_router, session_id, prefix_content, memory_manager=None, task_start_ms: int = 0):
     """格式化任务结果并通过 Socket 推送到前端，同时保存到 session 历史"""
     from .session import save_message_to_session
 
@@ -866,6 +922,12 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
     
     await socket_manager.emit("server_event", {
         "type": "task.summary",
-        "payload": {"session_id": session_id, "content": final_summary},
+        "payload": {
+            "session_id": session_id,
+            "content": final_summary,
+            "run_summary": _build_run_summary_payload(
+                getattr(run_record, "_graph", None), run_record, task_start_ms
+            ),
+        },
     })
     return final_summary

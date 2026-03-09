@@ -258,44 +258,61 @@ export function TaskEventListener() {
         }
 
         if (targetId) {
-          const { activeTask } = useTaskStore.getState();
+          // 优先用后端直接计算好的 run_summary，不依赖前端 taskStore 运行时状态
           let runSummary: RunSummaryData | undefined;
+          const backendSummary = payload.run_summary;
 
-          if (activeTask) {
-            const completedSteps = activeTask.steps.filter((s) => s.status === "completed");
-            const failedSteps = activeTask.steps.filter((s) => s.status === "failed");
-            const startMs = activeTask.startTime
-              ? new Date(activeTask.startTime).getTime()
-              : Date.now();
+          if (backendSummary) {
+            const { activeTask } = useTaskStore.getState();
             const hadApproval = messages.some((m) => m.messageType === "approval");
-
             runSummary = {
-              taskId: activeTask.id,
-              goal: activeTask.goal,
-              totalSteps: activeTask.steps.length,
-              completedSteps: completedSteps.length,
-              failedSteps: failedSteps.length,
-              durationMs: Date.now() - startMs,
+              taskId: activeTask?.id ?? targetId,
+              goal: activeTask?.goal ?? "",
+              totalSteps: backendSummary.total_steps,
+              completedSteps: backendSummary.completed_steps,
+              failedSteps: backendSummary.failed_steps,
+              durationMs: backendSummary.duration_ms,
               hadApproval,
-              keyOutputs: completedSteps
-                .filter((s) => s.output_result)
-                .slice(-3)
-                .map((s) => ({
-                  stepName: s.step_name,
-                  skillName: s.skill_name,
-                  summary:
-                    typeof s.output_result === "string"
-                      ? s.output_result.slice(0, 120)
-                      : undefined,
-                })),
+              keyOutputs: (backendSummary.key_outputs ?? []).map((o: any) => ({
+                stepName: o.step_name,
+                skillName: o.skill_name,
+                summary: o.summary,
+              })),
             };
+          } else {
+            // fallback：从 taskStore 读（兼容旧事件格式）
+            const { activeTask } = useTaskStore.getState();
+            if (activeTask) {
+              const completedSteps = activeTask.steps.filter((s) => s.status === "completed");
+              const failedSteps = activeTask.steps.filter((s) => s.status === "failed");
+              const startMs = activeTask.startTime ? new Date(activeTask.startTime).getTime() : Date.now();
+              const hadApproval = messages.some((m) => m.messageType === "approval");
+              runSummary = {
+                taskId: activeTask.id,
+                goal: activeTask.goal,
+                totalSteps: activeTask.steps.length,
+                completedSteps: completedSteps.length,
+                failedSteps: failedSteps.length,
+                durationMs: Date.now() - startMs,
+                hadApproval,
+                keyOutputs: completedSteps
+                  .filter((s) => s.output_result)
+                  .slice(-3)
+                  .map((s) => ({
+                    stepName: s.step_name,
+                    skillName: s.skill_name,
+                    summary: typeof s.output_result === "string" ? s.output_result.slice(0, 120) : undefined,
+                  })),
+              };
+            }
           }
 
           updateMessage(targetId, {
             content: payload.content,
             isStreaming: false,
             messageType: "run_summary",
-            runSummary,
+            // 只在有新数据时覆盖，避免刷新后用 undefined 覆盖已持久化的数据
+            ...(runSummary !== undefined ? { runSummary } : {}),
           });
         }
 
