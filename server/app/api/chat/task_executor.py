@@ -5,11 +5,13 @@
 import inspect
 import json
 import logging
+import re
 import uuid
+from datetime import datetime, timezone
 
 from app.avatar.intent.models import IntentSpec, IntentDomain
 from app.avatar.memory.manager import MemoryManager
-from app.intent_router.param_extractor import ParameterExtractor
+from app.router.param_extractor import ParameterExtractor
 from app.io.manager import SocketManager
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,17 @@ socket_manager = SocketManager.get_instance()
 def _detect_language(text: str) -> str:
     """检测用户语言（简单启发式）"""
     return "zh" if any('\u4e00' <= c <= '\u9fff' for c in text) else "en"
+
+
+_reference_resolver = None
+
+
+def _get_reference_resolver():
+    global _reference_resolver
+    if _reference_resolver is None:
+        from app.avatar.runtime.context.reference_resolver import ReferenceResolver
+        _reference_resolver = ReferenceResolver()
+    return _reference_resolver
 
 
 async def generate_capability_explanation(
@@ -151,6 +164,89 @@ def _build_safe_output(output_val):
     return target_obj
 
 
+def build_task_result_summary(
+    run_record,
+    goal: str,
+    target_obj: dict = None,
+    final_summary: str = None,
+) -> dict:
+    """
+    统一的任务结果摘要提炼器。
+    产出固定 schema 的 dict，供 SessionContext 存储和 Planner prompt 注入使用。
+
+    Schema:
+        task_id       - run record id
+        goal          - 本次任务目标
+        status        - success | failed | partial
+        output_type   - file | text | json | none
+        output_path   - 文件路径（如有）
+        output_value  - 核心输出值（截断至 500 字符）
+        summary       - 人类可读摘要（截断至 300 字符）
+        updated_at    - ISO 时间戳
+    """
+    status = run_record.status if run_record.status in ("completed", "failed") else "partial"
+    if status == "completed":
+        status = "success"
+
+    output_path = ""
+    output_value = ""
+    output_type = "none"
+
+    if target_obj and isinstance(target_obj, dict):
+        # 1. 优先提取文件路径
+        for path_key in ("path", "output_path", "file_path", "current_url", "url"):
+            if target_obj.get(path_key):
+                output_path = str(target_obj[path_key])
+                output_type = "file"
+                break
+
+        # 2. 提取核心文本值（优先级：stdout > output > content > items > 整体 JSON）
+        raw_value = None
+        for val_key in ("stdout", "output", "content", "text", "result"):
+            if target_obj.get(val_key):
+                raw_value = target_obj[val_key]
+                break
+
+        if raw_value is None and output_type != "file":
+            # fallback: 整体 JSON，去掉 base64
+            safe = {k: v for k, v in target_obj.items()
+                    if k not in ("base64_image",) and v not in (None, "", [], {})}
+            if safe:
+                raw_value = safe
+
+        if raw_value is not None:
+            if isinstance(raw_value, (dict, list)):
+                output_type = "json"
+                raw_str = json.dumps(raw_value, ensure_ascii=False)
+            else:
+                raw_str = str(raw_value)
+                output_type = "text" if output_type == "none" else output_type
+
+            # 截断至 500 字符，保留首尾
+            if len(raw_str) > 500:
+                output_value = raw_str[:300] + "\n...[truncated]...\n" + raw_str[-150:]
+            else:
+                output_value = raw_str
+
+    # 3. summary：优先用 final_summary 的纯文本部分（去掉 image block），截断至 300 字符
+    summary = ""
+    if final_summary:
+        # 去掉 ```image ... ``` 块
+        clean = re.sub(r'```image\n.*?\n```', '', final_summary, flags=re.DOTALL).strip()
+        summary = clean[:300] if len(clean) > 300 else clean
+
+    return {
+        "task_id": str(getattr(run_record, "id", "")),
+        "goal": goal,
+        "status": status,
+        "output_type": output_type,
+        "output_path": output_path,
+        "output_value": output_value,
+        "summary": summary,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 async def execute_task(
     avatar_router, decision, user_message: str, session_id: str,
     prefix_content: str, history: list = None, memory_manager: MemoryManager = None,
@@ -234,6 +330,42 @@ async def execute_task(
                 },
             )
 
+        # Reference Resolution: 结构化指代消解，按优先级从 history 绑定引用对象
+        # 不依赖正则/指代词，只要 history 有 assistant 消息就尝试绑定，confidence 决定是否使用
+        resolver = _get_reference_resolver()
+        resolution = resolver.resolve(history or [])
+        if resolution.resolved and resolution.best and resolution.best.confidence >= 0.5:
+            resolved_inputs = resolution.to_env_dict()
+
+            # IntentSpec typed slots 优先覆盖：只有路径类 slot 才覆盖
+            # content 永远来自 ReferenceResolver（历史消息），不从当前输入提取
+            intent_slots = initial_intent.params or {}
+            if intent_slots.get("file_path"):
+                resolved_inputs["file_path"] = intent_slots["file_path"]
+                resolved_inputs["path_ref"] = {
+                    "confidence": 1.0,
+                    "source_type": "intent_slot",
+                    "source_id": "current_turn",
+                    "resolver_rule": "intent_extractor.file_path_slot",
+                    "file_path": intent_slots["file_path"],
+                }
+            if intent_slots.get("target_path") and not resolved_inputs.get("path_ref"):
+                resolved_inputs["path_ref"] = {
+                    "confidence": 1.0,
+                    "source_type": "intent_slot",
+                    "source_id": "current_turn",
+                    "resolver_rule": "intent_extractor.target_path_slot",
+                    "file_path": intent_slots["target_path"],
+                }
+
+            initial_intent.metadata["resolved_inputs"] = resolved_inputs
+            typed_keys = [k for k in ("content_ref", "path_ref") if resolved_inputs.get(k)]
+            logger.info(
+                f"[ReferenceResolver] Bound: source={resolved_inputs['source_type']}, "
+                f"confidence={resolved_inputs['confidence']:.2f}, "
+                f"typed_refs={typed_keys}"
+            )
+
         # Parameter Extraction: 从自然语言中提取结构化参数，减轻 Planner 负担
         if decision.top_skills:
             try:
@@ -257,22 +389,39 @@ async def execute_task(
             except Exception as pe:
                 logger.debug(f"[ParamExtractor] Non-fatal extraction error: {pe}")
 
-        # 注册取消事件
+        # 注册取消事件（生命周期绑定 task_id，task 真正完成后才注销）
         cancellation_mgr = get_cancellation_manager()
         task_cancel_event = cancellation_mgr.register_task(initial_intent.id, session_id)
         logger.info(f"[TaskExecution] 已注册任务: {initial_intent.id}")
 
-        run_record = await runtime.run_intent(
-            initial_intent, task_mode=decision.task_mode, cancel_event=task_cancel_event,
-        )
-
-        # 任务执行完成后，向前端推送完整的执行计划和每个步骤的结果
-        await _emit_plan_and_steps(run_record, initial_intent, session_id)
+        try:
+            run_record = await runtime.run_intent(
+                initial_intent, task_mode=decision.task_mode, cancel_event=task_cancel_event,
+                on_graph_created=lambda gid: cancellation_mgr.alias_task(gid, initial_intent.id),
+            )
+            # 任务执行完成后，向前端推送完整的执行计划和每个步骤的结果
+            await _emit_plan_and_steps(run_record, initial_intent, session_id)
+        finally:
+            # 无论成功/失败/取消，task 完成后立即注销，释放资源
+            cancellation_mgr.unregister_task(initial_intent.id)
+            logger.info(f"[TaskExecution] 已注销任务: {initial_intent.id}")
 
     except RuntimeError as e:
         return await _handle_planning_failure(
             e, avatar_router, decision, user_message, session_id, prefix_content,
         )
+    except Exception as e:
+        # 兜底：防止 fire-and-forget 任务异常丢失
+        logger.error(f"[TaskExecution] Unexpected error for goal='{decision.goal}': {e}", exc_info=True)
+        from .session import save_message_to_session
+        user_language = _detect_language(user_message)
+        err_msg = f"{prefix_content}❌ 任务执行时发生意外错误，请稍后重试。" if user_language == "zh" else f"{prefix_content}❌ An unexpected error occurred. Please try again."
+        save_message_to_session(session_id, "assistant", err_msg)
+        await socket_manager.emit("server_event", {
+            "type": "task.summary",
+            "payload": {"session_id": session_id, "content": err_msg},
+        })
+        return err_msg
     
     # 格式化结果并推送
     return await _format_and_push_result(
@@ -424,27 +573,14 @@ async def _emit_plan_and_steps(run_record, intent, session_id: str):
 
 
 async def _handle_planning_failure(error, avatar_router, decision, user_message, session_id, prefix_content):
-    """处理 Planner 失败的优雅降级，通过 Socket 推送结果"""
+    """处理任务执行失败（RuntimeError）的优雅降级，通过 Socket 推送结果"""
     from .session import save_message_to_session
     
-    error_msg = str(error)
-    planning_keywords = ["计划不能为空", "生成执行计划时遇到了问题", "AI 理解了你的需求，但在生成执行计划时遇到了问题"]
-    
-    if not any(kw in error_msg for kw in planning_keywords):
-        raise error
-    
-    logger.warning(f"[TaskExecution] Planner failed for goal='{decision.goal}', triggering fallback")
+    logger.warning(f"[TaskExecution] Task failed for goal='{decision.goal}': {error}")
     user_language = _detect_language(user_message)
     
     result_msg = None
     try:
-        if decision.relevance_score == 0.0:
-            from app.avatar.skills.registry import skill_registry
-            scored_skills = skill_registry.search_skills_with_scores(decision.goal, limit=5)
-            if scored_skills:
-                decision.relevance_score = scored_skills[0]['score']
-                decision.top_skills = [s['name'] for s in scored_skills[:3]]
-        
         explanation = await generate_capability_explanation(
             llm_client=avatar_router.llm,
             goal=decision.goal or user_message,
@@ -455,9 +591,9 @@ async def _handle_planning_failure(error, avatar_router, decision, user_message,
         result_msg = f"{prefix_content}💡 {explanation}"
     except Exception:
         if user_language == "zh":
-            result_msg = f"{prefix_content}❌ 抱歉，我理解你的需求，但暂时无法生成执行计划。建议尝试其他任务或换个方式描述。"
+            result_msg = f"{prefix_content}❌ 抱歉，任务执行失败。建议尝试其他任务或换个方式描述。"
         else:
-            result_msg = f"{prefix_content}❌ Sorry, I understand your request but cannot generate an execution plan."
+            result_msg = f"{prefix_content}❌ Sorry, the task failed. Please try rephrasing or a different request."
     
     save_message_to_session(session_id, "assistant", result_msg)
     await socket_manager.emit("server_event", {
@@ -469,7 +605,40 @@ async def _handle_planning_failure(error, avatar_router, decision, user_message,
 async def _format_and_push_result(run_record, decision, avatar_router, session_id, prefix_content, memory_manager=None):
     """格式化任务结果并通过 Socket 推送到前端，同时保存到 session 历史"""
     from .session import save_message_to_session
-    
+
+    # llm.fallback 特殊处理：输出是对话消息，不是任务结果
+    graph = getattr(run_record, "_graph", None)
+    if graph and graph.nodes:
+        nodes = list(graph.nodes.values())
+        last_node = nodes[-1]
+        if last_node.capability_name == "llm.fallback":
+            outputs = last_node.outputs or {}
+            # FallbackOutput 结构：response_zh / response_en / next_steps
+            fallback_msg = (
+                outputs.get("response_zh")
+                or outputs.get("response_en")
+                or outputs.get("message")
+                or "我暂时无法完成这个请求，请补充更多信息。"
+            )
+            # next_steps 拼接到消息末尾
+            next_steps = outputs.get("next_steps") or []
+            if next_steps:
+                steps_text = "\n".join(
+                    f"- {s.get('zh', s.get('en', ''))}" for s in next_steps if isinstance(s, dict)
+                )
+                if steps_text:
+                    fallback_msg = f"{fallback_msg}\n\n{steps_text}"
+
+            chat_msg = prefix_content + fallback_msg
+            # 保存为普通 chat 消息（message_type=chat），下一轮 ReferenceResolver 可正常识别
+            save_message_to_session(session_id, "assistant", chat_msg)
+            await socket_manager.emit("server_event", {
+                "type": "task.summary",
+                "payload": {"session_id": session_id, "content": chat_msg},
+            })
+            logger.info(f"[llm.fallback] Pushed as chat message, len={len(chat_msg)}")
+            return chat_msg
+
     # 优先从 ExecutionGraph 读取最后一个节点的输出
     graph = getattr(run_record, "_graph", None)
     real_b64_image = None
@@ -545,10 +714,26 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
     
     final_summary = prefix_content + "\n".join(summary_lines)
     
-    # 保存任务结果到 session 历史（刷新页面后可见）
-    save_message_to_session(session_id, "assistant", final_summary)
-    
-    # 结构化产出物存入 SessionContext（供下一个任务引用）
+    # 保存任务结果到 session 历史（刷新页面后可见），携带结构化 metadata 供 Planner 跨轮引用
+    task_result_summary = build_task_result_summary(
+        run_record=run_record,
+        goal=decision.goal or "",
+        target_obj=target_obj,
+        final_summary=final_summary,
+    )
+    save_message_to_session(
+        session_id, "assistant", final_summary,
+        metadata={
+            "message_type": "task_result",
+            "goal": task_result_summary["goal"],
+            "status": task_result_summary["status"],
+            "output_type": task_result_summary["output_type"],
+            "output_path": task_result_summary["output_path"],
+            "output_value": task_result_summary["output_value"],
+        },
+    )
+
+    # 保存 last_output 到 SessionContext（供其他非 Planner 路径使用）
     try:
         from app.avatar.runtime.core import SessionContext
         if memory_manager:
@@ -557,26 +742,10 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
                 session_ctx = SessionContext.from_dict(session_data)
             else:
                 session_ctx = SessionContext.create(session_id=session_id)
-            
-            # 存储结构化的最后任务结果
-            task_result = {
-                "status": run_record.status,
-                "goal": decision.goal,
-                "step_count": len(run_record.steps) if run_record.steps else 0,
-            }
-            
-            # 提取产出物路径（文件类 skill 的输出）
-            if target_obj and isinstance(target_obj, dict):
-                for path_key in ("path", "output_path", "file_path", "current_url", "url"):
-                    if path_key in target_obj and target_obj[path_key]:
-                        task_result["output_path"] = str(target_obj[path_key])
-                        break
-            
-            session_ctx.set_variable("last_task_result", task_result)
             session_ctx.set_variable("last_output", final_summary)
             memory_manager.save_session_context(session_ctx)
     except Exception as e:
-        logger.warning(f"Failed to save structured task result to session: {e}")
+        logger.warning(f"Failed to save last_output to session: {e}")
     
     await socket_manager.emit("server_event", {
         "type": "task.summary",

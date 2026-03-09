@@ -3,7 +3,7 @@ from fastapi import Request
 from app.avatar.memory import MemoryManager
 from app.avatar.learning import LearningManager
 from app.avatar.runtime.main import AvatarMain
-from app.intent_router.router import AvatarRouter
+from app.router.router import AvatarRouter
 from app.log import LogAggregator
 
 

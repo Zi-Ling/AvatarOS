@@ -318,8 +318,8 @@ class AvatarRouter:
         
         如果不需要，直接构造简单的 IntentSpec
         """
-        # 检测代词
-        pronoun_pattern = r'(它|这个|那个|这些|那些|这样|那样|上面|刚才|之前)'
+        # 检测代词（扩展量词引用：这首/这篇/这段/这张/这份）
+        pronoun_pattern = r'(它|这个|那个|这些|那些|这样|那样|上面|刚才|之前|这首|这篇|这段|这张|这份|那首|那篇|那段)'
         has_pronoun = bool(re.search(pronoun_pattern, user_message))
         
         # 短消息 + 历史对话
@@ -336,32 +336,34 @@ class AvatarRouter:
                     self.intent_compiler.extract(user_message, history),
                     timeout=30
                 )
+                # 无论走哪条路，都注入 chat_history 供 Planner 使用
+                intent_spec.metadata["chat_history"] = history or []
                 return intent_spec
             
             except asyncio.TimeoutError:
                 logger.warning(f"[Router] IntentCompiler timeout, using fallback")
-                return self._create_simple_intent(user_message)
+                return self._create_simple_intent(user_message, history)
             
             except Exception as e:
                 logger.error(f"[Router] IntentCompiler failed: {e}")
-                return self._create_simple_intent(user_message)
+                return self._create_simple_intent(user_message, history)
         else:
             # 不需要 IntentCompiler，直接构造
             logger.debug(f"[Router] Using fast path for: '{user_message}'")
-            return self._create_simple_intent(user_message)
+            return self._create_simple_intent(user_message, history)
     
-    def _create_simple_intent(self, user_message: str) -> IntentSpec:
+    def _create_simple_intent(self, user_message: str, history: Optional[list[dict]] = None) -> IntentSpec:
         """
-        快速构造 IntentSpec（不调用 LLM）
+        快速构造 IntentSpec（不调用 LLM），注入 chat_history 供 Planner 使用
         """
         return IntentSpec(
             id=str(uuid.uuid4()),
             goal=user_message,
-            intent_type="task",  # Router 已经判断是 TASK 了
-            domain=IntentDomain.OTHER,  # 粗分类，Planner 会重新搜索技能
+            intent_type="task",
+            domain=IntentDomain.OTHER,
             raw_user_input=user_message,
-            safety_level=SafetyLevel.MODIFY,  # 默认 MODIFY
-            metadata={"source": "router_fast_path"}
+            safety_level=SafetyLevel.MODIFY,
+            metadata={"source": "router_fast_path", "chat_history": history or []}
         )
     
     def _check_missing_skills(self, intent_spec) -> list[str]:

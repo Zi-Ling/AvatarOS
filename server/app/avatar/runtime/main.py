@@ -422,7 +422,7 @@ class AvatarMain:
             task_ctx.mark_finished("FAILED")
             raise
 
-    async def run_intent(self, intent: IntentSpec, task_mode: str = "one_shot", cancel_event = None) -> RunRecord:
+    async def run_intent(self, intent: IntentSpec, task_mode: str = "one_shot", cancel_event = None, on_graph_created = None) -> RunRecord:
         # Backup metadata (TaskStore/DB serialization might strip non-standard fields)
         original_metadata = intent.metadata.copy()
         
@@ -447,9 +447,21 @@ class AvatarMain:
                     env_context["session_id"] = session_id
                 if cancel_event:
                     env_context["cancel_event"] = cancel_event
+                if on_graph_created:
+                    env_context["on_graph_created"] = on_graph_created
+
+                # 注入完整对话历史：让 Planner 用 LLM 自身的多轮理解能力做指代消解
+                chat_history = intent.metadata.get("chat_history", [])
+                if chat_history:
+                    env_context["chat_history"] = chat_history
+
+                # 注入确定性指代消解结果（由 task_executor 预计算，Planner 直接使用）
+                resolved_inputs = intent.metadata.get("resolved_inputs")
+                if resolved_inputs:
+                    env_context["resolved_inputs"] = resolved_inputs
 
                 graph_result = await self._graph_controller.execute(
-                    intent.goal, mode="react", config={"env": env_context}
+                    intent.goal, mode="react", env_context=env_context
                 )
 
                 if graph_result.final_status == "failed":

@@ -167,10 +167,17 @@ async def update_session_title(session_id: str, title: str):
     return {"message": "标题已更新", "title": title}
 
 
-def save_message_to_session(session_id: str, role: str, content: str) -> str:
+def save_message_to_session(session_id: str, role: str, content: str, metadata: dict = None) -> str:
     """
     保存消息到会话（内部函数，带文件锁）
-    
+
+    Args:
+        session_id: 会话 ID
+        role: 消息角色（user / assistant）
+        content: 消息内容
+        metadata: 可选结构化元数据，例如 {"message_type": "chat"} 或
+                  {"message_type": "task_result", "goal": ..., "output_path": ..., "output_value": ...}
+
     Returns:
         message_id
     """
@@ -200,6 +207,8 @@ def save_message_to_session(session_id: str, role: str, content: str) -> str:
             "content": content,
             "timestamp": datetime.now().isoformat(),
         }
+        if metadata:
+            message["metadata"] = metadata
         
         session_data["messages"].append(message)
         session_data["updated_at"] = datetime.now().isoformat()
@@ -218,9 +227,10 @@ def save_message_to_session(session_id: str, role: str, content: str) -> str:
 def get_session_messages(session_id: str) -> list[dict]:
     """
     获取会话的所有消息（内部函数，带文件锁）
-    
+
     Returns:
-        [{"role": "user", "content": "..."}, ...]
+        [{"role": "user", "content": "...", "metadata": {...}}, ...]
+        metadata 字段仅在消息保存时携带了 metadata 时存在。
     """
     session_file = get_session_file(session_id)
     
@@ -232,8 +242,11 @@ def get_session_messages(session_id: str) -> list[dict]:
         with open(session_file, "r", encoding="utf-8") as f:
             data = json.load(f)
     
-    return [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in data.get("messages", [])
-    ]
+    result = []
+    for msg in data.get("messages", []):
+        entry = {"role": msg["role"], "content": msg["content"]}
+        if "metadata" in msg:
+            entry["metadata"] = msg["metadata"]
+        result.append(entry)
+    return result
 

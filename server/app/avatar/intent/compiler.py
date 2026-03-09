@@ -11,86 +11,80 @@ from .models import IntentSpec, IntentDomain, SafetyLevel
 
 logger = logging.getLogger(__name__)
 
-SIMPLIFIED_INTENT_PROMPT = """You are an Intent Resolver.
-Your ONLY job is to:
-1. Resolve pronouns/references in the user's message
-2. Classify domain and safety level
-3. Preserve the complete user goal
-
-Recent Chat History:
-{history}
+SIMPLIFIED_INTENT_PROMPT = """You are an Intent Classifier.
+Your ONLY job is to classify the domain, safety level, and extract typed slots from the user's request.
 
 User Input: "{user_input}"
 
-TASK 1: Resolve Pronouns
-- If the user mentions "it", "that", "this", "上面", "刚才" etc., find what they refer to in the history
-- Replace pronouns with actual content from history
+TASK: Classify Domain, Safety Level, and extract typed slots.
 
-TASK 2: Classify Domain (粗分类)
+Domain:
 - file: File/folder operations
 - web: Web browsing/scraping
 - code: Code execution/calculation/data processing
 - other: Everything else (default)
 
-TASK 3: Classify Safety Level
+Safety Level:
 - read_only: Only reading/viewing data
 - modify: Creating/editing files or data (default)
 - destructive: Deleting or overwriting data
 
+Typed Slots (extract only explicit file paths from the user input, otherwise omit):
+- file_path: An explicit file path or filename mentioned (e.g. "test.txt", "/home/user/doc.md")
+- target_path: The destination path for save/copy/move operations
+
+IMPORTANT: Do NOT extract "content" — content always comes from conversation history, never from the current request.
+
 Output JSON ONLY:
 {{
-  "goal": "Complete user goal with resolved references",
   "domain": "file|web|code|other",
-  "safety_level": "read_only|modify|destructive"
+  "safety_level": "read_only|modify|destructive",
+  "slots": {{
+    "file_path": "...",
+    "target_path": "..."
+  }}
 }}
 
-CRITICAL: Keep "goal" complete and natural. Do NOT simplify or abbreviate.
+Rules for slots:
+- Only include a slot key if the value is clearly present in the user input as a literal path/filename
+- Do NOT infer or hallucinate slot values
+- Do NOT extract pronouns or references like "this file", "that poem", "它", "这首诗" as slot values
 
 Examples:
 
-History: assistant: "def hello(): print('hi')"
 User: "把它保存到 test.py"
-Output: {{"goal": "保存代码 def hello(): print('hi') 到文件 test.py", "domain": "file", "safety_level": "modify"}}
+Output: {{"domain": "file", "safety_level": "modify", "slots": {{"file_path": "test.py"}}}}
+
+User: "把这首诗保存到本地文件中"
+Output: {{"domain": "file", "safety_level": "modify", "slots": {{}}}}
 
 User: "帮我写一篇作文 要求标题段落 500字左右"
-Output: {{"goal": "帮我写一篇作文 要求标题段落 500字左右", "domain": "other", "safety_level": "read_only"}}
+Output: {{"domain": "other", "safety_level": "read_only", "slots": {{}}}}
 
 User: "计算 123 * 456"
-Output: {{"goal": "计算 123 * 456", "domain": "code", "safety_level": "read_only"}}
+Output: {{"domain": "code", "safety_level": "read_only", "slots": {{}}}}
+
+User: "把 hello world 写入 output.txt"
+Output: {{"domain": "file", "safety_level": "modify", "slots": {{"file_path": "output.txt"}}}}
 """
+
 
 class IntentExtractor:
     """
     Extracts structured IntentSpec from natural language user request.
+    Classifies domain + safety_level and extracts typed slots (content, file_path, target_path).
     """
     def __init__(self, llm_client: Any):
         self.llm = llm_client
 
     async def extract(self, user_request: str, history: List[Dict[str, str]] = None) -> IntentSpec:
         """
-        简化版意图提取：只负责代词消解和粗分类
+        意图提取：分类（domain + safety_level）+ typed slots 提取。
+        goal 保持原始用户输入，代词消解由 ReferenceResolver + Planner 负责。
         """
-        # Format history (最多3条)
-        history_str = ""
-        if history:
-            history_lines = []
-            for msg in history[-3:]:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                role_name = "user" if role == "user" else "assistant"
-                history_lines.append(f"{role_name}: {content}")
-            history_str = "\n".join(history_lines)
-        else:
-            history_str = "(无历史对话)"
-        
-        # 构建简化 prompt
-        prompt = SIMPLIFIED_INTENT_PROMPT.format(
-            history=history_str,
-            user_input=user_request
-        )
-        
+        prompt = SIMPLIFIED_INTENT_PROMPT.format(user_input=user_request)
+
         try:
-            # Call LLM (同步)
             if hasattr(self.llm, "call"):
                 raw_resp = self.llm.call(prompt)
             elif hasattr(self.llm, "generate"):
@@ -99,36 +93,43 @@ class IntentExtractor:
                 raw_resp = self.llm(prompt)
             else:
                 raise TypeError("LLM client is not callable")
-            
-            logger.debug(f"[IntentCompiler] LLM response: {raw_resp[:200]}")
-            
-            # 解析 JSON
+
+            logger.debug(f"[IntentExtractor] LLM response: {raw_resp[:200]}")
+
             data = self._parse_json(raw_resp)
-            
-            # 只提取 goal、domain、safety_level
-            domain_str = data.get("domain", "other").lower()
-            domain = self._parse_domain(domain_str)
-            
-            safety_str = data.get("safety_level", "modify").lower()
-            safety = self._parse_safety(safety_str)
-            
-            goal = data.get("goal", user_request)
-            
-            logger.info(f"[IntentCompiler] Extracted: goal='{goal[:50]}...', domain={domain.value}, safety={safety.value}")
-            
+
+            domain = self._parse_domain(data.get("domain", "other"))
+            safety = self._parse_safety(data.get("safety_level", "modify"))
+
+            # 提取 typed slots（只提取路径类，content 来自历史不在当前输入里）
+            raw_slots = data.get("slots") or {}
+            params: Dict[str, Any] = {}
+            for key in ("file_path", "target_path"):
+                val = raw_slots.get(key)
+                if val and isinstance(val, str) and val.strip():
+                    params[key] = val.strip()
+
+            if params:
+                logger.info(f"[IntentExtractor] Typed slots extracted: {list(params.keys())}")
+
+            logger.info(
+                f"[IntentExtractor] Extracted: goal='{user_request[:50]}...', "
+                f"domain={domain.value}, safety={safety.value}, slots={list(params.keys())}"
+            )
+
             return IntentSpec(
                 id=str(uuid.uuid4()),
-                goal=goal,
-                intent_type="task",  # 固定为 task（Router 已经判断过了）
+                goal=user_request,
+                intent_type="task",
                 domain=domain,
                 safety_level=safety,
                 raw_user_input=user_request,
-                metadata={"source": "intent_compiler_simplified"}
+                params=params,
+                metadata={"source": "intent_extractor"}
             )
-        
+
         except Exception as e:
-            logger.error(f"[IntentCompiler] Extraction failed: {e}")
-            # 降级：返回原始 goal
+            logger.error(f"[IntentExtractor] Extraction failed: {e}")
             return IntentSpec(
                 id=str(uuid.uuid4()),
                 goal=user_request,
@@ -138,68 +139,57 @@ class IntentExtractor:
                 raw_user_input=user_request,
                 metadata={"error": str(e), "source": "fallback"}
             )
-    
+
     def _parse_domain(self, domain_str: str) -> IntentDomain:
-        """解析 domain 字符串"""
-        domain_str = domain_str.upper()
         try:
-            return IntentDomain[domain_str]
+            return IntentDomain[domain_str.upper()]
         except KeyError:
             logger.warning(f"Unknown domain: {domain_str}, using OTHER")
             return IntentDomain.OTHER
-    
+
     def _parse_safety(self, safety_str: str) -> SafetyLevel:
-        """解析 safety_level 字符串"""
-        # 转换为枚举名称格式
         safety_map = {
             "read_only": "READ_ONLY",
             "modify": "MODIFY",
-            "destructive": "DESTRUCTIVE"
+            "destructive": "DESTRUCTIVE",
         }
-        
-        safety_enum_name = safety_map.get(safety_str.lower(), "MODIFY")
-        
         try:
-            return SafetyLevel[safety_enum_name]
+            return SafetyLevel[safety_map.get(safety_str.lower(), "MODIFY")]
         except KeyError:
             logger.warning(f"Unknown safety level: {safety_str}, using MODIFY")
             return SafetyLevel.MODIFY
 
     def _parse_json(self, text: str) -> Dict[str, Any]:
         text = text.strip()
-        
-        # Remove <think> blocks (for reasoning models)
+
+        # Remove <think> blocks (reasoning models)
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-        
-        # Handle markdown blocks
+
         if "```" in text:
             match = re.search(r'```(?:json)?(.*?)```', text, re.DOTALL)
             if match:
                 text = match.group(1).strip()
-        
+
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
-            
-        # Aggressive search for { ... }
+
         try:
             start = text.find("{")
             end = text.rfind("}") + 1
             if start >= 0 and end > start:
-                json_str = text[start:end]
-                return json.loads(json_str)
+                return json.loads(text[start:end])
         except (json.JSONDecodeError, ValueError):
             pass
-            
-        # Last resort: Fix common JSON errors (e.g. single quotes)
+
         try:
-            fixed_text = text.replace("'", '"') # Very risky but sometimes works
-            start = fixed_text.find("{")
-            end = fixed_text.rfind("}") + 1
+            fixed = text.replace("'", '"')
+            start = fixed.find("{")
+            end = fixed.rfind("}") + 1
             if start >= 0 and end > start:
-                return json.loads(fixed_text[start:end])
-        except:
+                return json.loads(fixed[start:end])
+        except Exception:
             pass
 
         raise ValueError(f"Could not parse JSON from LLM output: {text[:100]}...")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import os
 import time
@@ -12,6 +13,8 @@ from ..base import TaskPlanner
 from ..models import Task, Step
 from ..registry import register_planner
 from app.avatar.skills.registry import skill_registry
+
+logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------------------
 # Prompts
@@ -33,6 +36,9 @@ Your Job:
 - **Error Handling**: If the history shows the last step FAILED, your next step MUST be a fix/retry or an alternative approach. Do not repeat the exact same failed action.
 - **No "Success" Claims**: Do not say "I have finished" unless you see the evidence in the history.
 - **Goal Decomposition Check (MANDATORY before FINISH)**: Before outputting `FINISH`, mentally enumerate EVERY sub-goal in the original Goal. If ANY sub-goal has no corresponding successful step in the history, you MUST execute that step next instead of finishing. Example: Goal="write a poem AND save to file" → you must see BOTH a poem-generation step AND a file-write step succeed before finishing.
+- **Cross-Turn Data Rule (MANDATORY)**: If the user refers to content from a previous turn (e.g., "this poem", "that result", "the text above", "统计这首诗", "这个时间", "刚才的结果"), FIRST look in the `Conversation History` section — the Assistant messages contain the actual output values. Treat those values as in-memory data — embed them directly as string literals in `python.run` code or as parameter values. Do NOT call `llm.fallback` to ask the user what they mean. Do NOT search the file system for content that already exists in the conversation history.
+- **Session Artifacts Rule (MANDATORY)**: If the user refers to a file or output from a previous task (e.g., "that file", "the result I saved", "上次生成的文件"), FIRST check the `Conversation History` section for assistant messages with `task result` label — they contain the exact file path and content value. Use those values directly — do NOT guess or search the workspace.
+- **Unknown Skill Prohibition (MANDATORY)**: You MUST ONLY use skills listed in the `Available Skills` section. NEVER invent or guess a skill name that is not listed (e.g., `user.ask`, `user.input`, `ask_user` are NOT valid skills). If you need to ask the user a question or lack required information, use the `llm.fallback` skill instead.
 
 **PYTHON CODE RESTRICTIONS (RestrictedPython):**
 When using `python.run` skill, the code runs in a RESTRICTED sandbox with these limitations:
@@ -203,7 +209,96 @@ Please try a DIFFERENT approach:
         goal_tracker_hint = env_context.get("goal_tracker_hint")
         if goal_tracker_hint:
             goal_tracker_section = f"\n## ⚠️ Incomplete Sub-Goals (Framework Enforcement)\n{goal_tracker_hint}\n"
-        
+
+        # 跨轮对话历史：统一消息模型，task_result 类型消息携带结构化 metadata
+        conversation_history_section = ""
+        chat_history = env_context.get("chat_history", [])
+        if chat_history:
+            # 只取最近 10 条，避免 prompt 过长
+            recent = chat_history[-10:]
+            lines = ["## Conversation History (for cross-turn reference resolution)"]
+            lines.append(
+                "> MANDATORY: If the user refers to 'it', 'that', 'the result', 'this time', "
+                "'这个时间', '那首诗', '刚才的结果', or ANY similar cross-turn reference, "
+                "you MUST resolve it by finding the actual value in the Assistant messages below. "
+                "Treat Assistant message content as in-memory data — embed it directly as a "
+                "string literal in your skill parameters. Do NOT use llm.fallback to ask the user."
+            )
+            for msg in recent:
+                role = msg.get("role", "user").capitalize()
+                content = msg.get("content", "")
+                meta = msg.get("metadata", {})
+                msg_type = meta.get("message_type", "chat") if meta else "chat"
+
+                # 截断过长的消息
+                if len(content) > 1500:
+                    content = content[:1200] + "...[truncated]"
+
+                if role == "Assistant" and msg_type == "task_result":
+                    # 结构化任务结果：直接暴露 metadata 中的关键字段，让 Planner 精确引用
+                    output_path = meta.get("output_path", "")
+                    output_value = meta.get("output_value", "")
+                    goal = meta.get("goal", "")
+                    status = meta.get("status", "")
+                    lines.append(f"\n[Assistant — task result | goal: {goal} | status: {status}]")
+                    if output_path:
+                        lines.append(f"  File Path (use this exact path): {output_path}")
+                    if output_value:
+                        preview = output_value[:400] + "...[truncated]" if len(output_value) > 400 else output_value
+                        lines.append(f"  Content (embed directly, do NOT re-fetch): {preview}")
+                    lines.append(f"  Display: {content}")
+                elif role == "Assistant":
+                    lines.append(f"\n[Assistant — previous reply, use this value directly if user refers to it]:\n{content}")
+                else:
+                    lines.append(f"\n[{role}]: {content}")
+            conversation_history_section = "\n".join(lines) + "\n"
+
+        # Context Bindings：ReferenceResolver 预计算的结构化绑定，Planner 直接使用，无需推断
+        context_bindings_section = ""
+        resolved_inputs = env_context.get("resolved_inputs")
+        if resolved_inputs and resolved_inputs.get("confidence", 0) >= 0.5:
+            lines = ["## Context Bindings (Pre-resolved, use these values directly)"]
+            lines.append(
+                "> MANDATORY: The system has already resolved cross-turn references. "
+                "Use the bound values below as direct parameter values. "
+                "Do NOT call llm.fallback because you 'don't know what the user is referring to'."
+            )
+
+            # 优先展示 typed refs（精确匹配）
+            content_ref = resolved_inputs.get("content_ref")
+            path_ref = resolved_inputs.get("path_ref")
+
+            if path_ref and path_ref.get("file_path"):
+                lines.append(
+                    f"- [path_ref | source={path_ref.get('source_type')} | "
+                    f"confidence={path_ref.get('confidence', 0):.2f}] "
+                    f"file_path → use as `path` / `file_path` param: {path_ref['file_path']}"
+                )
+            elif resolved_inputs.get("file_path"):
+                lines.append(f"- file_path (use as `path` / `file_path` param): {resolved_inputs['file_path']}")
+
+            if content_ref and content_ref.get("content"):
+                content = content_ref["content"]
+                preview = content[:800] + "...[truncated]" if len(content) > 800 else content
+                lines.append(
+                    f"- [content_ref | source={content_ref.get('source_type')} | "
+                    f"confidence={content_ref.get('confidence', 0):.2f}] "
+                    f"content → use as `content` / `text` param:\n```\n{preview}\n```"
+                )
+            elif resolved_inputs.get("content"):
+                content = resolved_inputs["content"]
+                preview = content[:800] + "...[truncated]" if len(content) > 800 else content
+                lines.append(f"- content (use as `content` / `text` param):\n```\n{preview}\n```")
+
+            context_bindings_section = "\n".join(lines) + "\n"
+            typed_keys = [k for k in ("content_ref", "path_ref") if resolved_inputs.get(k)]
+            logger.debug(
+                f"[Planner] context_bindings injected: "
+                f"source={resolved_inputs['source_type']}, "
+                f"confidence={resolved_inputs['confidence']:.2f}, "
+                f"typed_refs={typed_keys}"
+            )
+
         prompt = f"""{INTERACTIVE_SYSTEM_PROMPT}
 
 ## Goal
@@ -215,6 +310,7 @@ Please try a DIFFERENT approach:
 ## Current Workspace State
 {workspace_state}
 
+{context_bindings_section}{conversation_history_section}
 ## Execution History (Truth)
 {_format_history(task)}
 
@@ -437,9 +533,17 @@ Return ONLY the JSON object.
                 from app.avatar.planner.models import StepStatus, StepResult
                 if node.status == NodeStatus.SUCCESS:
                     step.status = StepStatus.SUCCESS
+                    # 按优先级提取输出：stdout > output > content > 整个 outputs dict
+                    outputs = node.outputs or {}
+                    output_val = (
+                        outputs.get("stdout")
+                        or outputs.get("output")
+                        or outputs.get("content")
+                        or outputs
+                    )
                     step.result = StepResult(
                         success=True,
-                        output=node.outputs.get("output", node.outputs),
+                        output=output_val,
                     )
                 elif node.status == NodeStatus.FAILED:
                     step.status = StepStatus.FAILED

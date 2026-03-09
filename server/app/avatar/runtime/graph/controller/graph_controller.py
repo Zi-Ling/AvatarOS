@@ -191,6 +191,14 @@ class GraphController:
         # Propagate session_id and env into graph metadata so ExecutionContext picks them up
         graph.metadata["session_id"] = env_context.get("session_id")
         graph.metadata["env"] = env_context
+
+        # 立即注册 graph id 别名，让前端在任务执行中就能用 graph id 取消
+        on_graph_created = env_context.get("on_graph_created")
+        if on_graph_created:
+            try:
+                on_graph_created(str(graph.id))
+            except Exception as _e:
+                logger.warning(f"[GraphController] on_graph_created failed: {_e}")
         
         # Decompose goal into sub_goals for completion tracking (zero LLM calls)
         sub_goals = self._decompose_goal(intent)
@@ -199,8 +207,21 @@ class GraphController:
         # Track planner usage
         planner_invocations = 0
         
+        # Extract cancel_event from env_context (set by task_executor)
+        cancel_event = env_context.get("cancel_event")
+
         # ReAct loop
         while True:
+            # Check cancellation signal
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("[GraphController] Cancellation signal received, stopping ReAct loop")
+                from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                graph.status = GraphStatus.FAILED
+                return self.runtime._create_result(
+                    graph,
+                    error_message="Task cancelled by user"
+                )
+
             # Check planner invocation limit
             if planner_invocations >= self.max_planner_invocations_per_graph:
                 logger.error(
@@ -314,8 +335,40 @@ class GraphController:
             # 发 plan.generated，让前端实时看到步骤列表
             self._emit_plan_generated(graph, env_context)
 
+            # ParamBinder: 在节点执行前，把 resolved_inputs 绑定到新增节点的空参数槽位
+            resolved_inputs = env_context.get("resolved_inputs")
+            if resolved_inputs:
+                from app.avatar.runtime.context.param_binder import bind_params
+                from app.avatar.runtime.graph.models.step_node import NodeStatus
+                for node in graph.nodes.values():
+                    if node.status == NodeStatus.PENDING and node.params is not None:
+                        bound, binding_log = bind_params(
+                            skill_name=node.capability_name,
+                            params=node.params,
+                            resolved_inputs=resolved_inputs,
+                        )
+                        if binding_log:
+                            node.params = bound
+                            logger.info(
+                                f"[ParamBinder] {node.capability_name}: "
+                                f"bound {len(binding_log)} param(s): "
+                                f"{[b['param'] for b in binding_log]}"
+                            )
+
             # 4. Execute ready nodes
             result = await self.runtime.execute_ready_nodes(graph)
+
+            # llm.fallback is a terminal action — if it just ran, stop the loop immediately.
+            # It means the planner couldn't proceed and delegated back to the user.
+            last_nodes = [
+                n for n in graph.nodes.values()
+                if n.capability_name == "llm.fallback"
+            ]
+            if last_nodes:
+                from app.avatar.runtime.graph.models.step_node import NodeStatus
+                if any(n.status == NodeStatus.SUCCESS for n in last_nodes):
+                    logger.info("[GraphController] llm.fallback succeeded — terminating ReAct loop")
+                    break
             
             # Check execution cost budget (Requirements 32.7, 32.8)
             if self.max_execution_cost:
@@ -339,27 +392,51 @@ class GraphController:
                     )
             
             # 5. Check if terminal
-            if result.final_status in ("success", "failed", "partial_success"):
-                # On success, run GoalTracker before accepting the result.
-                # "failed" / "partial_success" are already terminal — no point continuing.
-                if result.final_status == "success":
-                    uncovered = self._get_uncovered_sub_goals(sub_goals, graph)
-                    if uncovered:
-                        logger.warning(
-                            f"[GoalTracker] Runtime success but {len(uncovered)} sub-goal(s) "
-                            f"uncovered: {uncovered} — continuing ReAct loop"
-                        )
-                        env_context = dict(env_context)
-                        env_context["uncovered_sub_goals"] = uncovered
-                        env_context["goal_tracker_hint"] = (
-                            f"The following sub-goals are NOT yet completed: {uncovered}. "
-                            f"You MUST complete them before finishing."
-                        )
-                        continue  # Reject premature success, force another planning iteration
+            if result.final_status in ("failed", "partial_success"):
+                # Failure is always terminal — no point continuing
                 return result
+
+            if result.final_status == "success":
+                # On success, run GoalTracker for multi-goal tasks first
+                uncovered = self._get_uncovered_sub_goals(sub_goals, graph)
+                if uncovered:
+                    logger.warning(
+                        f"[GoalTracker] Runtime success but {len(uncovered)} sub-goal(s) "
+                        f"uncovered: {uncovered} — continuing ReAct loop"
+                    )
+                    env_context = dict(env_context)
+                    env_context["uncovered_sub_goals"] = uncovered
+                    env_context["goal_tracker_hint"] = (
+                        f"The following sub-goals are NOT yet completed: {uncovered}. "
+                        f"You MUST complete them before finishing."
+                    )
+                    continue  # Reject premature success, force another planning iteration
+
+                # For all tasks (single or multi-goal): continue the ReAct loop and
+                # let the Planner decide when to FINISH. This prevents premature
+                # termination after a probe step (e.g. fs.list before fs.write).
+                # The loop will exit when Planner returns FINISH above.
+                logger.debug(
+                    f"[ReAct] Node(s) succeeded, continuing loop for Planner FINISH decision"
+                )
         
-        # Execute any remaining nodes
-        return await self.runtime.execute_graph(graph)
+        # Planner returned FINISH — all sub-goals covered.
+        # All nodes were already executed incrementally; just compute the final result.
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+        completed = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SUCCESS)
+        failed = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.FAILED)
+        skipped = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SKIPPED)
+        final_status = self.runtime._compute_graph_status(graph)
+        from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
+        result = ExecutionResult(
+            success=final_status in ("success", "partial_success"),
+            final_status=final_status,
+            completed_nodes=completed,
+            failed_nodes=failed,
+            skipped_nodes=skipped,
+            graph=graph,
+        )
+        return result
     
     async def _execute_dag_mode(
         self,
@@ -913,40 +990,5 @@ class GraphController:
                 uncovered.append(sub_goal)
 
         return uncovered
-    def _emit_plan_generated(self, graph: 'ExecutionGraph', env_context: Dict[str, Any]) -> None:
-        """patch apply 后实时向前端发 plan.generated，让进度条显示步骤列表"""
-        if not self.runtime.event_bus:
-            return
-        try:
-            from app.avatar.runtime.events.types import Event, EventType
-            nodes = list(graph.nodes.values())
-            steps = [
-                {
-                    "id": str(n.id),
-                    "skill": n.capability_name,
-                    "skill_name": n.capability_name,
-                    "description": n.capability_name.replace(".", " → "),
-                    "status": "pending",
-                    "order": i,
-                    "params": n.params or {},
-                    "depends_on": [],
-                }
-                for i, n in enumerate(nodes)
-            ]
-            event = Event(
-                type=EventType.PLAN_GENERATED,
-                source="graph_controller",
-                payload={
-                    "session_id": env_context.get("session_id", ""),
-                    "plan": {
-                        "id": graph.id,
-                        "goal": graph.goal,
-                        "steps": steps,
-                    },
-                },
-            )
-            self.runtime.event_bus.publish(event)
-        except Exception as e:
-            logger.warning(f"[GraphController] Failed to emit plan.generated: {e}")
 
 

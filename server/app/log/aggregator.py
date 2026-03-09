@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from app.intent_router.logging import RouterLogger, RouterRequestLog
+from app.router.logging import RouterLogger, RouterRequestLog
 from app.llm.logging import LLMLogger, LLMCallLogRecord
 from app.avatar.runtime.monitoring import StepLogger, TaskLog
 

@@ -16,7 +16,7 @@ from app.avatar.learning import (
     InMemoryNotebook, SkillStatsLearner, UserPreferenceLearner,
 )
 from app.avatar.runtime.main import AvatarMain
-from app.intent_router.router import AvatarRouter
+from app.router.router import AvatarRouter
 from app.llm import create_llm_client, load_llm_config
 from app.io.manager import SocketManager
 from app.avatar.runtime.events.bridge import SocketBridge
@@ -218,7 +218,7 @@ class AppBootstrap:
 
     def _init_router(self, llm_client, llm_logger):
         logger.info("🧭 初始化智能路由...")
-        from app.intent_router.logging import create_default_router_logger
+        from app.router.logging import create_default_router_logger
         from app.avatar.intent import IntentExtractor
 
         router_logger = create_default_router_logger()

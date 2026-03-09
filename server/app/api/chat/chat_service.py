@@ -9,7 +9,7 @@ from typing import AsyncGenerator
 from starlette.concurrency import iterate_in_threadpool
 
 from app.api.chat.models import StreamChunk
-from app.intent_router.router import AvatarRouter
+from app.router.router import AvatarRouter
 from app.llm.types import LLMMessage, LLMRole
 from app.avatar.memory.manager import MemoryManager
 from app.avatar.learning.manager import LearningManager
@@ -39,10 +39,13 @@ async def update_session_last_output(memory_manager: MemoryManager, session_id: 
 def _build_history_for_llm(session_id: str) -> list[dict]:
     """从 session 获取历史对话，排除最后一条（刚保存的用户消息）"""
     history = get_session_messages(session_id)
-    return [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in history[:-1]
-    ]
+    result = []
+    for msg in history[:-1]:
+        entry = {"role": msg["role"], "content": msg["content"]}
+        if "metadata" in msg:
+            entry["metadata"] = msg["metadata"]
+        result.append(entry)
+    return result
 
 
 def _convert_to_llm_messages(chat_messages: list[dict]) -> list[LLMMessage]:
@@ -219,7 +222,13 @@ async def stream_chat_response(
                 )
         
         # 保存完整回复
-        save_message_to_session(session_id, "assistant", full_response_content)
+        # task 模式下 full_response_content 是 "⚙️ 正在规划任务..."，是 UI 过渡提示
+        # 不存入 session history，避免污染 ReferenceResolver / Planner 的上下文
+        if decision.intent_kind == "chat":
+            save_message_to_session(
+                session_id, "assistant", full_response_content,
+                metadata={"message_type": "chat"},
+            )
         await update_session_last_output(memory_manager, session_id, full_response_content)
         
         yield f"data: {StreamChunk(content='', done=True, session_id=session_id).model_dump_json()}\n\n"

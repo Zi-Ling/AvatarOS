@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from app.api.chat.models import ChatRequest, ChatResponse
-from app.intent_router.router import AvatarRouter
+from app.router.router import AvatarRouter
 from app.core.dependencies import get_avatar_router, get_memory_manager, get_learning_manager
 from app.avatar.memory.manager import MemoryManager
 from app.avatar.learning.manager import LearningManager
@@ -61,6 +61,23 @@ async def send_message(
     save_message_to_session(session_id, "assistant", reply)
     await update_session_last_output(memory_manager, session_id, reply)
     return ChatResponse(message=reply)
+
+
+@router.post("/stop")
+async def stop_session(request: ChatRequest):
+    """停止指定 session 的流式输出和所有后台任务"""
+    from app.api.chat.cancellation import get_cancellation_manager
+    session_id = request.session_id
+    if not session_id:
+        return {"success": False, "message": "session_id required"}
+    
+    mgr = get_cancellation_manager()
+    # 停止流式输出
+    mgr.cancel_session(session_id)
+    # 停止所有关联的后台任务
+    cancelled_tasks = mgr.cancel_all_session_tasks(session_id)
+    logger.info(f"[Stop] session={session_id}, cancelled_tasks={cancelled_tasks}")
+    return {"success": True, "cancelled_tasks": cancelled_tasks}
 
 
 def _process_image_attachments(request: ChatRequest) -> str:

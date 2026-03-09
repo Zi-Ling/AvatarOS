@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional, List
-from pydantic import Field, BaseModel, ValidationError
+from pydantic import Field, BaseModel, ValidationError, model_validator
 
 from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
@@ -12,9 +12,20 @@ from ..context import SkillContext
 
 
 class FallbackInput(SkillInput):
-    user_message: str = Field(..., description="Original user message (raw input).")
+    user_message: str = Field(..., description="Original user message (raw input). Parameter name: user_message", alias=None)
     intent: Optional[str] = Field(None, description="Inferred intent label (optional).")
     reason: Optional[str] = Field(None, description="Internal failure reason. DO NOT expose to user.")
+
+    model_config = {"populate_by_name": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _alias_message(cls, values):
+        # 兼容 Planner 可能传 'message' 而非 'user_message'
+        if isinstance(values, dict) and "message" in values and "user_message" not in values:
+            values = dict(values)
+            values["user_message"] = values.pop("message")
+        return values
 
 
 class _NextStep(BaseModel):
@@ -40,8 +51,8 @@ class LLMFallbackSkill(BaseSkill[FallbackInput, FallbackOutput]):
     spec = SkillSpec(
         name="llm.fallback",
         description=(
-            "Global fallback skill (bilingual). Used ONLY when the system explicitly triggers fallback "
-            "(e.g., planner/JSON/schema failures). Produces a safe, helpful response without exposing internal errors."
+            "Use this skill when you need to ask the user a question or lack required information to proceed. "
+            "Required parameter: user_message (the message/question to present to the user)."
         ),
         input_model=FallbackInput,
         output_model=FallbackOutput,

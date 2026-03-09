@@ -102,6 +102,21 @@ class CancellationManager:
         logger.debug(f"[CancellationManager] 注册任务: {task_id} (session: {session_id})")
         return cancel_event
     
+    def alias_task(self, alias_id: str, task_id: str) -> bool:
+        """
+        为已注册的任务添加别名 ID（复用同一个 cancel event）。
+        用于把 graph_id 关联到已注册的 intent_id，让前端用 graph_id 也能取消。
+        
+        Returns: 是否成功（task_id 不存在时返回 False）
+        """
+        event = self._active_tasks.get(task_id)
+        if event is None:
+            logger.warning(f"[CancellationManager] alias_task: task {task_id} not found")
+            return False
+        self._active_tasks[alias_id] = event
+        logger.debug(f"[CancellationManager] 注册别名: {alias_id} → {task_id}")
+        return True
+
     def unregister_task(self, task_id: str):
         """取消注册任务（任务结束时调用）"""
         if task_id in self._active_tasks:

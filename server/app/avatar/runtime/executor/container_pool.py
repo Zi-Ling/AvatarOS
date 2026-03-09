@@ -87,7 +87,7 @@ class ContainerPool:
       broken_set    — Dict[str, ContainerEntry]，BROKEN 状态，待清理
     """
 
-    HEALTH_CHECK_INTERVAL = 30   # 秒，后台健康检查间隔
+    HEALTH_CHECK_INTERVAL = 120  # 秒，后台健康检查间隔
     MAX_TASK_COUNT        = 100  # 单容器最大复用次数后强制轮换（预留）
 
     def __init__(
@@ -278,7 +278,6 @@ class ContainerPool:
             except _DOCKER_TRANSIENT_ERRORS as e:
                 last_err = e
                 if attempt < self._INSPECT_RETRIES:
-                    logger.debug(f"[ContainerPool] {entry.short_id} inspect transient error (suppressed), retrying")
                     time.sleep(self._INSPECT_RETRY_DELAY)
             except Exception as e:
                 # 非连接类错误，不重试
@@ -327,8 +326,6 @@ class ContainerPool:
                         entry,
                         f"exec ping skipped {entry.ping_skip_count} consecutive times: {e}"
                     ))
-                else:
-                    logger.debug(f"[ContainerPool] {entry.short_id} exec ping transient error (skip {entry.ping_skip_count}/3, suppressed)")
                 continue
             except Exception as e:
                 dead_entries.append((entry, f"exec ping failed: {e}"))
