@@ -33,6 +33,59 @@ _DOCKER_TRANSIENT_ERRORS = (RequestsConnectionError, ProtocolError, ConnectionRe
 logger = logging.getLogger(__name__)
 
 
+def is_podman(client: Any) -> bool:
+    """
+    检测 client 连接的是 Podman 还是 Docker。
+    Podman 兼容 API 的 info() 返回里有 host.buildahVersion，Docker 没有。
+    """
+    try:
+        info = client.info()
+        return bool(info.get("host", {}).get("buildahVersion"))
+    except Exception:
+        return False
+
+
+def exec_run_in_container(container: Any, cmd: list, workdir: str = "/", demux: bool = False):
+    """
+    统一的容器 exec 接口，自动适配 Docker 和 Podman。
+
+    - Docker：直接用 SDK exec_run（稳定）
+    - Podman：走 podman exec CLI（绕开不稳定的兼容层）
+
+    返回 (exit_code, stdout_bytes, stderr_bytes)
+    """
+    import subprocess
+
+    # 判断是否 Podman：通过容器 ID 前缀尝试 podman exec
+    # 用 container.client.info() 检测
+    try:
+        use_podman = is_podman(container.client)
+    except Exception:
+        use_podman = False
+
+    if use_podman:
+        full_cmd = ["podman", "exec", "--workdir", workdir, container.id] + cmd
+        try:
+            proc = subprocess.run(
+                full_cmd,
+                capture_output=True,
+                timeout=300,
+            )
+            if demux:
+                return proc.returncode, (proc.stdout, proc.stderr)
+            return proc.returncode, proc.stdout + proc.stderr
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"podman exec timed out: {cmd}")
+        except FileNotFoundError:
+            raise RuntimeError("podman CLI not found, please install podman")
+    else:
+        # Docker SDK exec_run
+        result = container.exec_run(cmd=cmd, workdir=workdir, demux=demux)
+        if demux:
+            return result.exit_code, result.output
+        return result.exit_code, result.output
+
+
 class ContainerState(str, Enum):
     CREATING  = "creating"
     READY     = "ready"
@@ -464,6 +517,14 @@ class ContainerPool:
             self.broken_set[entry.container_id] = entry
 
         logger.warning(f"[ContainerPool] {entry.short_id} → BROKEN ({reason})")
+
+        # 立即触发补建，不等健康检查循环
+        threading.Thread(
+            target=self._spawn_container,
+            kwargs={"reason": "replenish after broken"},
+            daemon=True,
+            name="ContainerPool-Spawn-Replenish",
+        ).start()
 
     def _remove_container(self, entry: ContainerEntry, reason: str = ""):
         """强制删除容器"""

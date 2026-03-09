@@ -132,9 +132,18 @@ class GraphPlanner:
             if node.status == NodeStatus.SUCCESS:
                 from app.avatar.planner.models import StepStatus, StepResult
                 step.status = StepStatus.SUCCESS
+                # 按优先级提取输出：stdout > output > content > 整个 outputs dict
+                # 与 _execution_graph_to_task 保持一致
+                outputs = node.outputs or {}
+                output_val = (
+                    outputs.get("stdout")
+                    or outputs.get("output")
+                    or outputs.get("content")
+                    or outputs
+                )
                 step.result = StepResult(
                     success=True,
-                    output=node.outputs.get("output", node.outputs),
+                    output=output_val,
                 )
             elif node.status == NodeStatus.FAILED:
                 from app.avatar.planner.models import StepStatus, StepResult

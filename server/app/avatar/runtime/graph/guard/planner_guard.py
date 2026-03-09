@@ -166,8 +166,8 @@ class PlannerGuard:
             return result
 
         # 3. Workspace isolation (Requirement 31.8, 31.9)
-        if self.config.enforce_workspace_isolation and self.config.workspace_root:
-            self._check_workspace_isolation(patch, result)
+        if self.config.enforce_workspace_isolation:
+            self._check_workspace_isolation(patch, result, context=context)
             if not result.approved:
                 return result
 
@@ -284,7 +284,8 @@ class PlannerGuard:
     def _check_workspace_isolation(
         self,
         patch: 'GraphPatch',
-        result: ValidationResult
+        result: ValidationResult,
+        context: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Check that file operations stay within workspace root.
@@ -292,7 +293,17 @@ class PlannerGuard:
         """
         from app.avatar.runtime.graph.models.graph_patch import PatchOperation
 
-        workspace = os.path.abspath(self.config.workspace_root)
+        # 优先使用运行时 context 里的 workspace_path（session 动态路径）
+        # 降级到 config.workspace_root（静态初始化路径）
+        workspace_path = (
+            (context or {}).get("workspace_path")
+            or self.config.workspace_root
+        )
+        if not workspace_path:
+            return
+
+        from pathlib import Path as _Path
+        workspace_p = _Path(os.path.abspath(workspace_path))
 
         for action in patch.actions:
             if action.operation != PatchOperation.ADD_NODE or action.node is None:
@@ -311,11 +322,18 @@ class PlannerGuard:
                     continue
 
                 try:
-                    abs_path = os.path.abspath(param_value)
-                    if not abs_path.startswith(workspace):
+                    # 相对路径以 workspace 为基准解析，绝对路径直接用
+                    if os.path.isabs(param_value):
+                        abs_path_p = _Path(os.path.normpath(param_value))
+                    else:
+                        abs_path_p = _Path(os.path.normpath(os.path.join(str(workspace_p), param_value)))
+                    # 用 Path.is_relative_to 做路径包含检查（Windows 大小写不敏感，无 startswith 边界问题）
+                    try:
+                        abs_path_p.relative_to(workspace_p)
+                    except ValueError:
                         result.add_violation(
                             f"Node '{action.node.id}' param '{param_name}' path '{param_value}' "
-                            f"is outside workspace '{workspace}'"
+                            f"is outside workspace '{workspace_p}'"
                         )
                 except Exception:
                     pass  # Skip non-path values

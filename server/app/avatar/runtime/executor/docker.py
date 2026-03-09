@@ -32,7 +32,7 @@ class DockerExecutor(SkillExecutor):
     
     def __init__(
         self,
-        image: str = "python:3.13-slim",  # 使用本地已有的镜像
+        image: str = "avatar-sandbox:latest",  # 预装常用包的沙箱镜像，见 server/Dockerfile.sandbox
         mem_limit: str = "256m",
         cpu_quota: int = 50000,
         timeout: int = 30,
@@ -196,8 +196,9 @@ class DockerExecutor(SkillExecutor):
         return self._run_without_pool(tmpdir, workspace_volumes)
     
     def _run_with_pool(self, tmpdir: str) -> dict:
-        """使用容器池执行"""
-        # acquire 超时直接抛 SandboxFailure，不再返回 None
+        """使用容器池执行，自动适配 Docker/Podman"""
+        from .container_pool import exec_run_in_container
+
         container = self._pool.acquire(timeout=self.timeout)
 
         exec_failed = False
@@ -208,8 +209,10 @@ class DockerExecutor(SkillExecutor):
             with open(code_file, "r", encoding="utf-8") as f:
                 code = f.read()
 
-            exit_code, output = container.exec_run(
+            exit_code, output = exec_run_in_container(
+                container,
                 cmd=["python", "-c", code],
+                workdir="/",
                 demux=True,
             )
 

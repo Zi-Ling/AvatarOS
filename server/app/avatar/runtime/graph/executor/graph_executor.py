@@ -73,7 +73,7 @@ class GraphExecutor:
             resolved_params = self._resolve_parameters(graph, node, context)
             final_params = {**node.params, **resolved_params}
 
-            outputs = await self._execute_skill(node.capability_name, final_params)
+            outputs = await self._execute_skill(node.capability_name, final_params, context)
 
             end_time = datetime.now()
             latency = (end_time - start_time).total_seconds()
@@ -85,6 +85,11 @@ class GraphExecutor:
             if context:
                 current_cost = context.variables.get("accumulated_cost", 0.0)
                 context.variables.set("accumulated_cost", current_cost)
+
+            if outputs.get("success") is False:
+                raise ExecutionError(
+                    outputs.get("message") or outputs.get("error") or "Skill returned success=false"
+                )
 
             if self.artifact_store:
                 outputs = await self._offload_large_outputs(outputs, node.id, context)
@@ -201,11 +206,19 @@ class GraphExecutor:
         else:
             return values[-1]
 
-    async def _execute_skill(self, skill_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_skill(
+        self,
+        skill_name: str,
+        params: Dict[str, Any],
+        context: Optional['ExecutionContext'] = None,
+    ) -> Dict[str, Any]:
         """
         Execute a skill directly via skill_registry.
         Supports both direct skill names (e.g. 'fs.read') and
         legacy capability names that map to a single skill.
+
+        For python.run: automatically prepends all completed node outputs as
+        variables so Planner can reference them by name ({node_id}_output).
         """
         from app.avatar.skills.registry import skill_registry
         from app.avatar.runtime.executor.factory import ExecutorFactory
@@ -226,6 +239,10 @@ class GraphExecutor:
         # 写操作由 Planner 负责指定 output/ 前缀路径
         if self.workspace is not None:
             base_path = self.workspace.root
+
+        # python.run: inject upstream node outputs as variables
+        if skill_name == "python.run" and context is not None:
+            params = self._inject_node_outputs_into_code(params, context)
 
         ctx = SkillContext(
             base_path=base_path,
@@ -301,6 +318,52 @@ class GraphExecutor:
 
         # Otherwise treat as skill name string
         return await self._execute_skill(str(capability_or_skill), params)
+
+    def _inject_node_outputs_into_code(
+        self,
+        params: Dict[str, Any],
+        context: 'ExecutionContext',
+    ) -> Dict[str, Any]:
+        """
+        Prepend completed node outputs as Python variable assignments to the code.
+
+        For each completed node, injects:
+            {node_id}_output = <value>
+
+        This lets Planner reference upstream data by variable name without
+        embedding content as string literals in the prompt.
+
+        The primary output value is chosen with the same priority used by
+        _graph_to_task: stdout > output > content > full outputs dict.
+        """
+        all_outputs = context.get_all_node_outputs()
+        if not all_outputs:
+            return params
+
+        lines: List[str] = []
+        for node_id, outputs in all_outputs.items():
+            if not outputs:
+                continue
+            # Pick the most meaningful scalar value
+            value = (
+                outputs.get("stdout")
+                or outputs.get("output")
+                or outputs.get("content")
+                or outputs
+            )
+            # Skip internal artifact keys
+            if isinstance(value, dict) and set(value.keys()) == {"__artifacts__"}:
+                continue
+            var_name = f"{node_id}_output"
+            repr_val = repr(value)
+            lines.append(f"{var_name} = {repr_val}")
+
+        if not lines:
+            return params
+
+        injected_prefix = "\n".join(lines) + "\n\n"
+        original_code = params.get("code", "")
+        return {**params, "code": injected_prefix + original_code}
 
     async def _offload_large_outputs(
         self,

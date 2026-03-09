@@ -50,6 +50,19 @@ When using `python.run` skill, the code runs in a RESTRICTED sandbox with these 
 - ✅ YES: `random`, `math`, `json`, `datetime`, `re` - Safe modules allowed
 - ✅ YES: Basic Python (list, dict, str, int, float, bool, for, if, while)
 - ✅ YES: `print()` for output (captured automatically)
+- ✅ YES pre-installed packages: `numpy`, `pandas`, `openpyxl`, `scipy`, `matplotlib`, `pillow`, `requests`, `httpx`, `beautifulsoup4`, `lxml`, `pydantic`
+- ❌ DO NOT use packages not listed above (e.g. `xlrd`, `xlwt`, `paramiko`) — they are NOT installed
+
+**DATA PASSING TO python.run (CRITICAL):**
+The framework automatically injects all completed steps' outputs as variables before your code runs.
+Variable naming convention: `{step_id}_output` (e.g. `step_1_output`, `step_2_output`).
+- ✅ CORRECT: Use the injected variable directly:
+  ```json
+  {"code": "count = len(step_1_output.replace('\\n','').replace(' ',''))\nprint(count)"}
+  ```
+- ✅ ALSO CORRECT: If you prefer, embed the value as a string literal from Execution History.
+- ❌ WRONG: `text = previous_step_output` — use the exact `{step_id}_output` name instead.
+- **Rule**: For `python.run`, always reference upstream data via `{step_id}_output` variables. The step_id matches the `Step N` label in Execution History (e.g. Step 1 → `step_1_output`).
 
 **Common Mistakes to Avoid:**
 1. ❌ `except Exception as e:` → ✅ `except:` (no exception types)

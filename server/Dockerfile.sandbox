@@ -1,0 +1,21 @@
+FROM python:3.13-slim
+
+# 预装常用数据处理包，一劳永逸
+# 避免 Planner 规划时因包缺失导致沙箱崩溃
+RUN pip install --no-cache-dir \
+    numpy \
+    pandas \
+    openpyxl \
+    scipy \
+    matplotlib \
+    pillow \
+    requests \
+    httpx \
+    beautifulsoup4 \
+    lxml \
+    pydantic
+
+# 不安装 pip 以外的包管理工具，保持镜像最小化
+# 网络模式为 none，容器内无法联网，所有依赖必须预装
+
+CMD ["sleep", "infinity"]

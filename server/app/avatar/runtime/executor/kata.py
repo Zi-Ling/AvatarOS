@@ -44,7 +44,7 @@ class KataExecutor(SkillExecutor):
     
     def __init__(
         self,
-        image: str = "python:3.13-slim",  # 使用本地已有的镜像
+        image: str = "avatar-sandbox:latest",  # 预装常用包的沙箱镜像，见 server/Dockerfile.sandbox
         timeout: int = 30,
         mem_limit: str = "256m",
         cpu_quota: int = 50000,
@@ -68,27 +68,32 @@ class KataExecutor(SkillExecutor):
         self._check_availability()
     
     def _check_availability(self):
-        """检查 Kata Runtime 是否可用"""
+        """检查 Kata Runtime 是否可用（Podman 环境下直接跳过）"""
         try:
             import docker
+            from .container_pool import is_podman
             client = docker.from_env()
-            
+
+            # Podman 没有 Kata runtime，直接跳过
+            if is_podman(client):
+                logger.info("[KataExecutor] Podman detected, KataExecutor disabled (use DockerExecutor)")
+                return
+
             # 检查 Docker 是否配置了 Kata Runtime
             info = client.info()
             runtimes = info.get('Runtimes', {})
-            
+
             if 'kata' in runtimes or 'kata-runtime' in runtimes:
                 self._docker_client = client
                 self._available = True
                 logger.info("[KataExecutor] Kata Runtime is available")
-                
-                # 初始化容器池（如果启用）
+
                 if self.use_pool:
                     from .container_pool import ContainerPool
                     self._pool = ContainerPool(
                         client=self._docker_client,
                         image=self.image,
-                        runtime="kata",  # Kata Runtime
+                        runtime="kata",
                         pool_size=self.pool_size,
                         mem_limit=self.mem_limit,
                         cpu_quota=self.cpu_quota,
@@ -143,13 +148,12 @@ class KataExecutor(SkillExecutor):
             raise
     
     async def _execute_with_pool(self, code: str, workspace_volumes: Optional[dict] = None) -> dict:
-        """使用容器池执行，执行后通过 docker cp 把产出文件复制到 session workspace"""
+        """使用容器池执行，自动适配 Docker/Podman"""
         import asyncio
         import uuid
-        from .container_pool import SandboxFailure
+        from .container_pool import SandboxFailure, exec_run_in_container
 
         loop = asyncio.get_event_loop()
-
         container = await loop.run_in_executor(None, self._pool.acquire, self.timeout)
 
         exec_failed = False
@@ -159,16 +163,21 @@ class KataExecutor(SkillExecutor):
         try:
             self._last_container_id = container.id
 
-            # 1. 在容器内创建隔离工作目录
+            # 1. 创建隔离工作目录 + /workspace/output（Planner 写文件的标准路径）
             await loop.run_in_executor(
                 None,
-                lambda: container.exec_run(cmd=["mkdir", "-p", workdir]),
+                lambda: exec_run_in_container(
+                    container,
+                    cmd=["mkdir", "-p", workdir, "/workspace/output"],
+                    workdir="/",
+                ),
             )
 
-            # 2. 执行 Python 代码，workdir 作为 cwd，代码产出文件落在此目录
+            # 2. 执行 Python 代码
             exit_code, output = await loop.run_in_executor(
                 None,
-                lambda: container.exec_run(
+                lambda: exec_run_in_container(
+                    container,
                     cmd=["python", "-c", code],
                     workdir=workdir,
                     demux=True,
@@ -178,15 +187,18 @@ class KataExecutor(SkillExecutor):
             stdout = output[0].decode("utf-8") if output[0] else ""
             stderr = output[1].decode("utf-8") if output[1] else ""
 
-            # 3. 把容器内 workdir 的文件 docker cp 到 host session workspace
+            # 3. 把容器内产出文件复制到 host session workspace
             if workspace_volumes:
                 host_workspace = next(iter(workspace_volumes.keys()))
+                # workdir 下的文件
                 self._copy_from_container(container, workdir, host_workspace)
+                # /workspace/output 下的文件（Planner 写文件的标准路径）
+                self._copy_from_container(container, "/workspace/output", host_workspace)
 
             # 4. 清理容器内 run 目录
             await loop.run_in_executor(
                 None,
-                lambda: container.exec_run(cmd=["rm", "-rf", workdir]),
+                lambda: exec_run_in_container(container, cmd=["rm", "-rf", workdir], workdir="/"),
             )
 
             logger.debug(f"[KataExecutor] Success (run_id={run_id})")

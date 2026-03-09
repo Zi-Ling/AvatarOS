@@ -116,6 +116,17 @@ class GraphController:
             f"max_tokens={max_planner_tokens}, max_calls={max_planner_calls}, "
             f"max_cost={max_planner_cost}, max_execution_cost={max_execution_cost}"
         )
+
+    @staticmethod
+    def _make_error_result(graph: 'ExecutionGraph', error_message: str) -> 'ExecutionResult':
+        """构造失败的 ExecutionResult（替代不存在的 runtime._create_result）"""
+        from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
+        return ExecutionResult(
+            success=False,
+            final_status="failed",
+            error_message=error_message,
+            graph=graph,
+        )
     
     async def execute(
         self,
@@ -199,6 +210,28 @@ class GraphController:
                 on_graph_created(str(graph.id))
             except Exception as _e:
                 logger.warning(f"[GraphController] on_graph_created failed: {_e}")
+
+        # 创建整个 ReAct 循环共享的 ExecutionContext，保证节点输出跨轮可见
+        from app.avatar.runtime.graph.context.execution_context import ExecutionContext as _ExecCtx
+        _session_id = env_context.get("session_id")
+        _workspace = None
+        if _session_id:
+            try:
+                from app.avatar.runtime.workspace import get_session_workspace_manager
+                _ws_mgr = get_session_workspace_manager()
+                if _ws_mgr is not None:
+                    _workspace = _ws_mgr.get_or_create(_session_id)
+            except Exception:
+                pass
+        _shared_context = _ExecCtx(
+            graph_id=graph.id,
+            goal_desc=intent,
+            inputs=env_context,
+            session_id=_session_id,
+            task_id=graph.id,
+            env=env_context,
+            workspace=_workspace,
+        )
         
         # Decompose goal into sub_goals for completion tracking (zero LLM calls)
         sub_goals = self._decompose_goal(intent)
@@ -217,7 +250,7 @@ class GraphController:
                 logger.info("[GraphController] Cancellation signal received, stopping ReAct loop")
                 from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                 graph.status = GraphStatus.FAILED
-                return self.runtime._create_result(
+                return self._make_error_result(
                     graph,
                     error_message="Task cancelled by user"
                 )
@@ -230,7 +263,7 @@ class GraphController:
                 )
                 from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                 graph.status = GraphStatus.FAILED
-                return self.runtime._create_result(
+                return self._make_error_result(
                     graph,
                     error_message=f"Exceeded max planner invocations: {planner_invocations}"
                 )
@@ -242,7 +275,7 @@ class GraphController:
                 )
                 from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                 graph.status = GraphStatus.FAILED
-                return self.runtime._create_result(
+                return self._make_error_result(
                     graph,
                     error_message=f"Exceeded max ReAct iterations: {planner_invocations}"
                 )
@@ -254,7 +287,7 @@ class GraphController:
                 )
                 from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                 graph.status = GraphStatus.FAILED
-                return self.runtime._create_result(
+                return self._make_error_result(
                     graph,
                     error_message=f"Exceeded max graph nodes: {len(graph.nodes)}"
                 )
@@ -269,7 +302,7 @@ class GraphController:
                 logger.error(f"Planner budget exceeded: {budget_error}")
                 from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                 graph.status = GraphStatus.FAILED
-                return self.runtime._create_result(
+                return self._make_error_result(
                     graph,
                     error_message=f"Planner budget exceeded: {budget_error}"
                 )
@@ -310,7 +343,7 @@ class GraphController:
                     logger.error(f"Patch validation failed: {validation.violations}")
                     from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                     graph.status = GraphStatus.FAILED
-                    return self.runtime._create_result(
+                    return self._make_error_result(
                         graph,
                         error_message=f"Patch validation failed: {validation.violations}"
                     )
@@ -342,7 +375,7 @@ class GraphController:
                             )
 
             # 4. Execute ready nodes
-            result = await self.runtime.execute_ready_nodes(graph)
+            result = await self.runtime.execute_ready_nodes(graph, context=_shared_context)
 
             # llm.fallback is a terminal action — if it just ran, stop the loop immediately.
             # It means the planner couldn't proceed and delegated back to the user.
@@ -372,7 +405,7 @@ class GraphController:
                     logger.error(f"[GraphController] {error_msg}")
                     from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                     graph.status = GraphStatus.FAILED
-                    return self.runtime._create_result(
+                    return self._make_error_result(
                         graph,
                         error_message=error_msg
                     )
@@ -467,10 +500,11 @@ class GraphController:
             
             # 2. Validate patch
             if self.guard:
-                validation = self.guard.validate(patch, ExecutionGraph(goal=intent, nodes={}, edges={}))
+                _empty_graph = ExecutionGraph(goal=intent, nodes={}, edges={})
+                validation = await self.guard.validate(patch, _empty_graph, context=env_context)
                 
-                if not validation.is_valid:
-                    logger.error(f"Patch validation failed: {validation.errors}")
+                if not validation.approved:
+                    logger.error(f"Patch validation failed: {validation.violations}")
                     
                     # If auto-repair failed and we have attempts left, request new plan (Requirement 20.8)
                     if planning_attempt < max_planning_attempts:
@@ -481,22 +515,10 @@ class GraphController:
                     from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                     graph = ExecutionGraph(goal=intent, nodes={}, edges={})
                     graph.status = GraphStatus.FAILED
-                    return self.runtime._create_result(
+                    return self._make_error_result(
                         graph,
-                        error_message=f"Patch validation failed after {max_planning_attempts} attempts: {validation.errors}"
+                        error_message=f"Patch validation failed after {max_planning_attempts} attempts: {validation.violations}"
                     )
-                
-                if validation.requires_approval:
-                    approved = await self.guard.request_approval(patch, validation.approval_reason)
-                    if not approved:
-                        logger.warning("Patch approval denied")
-                        from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                        graph = ExecutionGraph(goal=intent, nodes={}, edges={})
-                        graph.status = GraphStatus.FAILED
-                        return self.runtime._create_result(
-                            graph,
-                            error_message="Patch approval denied"
-                        )
             
             # 3. Apply patch to create graph
             graph = ExecutionGraph(goal=intent, nodes={}, edges={})
@@ -510,7 +532,7 @@ class GraphController:
         from app.avatar.runtime.graph.models.execution_graph import GraphStatus
         graph = ExecutionGraph(goal=intent, nodes={}, edges={})
         graph.status = GraphStatus.FAILED
-        return self.runtime._create_result(
+        return self._make_error_result(
             graph,
             error_message=f"Failed to plan valid DAG after {max_planning_attempts} attempts"
         )
