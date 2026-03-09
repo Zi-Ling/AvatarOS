@@ -71,6 +71,60 @@ class NodeRunner:
         self.trace_store = trace_store
         logger.info("NodeRunner initialized")
     
+    def _persist_step_start(self, node: 'StepNode', run_id: str, step_index: int) -> Optional[str]:
+        """在 DB 创建 Step 记录，返回 step_id（失败时静默，不影响执行）"""
+        try:
+            from app.db.task.task import Step
+            from app.db.database import engine
+            from sqlmodel import Session
+            from datetime import datetime, timezone
+            step = Step(
+                run_id=run_id,
+                step_index=step_index,
+                step_name=node.id,
+                skill_name=node.capability_name or "",
+                input_params=node.params or {},
+                status="running",
+                started_at=datetime.now(timezone.utc),
+            )
+            with Session(engine) as session:
+                session.add(step)
+                session.commit()
+                session.refresh(step)
+                return step.id
+        except Exception as e:
+            logger.debug(f"[NodeRunner] Step DB persist start failed for {node.id}: {e}")
+            return None
+
+    def _persist_step_end(self, step_id: str, status: str, output_result=None, error_message: str = None):
+        """更新 DB Step 状态（失败时静默）"""
+        if not step_id:
+            return
+        try:
+            from app.db.task.task import Step
+            from app.db.database import engine
+            from app.db.serialization import serialize_for_db
+            from sqlmodel import Session
+            from datetime import datetime, timezone
+            with Session(engine) as session:
+                step = session.get(Step, step_id)
+                if step:
+                    step.status = status
+                    step.finished_at = datetime.now(timezone.utc)
+                    if output_result:
+                        # 只存非二进制的关键字段，避免 base64 图片撑爆 DB
+                        safe = {
+                            k: v for k, v in (output_result if isinstance(output_result, dict) else {}).items()
+                            if k not in ("__artifacts__",) and not (isinstance(v, str) and len(v) > 4096)
+                        }
+                        step.output_result = serialize_for_db(safe) if safe else None
+                    if error_message:
+                        step.error_message = error_message[:2000]
+                    session.add(step)
+                    session.commit()
+        except Exception as e:
+            logger.debug(f"[NodeRunner] Step DB persist end failed for {step_id}: {e}")
+
     async def run_node(
         self,
         graph: 'ExecutionGraph',
@@ -87,6 +141,11 @@ class NodeRunner:
         # NodeRunner has no global state dependency.
         session_id = getattr(context, "session_id", None) or "default"
         workspace = getattr(context, "workspace", None) or self.workspace
+
+        # --- DB Step 持久化（节点开始）---
+        run_id = getattr(context, "_env", {}).get("run_id") if hasattr(context, "_env") else None
+        step_index = list(graph.nodes.keys()).index(node.id) if node.id in graph.nodes else 0
+        db_step_id = self._persist_step_start(node, run_id, step_index) if run_id else None
 
         # --- workspace snapshot（执行前）---
         before_snapshot: Dict[str, float] = {}
@@ -153,6 +212,9 @@ class NodeRunner:
                     workspace_path=str(workspace.root) if workspace else None,
                 )
 
+                # --- DB Step 持久化（节点成功）---
+                self._persist_step_end(db_step_id, "completed", output_result=node.outputs)
+
                 return NodeResult(
                     success=True,
                     outputs=node.outputs,
@@ -206,6 +268,9 @@ class NodeRunner:
                         error_message=error_message,
                         workspace_path=str(workspace.root) if workspace else None,
                     )
+
+                    # --- DB Step 持久化（节点失败）---
+                    self._persist_step_end(db_step_id, "failed", error_message=error_message)
 
                     return NodeResult(
                         success=False,

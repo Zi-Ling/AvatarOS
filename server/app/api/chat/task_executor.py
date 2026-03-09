@@ -703,13 +703,13 @@ def _build_run_summary_payload(graph, run_record, start_time_ms: int = 0) -> dic
     if graph and graph.nodes:
         nodes = list(graph.nodes.values())
         total = len(nodes)
-        completed = sum(1 for n in nodes if n.status == NodeStatus.COMPLETED)
+        completed = sum(1 for n in nodes if n.status == NodeStatus.SUCCESS)
         failed = sum(1 for n in nodes if n.status == NodeStatus.FAILED)
         duration_ms = int((datetime.now(timezone.utc).timestamp() * 1000) - start_time_ms) if start_time_ms else 0
 
         key_outputs = []
         for n in nodes:
-            if n.status == NodeStatus.COMPLETED and n.outputs:
+            if n.status == NodeStatus.SUCCESS and n.outputs:
                 outputs = n.outputs
                 summary_val = (
                     outputs.get("stdout") or outputs.get("output") or
