@@ -61,10 +61,10 @@ class KataExecutor(SkillExecutor):
         self.pool_size = pool_size
         self._docker_client = None
         self._available = False
-        self._last_container_id = None  # 跟踪最后使用的容器 ID（用于内存监控）
-        self._pool = None  # 容器池
-        
-        # 检查 Kata Runtime 是否可用
+        self._is_podman = False  # 初始化时检测一次，缓存结果
+        self._last_container_id = None
+        self._pool = None
+
         self._check_availability()
     
     def _check_availability(self):
@@ -73,13 +73,12 @@ class KataExecutor(SkillExecutor):
             import docker
             from .container_pool import is_podman
             client = docker.from_env()
+            self._is_podman = is_podman(client)
 
-            # Podman 没有 Kata runtime，直接跳过
-            if is_podman(client):
+            if self._is_podman:
                 logger.info("[KataExecutor] Podman detected, KataExecutor disabled (use DockerExecutor)")
                 return
 
-            # 检查 Docker 是否配置了 Kata Runtime
             info = client.info()
             runtimes = info.get('Runtimes', {})
 
@@ -102,11 +101,10 @@ class KataExecutor(SkillExecutor):
                     logger.info(f"[KataExecutor] Container pool started (size={self.pool_size})")
             else:
                 logger.warning(
-                    "[KataExecutor] Kata Runtime is not configured in Docker. "
-                    "Please configure Docker to use Kata Runtime. "
+                    "[KataExecutor] Kata Runtime not configured in Docker. "
                     "See: https://github.com/kata-containers/kata-containers/blob/main/docs/install/docker-installation.md"
                 )
-                
+
         except ImportError:
             logger.warning("[KataExecutor] Docker library is not installed")
         except Exception as e:
@@ -170,6 +168,7 @@ class KataExecutor(SkillExecutor):
                     container,
                     cmd=["mkdir", "-p", workdir, "/workspace/output"],
                     workdir="/",
+                    use_podman=self._is_podman,
                 ),
             )
 
@@ -181,6 +180,7 @@ class KataExecutor(SkillExecutor):
                     cmd=["python", "-c", code],
                     workdir=workdir,
                     demux=True,
+                    use_podman=self._is_podman,
                 )
             )
 
@@ -198,7 +198,7 @@ class KataExecutor(SkillExecutor):
             # 4. 清理容器内 run 目录
             await loop.run_in_executor(
                 None,
-                lambda: exec_run_in_container(container, cmd=["rm", "-rf", workdir], workdir="/"),
+                lambda: exec_run_in_container(container, cmd=["rm", "-rf", workdir], workdir="/", use_podman=self._is_podman),
             )
 
             logger.debug(f"[KataExecutor] Success (run_id={run_id})")

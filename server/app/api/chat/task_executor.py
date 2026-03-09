@@ -34,6 +34,77 @@ def _get_reference_resolver():
     return _reference_resolver
 
 
+def _classify_execution_error(error: Exception) -> str:
+    """
+    将执行异常分类为：
+    - "infra"：基础设施错误（沙箱断连、超时、资源不足），LLM 无法提供额外帮助
+    - "code"：代码执行错误（Python traceback），LLM 可以分析并给出修复建议
+    - "unknown"：其他未知错误
+    """
+    err_str = str(error).lower()
+    err_type = type(error).__name__
+
+    # 基础设施错误：网络/连接类
+    infra_keywords = (
+        "remoteDisconnected", "connectionerror", "connectionaborted",
+        "remotedisconnected", "protocolerror", "connectionreset",
+        "brokenpipe", "sandbox_dead", "sandbox_timeout", "no healthy container",
+    )
+    if any(k.lower() in err_str for k in infra_keywords):
+        return "infra"
+    if err_type in ("ConnectionError", "RemoteDisconnected", "ProtocolError",
+                    "BrokenPipeError", "ConnectionResetError", "SandboxFailure"):
+        return "infra"
+
+    # 代码错误：Python traceback 特征
+    code_keywords = ("traceback", "syntaxerror", "nameerror", "typeerror",
+                     "valueerror", "importerror", "modulenotfounderror",
+                     "attributeerror", "indexerror", "keyerror", "exit code")
+    if any(k in err_str for k in code_keywords):
+        return "code"
+
+    return "unknown"
+
+
+async def _analyze_code_error(llm_client, goal: str, error_detail: str, user_language: str = "zh") -> str:
+    """用 LLM 分析代码执行错误，给出可能原因和修复建议"""
+    # 截断 error_detail，避免 prompt 过长
+    truncated = error_detail[:1500] if len(error_detail) > 1500 else error_detail
+
+    if user_language == "zh":
+        prompt = f"""用户想要完成的任务：{goal}
+
+执行时遇到以下错误：
+```
+{truncated}
+```
+
+请分析：
+1. 错误的可能原因（1-2句）
+2. 具体的修复建议（可操作的步骤）
+
+要求：简洁、直接，不要重复错误内容，用中文回复"""
+    else:
+        prompt = f"""Task: {goal}
+
+Execution error:
+```
+{truncated}
+```
+
+Analyze: 1) likely cause (1-2 sentences), 2) specific fix steps. Be concise."""
+
+    try:
+        if inspect.iscoroutinefunction(llm_client.call):
+            analysis = await llm_client.call(prompt)
+        else:
+            analysis = llm_client.call(prompt)
+        return analysis.strip()
+    except Exception as e:
+        logger.error(f"[ErrorAnalysis] LLM analysis failed: {e}")
+        return ""
+
+
 async def generate_capability_explanation(
     llm_client, goal: str, top_skills: list[str],
     relevance_score: float, user_language: str = "zh",
@@ -575,26 +646,44 @@ async def _emit_plan_and_steps(run_record, intent, session_id: str):
 async def _handle_planning_failure(error, avatar_router, decision, user_message, session_id, prefix_content):
     """处理任务执行失败（RuntimeError）的优雅降级，通过 Socket 推送结果"""
     from .session import save_message_to_session
-    
+
     logger.warning(f"[TaskExecution] Task failed for goal='{decision.goal}': {error}")
     user_language = _detect_language(user_message)
-    
-    result_msg = None
-    try:
-        explanation = await generate_capability_explanation(
+    error_class = _classify_execution_error(error)
+
+    if error_class == "infra":
+        # 基础设施错误：LLM 无额外信息，直接给友好提示
+        if user_language == "zh":
+            result_msg = f"{prefix_content}⚠️ 沙箱暂时不可用，请稍后重试。"
+        else:
+            result_msg = f"{prefix_content}⚠️ Sandbox is temporarily unavailable. Please try again later."
+
+    elif error_class == "code":
+        # 代码错误：LLM 分析 traceback，给出修复建议
+        analysis = await _analyze_code_error(
             llm_client=avatar_router.llm,
             goal=decision.goal or user_message,
-            top_skills=decision.top_skills or [],
-            relevance_score=decision.relevance_score,
+            error_detail=str(error),
             user_language=user_language,
         )
-        result_msg = f"{prefix_content}💡 {explanation}"
-    except Exception:
-        if user_language == "zh":
-            result_msg = f"{prefix_content}❌ 抱歉，任务执行失败。建议尝试其他任务或换个方式描述。"
+        if analysis:
+            if user_language == "zh":
+                result_msg = f"{prefix_content}❌ 代码执行失败\n\n{analysis}"
+            else:
+                result_msg = f"{prefix_content}❌ Code execution failed\n\n{analysis}"
         else:
-            result_msg = f"{prefix_content}❌ Sorry, the task failed. Please try rephrasing or a different request."
-    
+            if user_language == "zh":
+                result_msg = f"{prefix_content}❌ 代码执行失败，请检查代码逻辑后重试。"
+            else:
+                result_msg = f"{prefix_content}❌ Code execution failed. Please check your code and retry."
+
+    else:
+        # 未知错误：简洁提示，不暴露堆栈
+        if user_language == "zh":
+            result_msg = f"{prefix_content}❌ 任务执行失败，请稍后重试。"
+        else:
+            result_msg = f"{prefix_content}❌ Task execution failed. Please try again."
+
     save_message_to_session(session_id, "assistant", result_msg)
     await socket_manager.emit("server_event", {
         "type": "task.summary",
@@ -654,12 +743,40 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
     else:
         success, output_val, real_b64_image, target_obj = _extract_step_result(run_record)
     
-    # 任务失败
+    # 任务失败：从 graph nodes 取真实错误信息，按错误类型处理
     if run_record.status != "completed":
-        error_summary = (
-            f"{prefix_content}⚠️ {decision.llm_explanation}\n\n"
-            f"任务执行中断 (Status: {run_record.status})。"
-        )
+        # 收集所有失败节点的错误信息
+        error_detail = ""
+        if graph and graph.nodes:
+            from app.avatar.runtime.graph.models.step_node import NodeStatus
+            failed_nodes = [n for n in graph.nodes.values() if n.status == NodeStatus.FAILED]
+            if failed_nodes:
+                error_parts = []
+                for n in failed_nodes:
+                    if n.error_message:
+                        error_parts.append(f"[{n.capability_name}] {n.error_message}")
+                error_detail = "\n".join(error_parts)
+
+        user_language = _detect_language("")  # 无 user_message，默认 zh
+        error_class = _classify_execution_error(Exception(error_detail)) if error_detail else "unknown"
+
+        if error_class == "infra":
+            error_summary = f"{prefix_content}⚠️ 沙箱暂时不可用，请稍后重试。"
+        elif error_class == "code" and error_detail:
+            analysis = await _analyze_code_error(
+                llm_client=avatar_router.llm,
+                goal=decision.goal or "",
+                error_detail=error_detail,
+                user_language="zh",
+            )
+            if analysis:
+                error_summary = f"{prefix_content}❌ 代码执行失败\n\n{analysis}"
+            else:
+                error_summary = f"{prefix_content}❌ 代码执行失败，请检查代码逻辑后重试。"
+        else:
+            detail_hint = f"\n\n`{error_detail[:300]}`" if error_detail else ""
+            error_summary = f"{prefix_content}❌ 任务执行失败 (Status: {run_record.status})。{detail_hint}"
+
         save_message_to_session(session_id, "assistant", error_summary)
         await socket_manager.emit("server_event", {
             "type": "task.summary",

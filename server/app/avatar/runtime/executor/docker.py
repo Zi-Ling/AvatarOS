@@ -48,31 +48,33 @@ class DockerExecutor(SkillExecutor):
         self.use_pool = use_pool
         self.pool_size = pool_size
         self._client = None
-        self._available = False  # 添加 _available 属性
-        self._last_container_id = None  # 跟踪最后使用的容器 ID（用于内存监控）
-        self._pool = None  # 容器池
+        self._available = False
+        self._is_podman = False  # 初始化时检测一次，缓存结果
+        self._last_container_id = None
+        self._pool = None
         self._check_docker()
     
     def _check_docker(self):
-        """检查 Docker 是否可用"""
+        """检查 Docker/Podman 是否可用，并缓存 is_podman 结果"""
         try:
             import docker
+            from .container_pool import is_podman
             self._client = docker.from_env()
-            # 测试连接
             self._client.ping()
-            # 确保镜像存在
+            self._is_podman = is_podman(self._client)
+            if self._is_podman:
+                logger.info("[DockerExecutor] Podman detected (Docker-compat mode)")
             self._ensure_image()
-            self._available = True  # 设置为 True
+            self._available = True
             self._healthy = True
-            logger.info(f"[DockerExecutor] Docker is available, image: {self.image}")
-            
-            # 初始化容器池（如果启用）
+            logger.info(f"[DockerExecutor] Available, image={self.image}, podman={self._is_podman}")
+
             if self.use_pool:
                 from .container_pool import ContainerPool
                 self._pool = ContainerPool(
                     client=self._client,
                     image=self.image,
-                    runtime=None,  # Docker 不使用特殊 runtime
+                    runtime=None,
                     pool_size=self.pool_size,
                     mem_limit=self.mem_limit,
                     cpu_quota=self.cpu_quota,
@@ -80,9 +82,9 @@ class DockerExecutor(SkillExecutor):
                 self._pool.start()
                 logger.info(f"[DockerExecutor] Container pool started (size={self.pool_size})")
         except Exception as e:
-            self._available = False  # 设置为 False
+            self._available = False
             self._healthy = False
-            logger.warning(f"[DockerExecutor] Docker is not available: {e}")
+            logger.warning(f"[DockerExecutor] Not available: {e}")
     
     def _ensure_image(self):
         """确保 Docker 镜像存在"""
@@ -214,6 +216,7 @@ class DockerExecutor(SkillExecutor):
                 cmd=["python", "-c", code],
                 workdir="/",
                 demux=True,
+                use_podman=self._is_podman,
             )
 
             stdout = output[0].decode("utf-8") if output[0] else ""

@@ -36,32 +36,36 @@ logger = logging.getLogger(__name__)
 def is_podman(client: Any) -> bool:
     """
     检测 client 连接的是 Podman 还是 Docker。
-    Podman 兼容 API 的 info() 返回里有 host.buildahVersion，Docker 没有。
+
+    最优方案：读 HTTP Server 响应头。
+    - Podman: "Server: Libpod/x.x.x (linux)"
+    - Docker: "Server: Docker/x.x.x (linux)"
+
+    这是唯一 100% 确定性的方案：Podman 在所有响应里都带 Libpod 标识，
+    不依赖 CLI、不依赖 OS 名称启发式、不依赖 info() 字段格式。
     """
     try:
-        info = client.info()
-        return bool(info.get("host", {}).get("buildahVersion"))
+        # Docker SDK 的底层 API client 暴露了 _custom_adapter / base_url
+        # 直接发一个 HEAD /_ping，读响应头
+        response = client.api._get(client.api._url("/_ping"))
+        server_header = response.headers.get("Server", "")
+        return server_header.lower().startswith("libpod")
     except Exception:
         return False
 
 
-def exec_run_in_container(container: Any, cmd: list, workdir: str = "/", demux: bool = False):
+def exec_run_in_container(container: Any, cmd: list, workdir: str = "/", demux: bool = False, use_podman: bool = False):
     """
     统一的容器 exec 接口，自动适配 Docker 和 Podman。
 
     - Docker：直接用 SDK exec_run（稳定）
     - Podman：走 podman exec CLI（绕开不稳定的兼容层）
 
+    use_podman 由 executor 初始化时检测并传入，不在此函数内部检测。
+
     返回 (exit_code, stdout_bytes, stderr_bytes)
     """
     import subprocess
-
-    # 判断是否 Podman：通过容器 ID 前缀尝试 podman exec
-    # 用 container.client.info() 检测
-    try:
-        use_podman = is_podman(container.client)
-    except Exception:
-        use_podman = False
 
     if use_podman:
         full_cmd = ["podman", "exec", "--workdir", workdir, container.id] + cmd
