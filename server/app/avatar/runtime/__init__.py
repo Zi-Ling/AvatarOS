@@ -15,27 +15,10 @@ from .core import (
 
 # 主入口
 from .main import AvatarMain
-# AgentLoop removed - replaced by GraphController
 
 # 监控日志
 from .monitoring import StepLogger, TaskLog
 from .monitoring.loggers import DatabaseStepLogger, InMemoryStepLogger
-
-# 错误恢复
-from .recovery import CodeRepairManager, Replanner
-from .recovery.repair import SelfCorrector
-
-# 缓存
-from .cache import (
-    PlanCache,
-    PlanTemplate,
-    PlanValidator,
-    CacheKeyGenerator,
-    CacheRejectReason,
-    StepSkeleton,
-    QualityMetrics,
-    get_plan_cache,
-)
 
 __all__ = [
     # 核心
@@ -52,17 +35,4 @@ __all__ = [
     "TaskLog",
     "DatabaseStepLogger",
     "InMemoryStepLogger",
-    # 恢复
-    "CodeRepairManager",
-    "Replanner",
-    "SelfCorrector",
-    # 缓存
-    "PlanCache",
-    "PlanTemplate",
-    "PlanValidator",
-    "CacheKeyGenerator",
-    "CacheRejectReason",
-    "StepSkeleton",
-    "QualityMetrics",
-    "get_plan_cache",
 ]

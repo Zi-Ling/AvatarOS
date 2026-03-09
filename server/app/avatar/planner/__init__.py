@@ -22,7 +22,6 @@ from .registry import (
 # DagRunner removed - replaced by GraphRuntime
 
 # 导入 planners 模块以触发注册
-from .planners import simple_llm  # noqa: F401
 from .planners import interactive  # noqa: F401
 
 __all__ = [

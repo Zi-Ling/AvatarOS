@@ -15,10 +15,7 @@ from app.avatar.intent import IntentSpec, IntentExtractor # Replaced IntentTaskC
 from app.avatar.planner.models import Task, TaskStatus, Step, StepStatus
 from app.avatar.planner.models.step import StepResult
 from app.avatar.planner.models.subtask import CompositeTask
-try:
-    from app.avatar.planner.runners.dag_runner import DagRunner  # deprecated
-except ImportError:
-    DagRunner = None  # type: ignore
+
 from app.avatar.skills import SkillContext
 from app.avatar.skills.registry import skill_registry
 from app.db import TaskStore, RunStore, StepStore, Run as RunRecord
@@ -150,14 +147,13 @@ class AvatarMain:
         dry_run: bool = False,
         event_bus: Optional[EventBus] = None,
         workspace_manager: Optional[Any] = None,
-        use_tool_calling: bool = False,
+        use_tool_calling: bool = False,  # deprecated, kept for backward compat
     ) -> None:
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
         self.dry_run = dry_run
         self.llm_client = llm_client
         self.workspace_manager = workspace_manager
-        self.use_tool_calling = use_tool_calling
 
         # Initialize Memory Manager if not provided
         if memory_manager is None:
@@ -195,14 +191,10 @@ class AvatarMain:
         
         self.event_bus = event_bus or EventBus()
         
-        # 根据 use_tool_calling 选择 runner
+        # runner 参数保留向后兼容，实际执行走 GraphController
         if runner is not None:
             self.runner = runner
-        elif use_tool_calling:
-            from app.avatar.planner.runners.tool_runner import ToolRunner
-            self.runner = ToolRunner(event_bus=self.event_bus)
         else:
-            # DagRunner deleted - use GraphRuntime via GraphController
             self.runner = None
         
         if task_planner is not None:
@@ -311,9 +303,22 @@ class AvatarMain:
                     event_bus=self.event_bus,
                 )
                 graph_planner = GraphPlanner(llm_client=self.llm_client)
+
+                # PlannerGuard with ApprovalService
+                from app.avatar.runtime.graph.guard.planner_guard import PlannerGuard, GuardConfig
+                from app.services.approval_service import get_approval_service
+                _guard = PlannerGuard(
+                    config=GuardConfig(
+                        workspace_root=str(self.base_path),
+                        enforce_workspace_isolation=True,
+                    ),
+                    approval_manager=get_approval_service(),
+                )
+
                 self._graph_controller = GraphController(
                     planner=graph_planner,
                     runtime=graph_runtime,
+                    guard=_guard,
                 )
             except Exception as gc_err:
                 logger.warning(f"[AvatarMain] GraphController init failed: {gc_err}")

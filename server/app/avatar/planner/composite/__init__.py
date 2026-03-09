@@ -8,12 +8,9 @@
 注意：任务分解（TaskDecomposer）已移至 orchestrator/decomposer/
 """
 from .analyzer import ComplexityAnalyzer, DecomposeDecision
-from .optimizer import SubTaskOptimizer, DependencyValidator
 
 __all__ = [
     "ComplexityAnalyzer",
     "DecomposeDecision",
-    "SubTaskOptimizer",
-    "DependencyValidator",
 ]
 

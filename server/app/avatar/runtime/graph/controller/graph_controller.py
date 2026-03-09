@@ -304,30 +304,16 @@ class GraphController:
             
             # 2. Validate patch
             if self.guard:
-                validation = self.guard.validate(patch, graph)
+                validation = await self.guard.validate(patch, graph, context=env_context)
                 
-                if not validation.is_valid:
-                    logger.error(f"Patch validation failed: {validation.errors}")
+                if not validation.approved:
+                    logger.error(f"Patch validation failed: {validation.violations}")
                     from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                     graph.status = GraphStatus.FAILED
                     return self.runtime._create_result(
                         graph,
-                        error_message=f"Patch validation failed: {validation.errors}"
+                        error_message=f"Patch validation failed: {validation.violations}"
                     )
-                
-                if validation.requires_approval:
-                    approved = await self.guard.request_approval(
-                        patch,
-                        validation.approval_reason
-                    )
-                    if not approved:
-                        logger.warning("Patch approval denied")
-                        from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                        graph.status = GraphStatus.FAILED
-                        return self.runtime._create_result(
-                            graph,
-                            error_message="Patch approval denied"
-                        )
             
             # 3. Apply patch to graph
             self._apply_patch(patch, graph)

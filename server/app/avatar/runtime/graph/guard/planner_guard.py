@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from app.avatar.runtime.graph.models.graph_patch import GraphPatch
     from app.avatar.runtime.graph.models.execution_graph import ExecutionGraph
-    from app.avatar.runtime.approval.manager import ApprovalManager
+    from app.services.approval_service import ApprovalService
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ class PlannerGuard:
     def __init__(
         self,
         config: Optional[GuardConfig] = None,
-        approval_manager: Optional['ApprovalManager'] = None
+        approval_manager: Optional['ApprovalService'] = None
     ):
         self.config = config or GuardConfig()
         self.approval_manager = approval_manager
@@ -253,15 +253,22 @@ class PlannerGuard:
                 result.add_violation(reason)
 
             elif policy.action == PolicyAction.REQUIRE_APPROVAL:
-                # Request approval via ApprovalManager (Requirement 31.7)
+                # Request approval via ApprovalService (persistent, REST-accessible)
                 if self.approval_manager:
-                    approved = await self.approval_manager.request_approval(
-                        subtask_id=action.node.id,
-                        skill_name=capability_name,
-                        params=action.node.params,
-                        goal=context.get("goal", ""),
-                        context=context
+                    import uuid
+                    request_id = str(uuid.uuid4())
+                    self.approval_manager.create_request(
+                        request_id=request_id,
+                        message=f"Capability '{capability_name}' requires approval",
+                        operation=capability_name,
+                        step_id=action.node.id,
+                        details={"params": action.node.params, "goal": context.get("goal", "")},
                     )
+                    try:
+                        approved = await self.approval_manager.wait_for_approval(request_id)
+                    except TimeoutError:
+                        approved = False
+
                     if not approved:
                         result.add_violation(
                             f"Capability '{capability_name}' requires approval but was rejected"
@@ -269,9 +276,8 @@ class PlannerGuard:
                     else:
                         result.add_approval_required(capability_name)
                 else:
-                    # No approval manager - treat as warning
                     result.add_warning(
-                        f"Capability '{capability_name}' requires approval but no ApprovalManager configured"
+                        f"Capability '{capability_name}' requires approval but no ApprovalService configured"
                     )
                     result.add_approval_required(capability_name)
 
@@ -366,7 +372,7 @@ class PlannerGuard:
                     return
 
     @classmethod
-    def from_config(cls, config_dict: Dict[str, Any], approval_manager: Optional['ApprovalManager'] = None) -> 'PlannerGuard':
+    def from_config(cls, config_dict: Dict[str, Any], approval_manager: Optional['ApprovalService'] = None) -> 'PlannerGuard':
         """
         Create PlannerGuard from a configuration dictionary.
 
