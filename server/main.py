@@ -32,6 +32,7 @@ from app.api import (
     chat_router, task_router, speech_router, skill_router,
     filesystem_router, schedule_router, history_router, artifacts_router, workspace_router,
     state_router, memory_router, approval_router,
+    policy_router, cost_router, maintenance_router,
 )
 from app.api.learning import learning_router
 from app.api.log import logging_router
@@ -85,6 +86,7 @@ for router in [
     logging_router, skill_router, filesystem_router, schedule_router,
     history_router, artifacts_router, workspace_router, knowledge_router, workflow_router,
     state_router, memory_router, approval_router,
+    policy_router, cost_router, maintenance_router,
 ]:
     fastapi_app.include_router(router)
 

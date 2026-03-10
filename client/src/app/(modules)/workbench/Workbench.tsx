@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2, ShieldAlert } from "lucide-react";
+import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2, ShieldAlert, Shield, DollarSign, Wrench } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/components/providers/SocketProvider";
@@ -9,6 +9,9 @@ import { ActiveTaskView } from "./_components/ActiveTaskView";
 import { LogsView } from "./_components/LogsView";
 import { HistoryView } from "./_components/HistoryView";
 import { ApprovalView } from "./_components/ApprovalView";
+import { PolicyView } from "./_components/PolicyView";
+import { CostView } from "./_components/CostView";
+import { MaintenanceView } from "./_components/MaintenanceView";
 import { useTaskExecution } from "@/lib/hooks/useTaskExecution";
 import { useWorkbenchStore, type WorkbenchTab } from "@/stores/workbenchStore";
 import { useTaskStore } from "@/stores/taskStore";
@@ -48,6 +51,9 @@ export default function Workbench() {
       badge: pendingApprovals.length > 0 ? pendingApprovals.length : undefined,
       color: "text-amber-500",
     },
+    { id: "policy", label: "Policy", icon: Shield, color: "text-green-500" },
+    { id: "cost", label: "Cost", icon: DollarSign, color: "text-yellow-500" },
+    { id: "maintenance", label: "Maintenance", icon: Wrench, color: "text-slate-500" },
   ];
 
   return (
@@ -141,6 +147,9 @@ export default function Workbench() {
               {activeTab === "logs" && <LogsView logs={logs} />}
               {activeTab === "history" && <HistoryView />}
               {activeTab === "approval" && <ApprovalView />}
+              {activeTab === "policy" && <PolicyView />}
+              {activeTab === "cost" && <CostView />}
+              {activeTab === "maintenance" && <MaintenanceView />}
             </motion.div>
           )}
         </AnimatePresence>

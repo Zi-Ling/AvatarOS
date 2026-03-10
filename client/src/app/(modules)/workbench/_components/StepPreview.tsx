@@ -30,6 +30,7 @@ export const SKILL_LABELS: Record<string, { label: string; icon: React.ElementTy
   'fs.write':       { label: '写入文件',   icon: FileText },
   'fs.delete':      { label: '删除文件',   icon: FileText },
   'python.run':     { label: '运行脚本',   icon: Code2 },
+  'browser.run':    { label: '浏览器执行', icon: Globe },
   'web.search':     { label: '搜索网络',   icon: Globe },
   'web.fetch':      { label: '抓取页面',   icon: Globe },
   'db.query':       { label: '查询数据库', icon: Database },

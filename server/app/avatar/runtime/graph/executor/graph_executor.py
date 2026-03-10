@@ -266,6 +266,12 @@ class GraphExecutor:
         extra: Dict[str, Any] = {}
         _ctx_workspace = getattr(context, "workspace", None) if context is not None else None
         _effective_workspace = _ctx_workspace or self.workspace
+
+        # browser.run artifact 落到 session_workspace/output/，让 ArtifactCollector 能扫到
+        if _effective_workspace is not None and hasattr(skill_cls, "spec"):
+            from app.avatar.skills.base import SideEffect as _SE
+            if _SE.BROWSER in getattr(skill_cls.spec, "side_effects", set()):
+                base_path = _effective_workspace.output_dir
         if _effective_workspace is not None:
             extra["workspace"] = _effective_workspace
         # 注入 exec_session_id，子进程查 Grant 时用于 scope_id 精确匹配

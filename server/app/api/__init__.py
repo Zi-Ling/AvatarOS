@@ -13,6 +13,9 @@ from .workspace import router as workspace_router
 from .state import router as state_router
 from .memory import router as memory_router
 from .approval import router as approval_router
+from .policy import router as policy_router
+from .cost import router as cost_router
+from .maintenance import router as maintenance_router
 
 __all__ = [
     "chat_router",
@@ -27,4 +30,7 @@ __all__ = [
     "state_router",
     "memory_router",
     "approval_router",
+    "policy_router",
+    "cost_router",
+    "maintenance_router",
 ]
