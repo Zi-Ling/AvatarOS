@@ -34,6 +34,54 @@ class ApprovalStatusResponse(BaseModel):
     details: Optional[dict] = None
 
 
+@router.get("/history")
+async def get_approval_history(
+    status: Optional[str] = None,   # pending / approved / rejected / expired
+    task_id: Optional[str] = None,
+    limit: int = 50,
+):
+    """
+    查询历史审批记录（持久化，不依赖内存状态）。
+    支持按 status / task_id 过滤，按创建时间倒序。
+    """
+    try:
+        from sqlmodel import Session, select
+        from app.db.database import engine
+        from app.db.system import ApprovalRequest
+
+        with Session(engine) as session:
+            stmt = select(ApprovalRequest).order_by(ApprovalRequest.created_at.desc()).limit(limit)
+            if status:
+                stmt = stmt.where(ApprovalRequest.status == status)
+            if task_id:
+                stmt = stmt.where(ApprovalRequest.task_id == task_id)
+            records = session.exec(stmt).all()
+
+        return {
+            "count": len(records),
+            "records": [
+                {
+                    "request_id": r.request_id,
+                    "status": r.status,
+                    "message": r.message,
+                    "operation": r.operation,
+                    "task_id": r.task_id,
+                    "step_id": r.step_id,
+                    "details": r.details,
+                    "user_comment": r.user_comment,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+                    "responded_at": r.responded_at.isoformat() if r.responded_at else None,
+                }
+                for r in records
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get approval history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/respond")
 async def respond_to_approval(request: ApprovalRespondRequest):
     """

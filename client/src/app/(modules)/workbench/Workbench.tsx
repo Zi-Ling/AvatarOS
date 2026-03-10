@@ -1,13 +1,14 @@
 "use client";
 
 import React from "react";
-import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2 } from "lucide-react";
+import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2, ShieldAlert } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/components/providers/SocketProvider";
 import { ActiveTaskView } from "./_components/ActiveTaskView";
 import { LogsView } from "./_components/LogsView";
 import { HistoryView } from "./_components/HistoryView";
+import { ApprovalView } from "./_components/ApprovalView";
 import { useTaskExecution } from "@/lib/hooks/useTaskExecution";
 import { useWorkbenchStore, type WorkbenchTab } from "@/stores/workbenchStore";
 import { useTaskStore } from "@/stores/taskStore";
@@ -40,6 +41,13 @@ export default function Workbench() {
     { id: "editor", label: "Editor", icon: Code2, badge: openFiles.length > 0 ? openFiles.length : undefined, color: "text-orange-500" },
     { id: "logs", label: "Logs", icon: Terminal, badge: logs.length > 0 ? logs.length : undefined, color: "text-blue-500" },
     { id: "history", label: "History", icon: History, color: "text-purple-500" },
+    {
+      id: "approval",
+      label: "Approval",
+      icon: ShieldAlert,
+      badge: pendingApprovals.length > 0 ? pendingApprovals.length : undefined,
+      color: "text-amber-500",
+    },
   ];
 
   return (
@@ -132,6 +140,7 @@ export default function Workbench() {
               )}
               {activeTab === "logs" && <LogsView logs={logs} />}
               {activeTab === "history" && <HistoryView />}
+              {activeTab === "approval" && <ApprovalView />}
             </motion.div>
           )}
         </AnimatePresence>

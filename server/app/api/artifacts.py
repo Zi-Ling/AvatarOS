@@ -71,6 +71,67 @@ async def get_artifact(artifact_id: str):
     return _record_to_dict(record)
 
 
+@router.get("/{artifact_id}/lineage")
+async def get_artifact_lineage(artifact_id: str):
+    """
+    Artifact 血缘查询：谁产生了它，谁消费了它，同 step 还产生了哪些其他 artifact。
+    用于 Artifact Explorer 的依赖图。
+    """
+    import json as _json
+
+    with Session(engine) as db:
+        record = db.exec(
+            select(ArtifactRecord).where(ArtifactRecord.artifact_id == artifact_id)
+        ).first()
+        if not record:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # 同 step 产生的其他 artifact（siblings）
+        siblings = []
+        if record.step_id:
+            sibling_records = db.exec(
+                select(ArtifactRecord)
+                .where(ArtifactRecord.step_id == record.step_id)
+                .where(ArtifactRecord.artifact_id != artifact_id)
+            ).all()
+            siblings = [
+                {"artifact_id": r.artifact_id, "filename": r.filename, "artifact_type": r.artifact_type}
+                for r in sibling_records
+            ]
+
+        # 消费方 step 产生的 artifact（downstream）
+        consumed_by = _json.loads(record.consumed_by_step_ids_json) if record.consumed_by_step_ids_json else []
+        downstream = []
+        for consumer_step_id in consumed_by:
+            consumer_artifacts = db.exec(
+                select(ArtifactRecord)
+                .where(ArtifactRecord.step_id == consumer_step_id)
+                .where(ArtifactRecord.session_id == record.session_id)
+            ).all()
+            downstream.extend([
+                {
+                    "artifact_id": r.artifact_id,
+                    "filename": r.filename,
+                    "artifact_type": r.artifact_type,
+                    "produced_by_step_id": consumer_step_id,
+                }
+                for r in consumer_artifacts
+            ])
+
+    return {
+        "artifact_id": artifact_id,
+        "filename": record.filename,
+        "artifact_type": record.artifact_type,
+        "produced_by": {
+            "step_id": record.step_id,
+            "session_id": record.session_id,
+        },
+        "consumed_by_step_ids": consumed_by,
+        "siblings": siblings,        # 同 step 产生的其他 artifact
+        "downstream": downstream,    # 消费方 step 产生的 artifact
+    }
+
+
 @router.get("/{artifact_id}/download")
 async def download_artifact(artifact_id: str):
     """

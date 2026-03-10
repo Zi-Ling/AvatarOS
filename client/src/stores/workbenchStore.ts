@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type WorkbenchTab = 'active' | 'logs' | 'history' | 'editor';
+export type WorkbenchTab = 'active' | 'logs' | 'history' | 'editor' | 'approval';
 
 interface WorkbenchState {
   activeTab: WorkbenchTab;

@@ -96,6 +96,117 @@ async def get_session(session_id: str):
     }
 
 
+@router.get("/sessions/{session_id}/artifacts")
+async def list_session_artifacts(session_id: str):
+    """
+    列出某个 session 的所有 artifact，直接从 history 路径访问，无需跨 API 拼接。
+    """
+    from app.db.artifact_record import ArtifactRecord
+    import json as _json
+
+    with Session(engine) as db:
+        session_obj = db.get(ExecutionSession, session_id)
+        if not session_obj:
+            raise HTTPException(status_code=404, detail="Session not found")
+        records = db.exec(
+            select(ArtifactRecord)
+            .where(ArtifactRecord.session_id == session_id)
+            .order_by(ArtifactRecord.created_at)
+        ).all()
+
+    def _to_dict(r: ArtifactRecord) -> dict:
+        consumed = _json.loads(r.consumed_by_step_ids_json) if r.consumed_by_step_ids_json else []
+        return {
+            "artifact_id": r.artifact_id,
+            "step_id": r.step_id,
+            "filename": r.filename,
+            "storage_uri": r.storage_uri,
+            "size": r.size,
+            "checksum": r.checksum,
+            "mime_type": r.mime_type,
+            "artifact_type": r.artifact_type,
+            "consumed_by_step_ids": consumed,
+            "created_at": r.created_at.isoformat(),
+        }
+
+    return {"session_id": session_id, "artifacts": [_to_dict(r) for r in records]}
+
+
+@router.get("/sessions/{session_id}/timeline")
+async def get_session_timeline(session_id: str):
+    """
+    轻量 GET 接口，直接返回 session 的三层事件时间线。
+    不触发 replay 执行，只读 trace 数据。
+    用于前端 Inspector 页面，无需 POST /replay。
+    """
+    from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
+    from datetime import timezone
+
+    with Session(engine) as db:
+        session_obj = db.get(ExecutionSession, session_id)
+        if not session_obj:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+    store = StepTraceStore()
+
+    timeline = []
+
+    # 层 1：Session 级事件
+    try:
+        for e in store.get_session_events(session_id):
+            timeline.append({
+                "layer": "session",
+                "event_type": e["event_type"],
+                "timestamp": e.get("created_at").isoformat() if e.get("created_at") else None,
+                "payload": e.get("payload") or {},
+            })
+    except Exception:
+        pass
+
+    # 层 2：Step Trace
+    try:
+        for s in store.get_step_traces(session_id):
+            base = {
+                "layer": "step",
+                "step_id": s["step_id"],
+                "step_type": s.get("step_type"),
+                "status": s["status"],
+                "container_id": s.get("container_id"),
+                "retry_count": s.get("retry_count", 0),
+                "execution_time_s": s.get("execution_time_s"),
+                "artifact_ids": s.get("artifact_ids") or [],
+                "error_message": s.get("error_message"),
+            }
+            if s.get("started_at"):
+                timeline.append({**base, "event_type": "step_started", "timestamp": s["started_at"].isoformat()})
+            if s.get("ended_at"):
+                timeline.append({**base, "event_type": f"step_{s['status']}", "timestamp": s["ended_at"].isoformat()})
+    except Exception:
+        pass
+
+    # 层 3：细粒度 Event Trace
+    try:
+        for ev in store.get_event_traces(session_id):
+            ts = ev.get("created_at")
+            timeline.append({
+                "layer": "event",
+                "event_type": ev["event_type"],
+                "timestamp": ts.isoformat() if ts else None,
+                "step_id": ev.get("step_id"),
+                "container_id": ev.get("container_id"),
+                "artifact_id": ev.get("artifact_id"),
+                "payload": ev.get("payload") or {},
+            })
+    except Exception:
+        pass
+
+    # 按时间排序（None 排最前）
+    timeline.sort(key=lambda e: e["timestamp"] or "")
+
+    summary = store.summarize_session(session_id)
+    return {"session_id": session_id, "timeline": timeline, "summary": summary}
+
+
 @router.get("/sessions/{session_id}/events")
 async def get_session_events(
     session_id: str,
