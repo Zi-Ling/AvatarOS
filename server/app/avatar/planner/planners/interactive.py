@@ -54,15 +54,50 @@ When using `python.run` skill, the code runs in a RESTRICTED sandbox with these 
 - ❌ DO NOT use packages not listed above (e.g. `xlrd`, `xlwt`, `paramiko`) — they are NOT installed
 
 **DATA PASSING TO python.run (CRITICAL):**
-The framework automatically injects all completed steps' outputs as variables before your code runs.
+The framework automatically writes all completed steps' outputs as JSON files into `/workspace/inputs/` before your code runs, and injects `import json` + `json.load()` statements at the top of your code.
 Variable naming convention: `{step_id}_output` (e.g. `step_1_output`, `step_2_output`).
-- ✅ CORRECT: Use the injected variable directly:
+- ✅ CORRECT: Use the injected variable directly — it is already a Python object (list/dict/str/int/etc.), NOT a string:
   ```json
   {"code": "count = len(step_1_output.replace('\\n','').replace(' ',''))\nprint(count)"}
   ```
 - ✅ ALSO CORRECT: If you prefer, embed the value as a string literal from Execution History.
+- ❌ WRONG: `eval(step_2_output)` — the variable is already a Python object, never use eval/json.loads on it.
 - ❌ WRONG: `text = previous_step_output` — use the exact `{step_id}_output` name instead.
-- **Rule**: For `python.run`, always reference upstream data via `{step_id}_output` variables. The step_id matches the `Step N` label in Execution History (e.g. Step 1 → `step_1_output`).
+- **Rule**: For `python.run`, always reference upstream data via `{step_id}_output` variables. The step_id matches the `Step N` label in Execution History (e.g. Step 1 → `step_1_output`). The variable is ready to use as-is.
+
+**STRUCTURED OUTPUT FROM python.run (CRITICAL):**
+The framework injects a `_output(value)` function into every python.run execution. Use it to pass structured data (list, dict, int, etc.) to downstream steps. It works alongside regular `print()` — you can print logs freely without affecting the structured output.
+- ✅ CORRECT: `_output([{"src": "a.txt", "dst": "1_a.txt"}])` → next step gets a list of dicts as `step_N_output`, ready to pass directly to `fs.move` as `moves`
+- ✅ CORRECT: mix logs and structured output freely:
+  ```python
+  print(f"Found {len(files)} files")   # log, ignored by framework
+  _output(rename_pairs)                 # structured output for downstream
+  ```
+- ❌ WRONG: `print(json.dumps(result))` — downstream gets a raw string, not a Python object
+- ❌ WRONG: omitting `_output()` when downstream needs structured data — `step_N_output` will be the raw stdout string
+- **Rule**: Always call `_output(value)` when a downstream step needs to use the result as a Python object. `_output()` is already available — do NOT import or define it.
+
+**BATCH FILE OPERATIONS:**
+`fs.move`, `fs.copy`, and `fs.delete` all support batch mode. Use batch whenever operating on multiple files — do NOT loop with individual calls.
+
+- `fs.move` batch: `{"moves": [{"src": "a.txt", "dst": "1_a.txt"}, ...]}`
+- `fs.copy` batch: `{"copies": [{"src": "a.txt", "dst": "backup/a.txt"}, ...]}`
+- `fs.delete` batch: `{"paths": ["a.txt", "b.txt", "c.txt"], "recursive": false}`
+
+✅ CORRECT (batch move, 1 step):
+  ```json
+  {"skill": "fs.move", "params": {"moves": [{"src": "a.txt", "dst": "1_a.txt"}, {"src": "b.txt", "dst": "2_b.txt"}]}}
+  ```
+✅ CORRECT (batch delete, 1 step):
+  ```json
+  {"skill": "fs.delete", "params": {"paths": ["tmp1.txt", "tmp2.txt", "tmp3.txt"]}}
+  ```
+✅ CORRECT (batch copy all files from a dir, 1 step):
+  ```json
+  {"skill": "fs.copy", "params": {"copies": [{"src": "src/a.txt", "dst": "dst/a.txt"}, {"src": "src/b.txt", "dst": "dst/b.txt"}]}}
+  ```
+❌ WRONG: calling `fs.move`/`fs.copy`/`fs.delete` N times in N separate steps for N files.
+- Batch lists can be built from a `python.run` step that computes the pairs, then passed as a literal in the next step's params.
 
 **Common Mistakes to Avoid:**
 1. ❌ `except Exception as e:` → ✅ `except:` (no exception types)

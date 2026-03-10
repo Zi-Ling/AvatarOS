@@ -44,8 +44,8 @@ USER_DIRS: List[str] = ["input", "output"]
 SYSTEM_DIRS: List[str] = []   # session sandbox 根目录下无系统子目录，全部是用户文件
 
 # ArtifactCollector 扫描时排除的根目录名集合
-# 目前 session sandbox 根目录下所有文件都是用户产出，无需排除
-SCAN_EXCLUDE_DIRS: frozenset = frozenset()
+# inputs/ 是框架注入的上游数据目录，不是用户产出，不应收集
+SCAN_EXCLUDE_DIRS: frozenset = frozenset({"inputs"})
 
 
 @dataclass

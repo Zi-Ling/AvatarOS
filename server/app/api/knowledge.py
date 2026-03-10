@@ -368,7 +368,7 @@ _SKILL_CATALOG: List[Dict[str, Any]] = [
     # Network
     {
         "name": "net.get",
-        "description": "发送 HTTP GET 请求",
+        "description": "发送 HTTP GET 请求（小文本直读，大内容/二进制返回预览和建议操作）",
         "category": "网络",
         "example_prompt": "获取 https://api.github.com/users/octocat 的信息",
         "aliases": ["http_get", "fetch"],
@@ -379,6 +379,21 @@ _SKILL_CATALOG: List[Dict[str, Any]] = [
         "category": "网络",
         "example_prompt": "向 https://httpbin.org/post 发送 JSON 数据",
         "aliases": ["http_post"],
+    },
+    {
+        "name": "net.download",
+        "description": "从 URL 下载文件到 workspace（图片、PDF、ZIP 等），返回文件路径和 sha256",
+        "category": "网络",
+        "example_prompt": "下载 https://example.com/report.pdf 到工作目录",
+        "aliases": ["download_file", "fetch_file"],
+    },
+    # Browser
+    {
+        "name": "browser.run",
+        "description": "在沙箱浏览器中执行 Playwright 脚本，支持截图、数据提取、表单操作等",
+        "category": "浏览器",
+        "example_prompt": "打开 https://example.com 截图并提取页面标题",
+        "aliases": ["browser_run", "playwright_run"],
     },
     # Memory
     {

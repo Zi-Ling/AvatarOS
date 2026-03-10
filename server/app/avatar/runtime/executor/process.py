@@ -125,28 +125,6 @@ class ProcessExecutor(SkillExecutor):
         self._ensure_pool()
         
         try:
-            # 如果 context 是 _SkillCaller，转换为 SkillContext
-            from app.avatar.skills.context import SkillContext
-            if hasattr(context, 'call_skill'):  # _SkillCaller 有 call_skill 方法
-                # 创建简化的 SkillContext（只包含可序列化的字段）
-                skill_context = SkillContext(
-                    base_path=context.base_path,
-                    dry_run=context.dry_run,
-                    # 不传递 memory_manager, learning_manager, execution_context
-                )
-            else:
-                skill_context = context
-            
-            # 测试序列化（调试用）
-            import pickle
-            try:
-                pickle.dumps(skill_context)
-                logger.debug(f"[ProcessExecutor] Context serialization OK")
-            except Exception as e:
-                logger.error(f"[ProcessExecutor] Context serialization failed: {e}")
-                logger.error(f"[ProcessExecutor] Context type: {type(skill_context)}")
-                raise
-            
             # 在子进程中执行
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
@@ -154,7 +132,7 @@ class ProcessExecutor(SkillExecutor):
                 self._run_in_process,
                 skill,
                 input_data,
-                skill_context
+                context
             )
             
             logger.debug(f"[ProcessExecutor] Success: {skill.spec.name}")

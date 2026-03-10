@@ -237,6 +237,8 @@ export function TaskEventListener() {
       if (type === "task.completed") {
         const failed = payload?.task?.status === "FAILED";
         updateTaskStatus(failed ? "failed" : "completed");
+        setIsTyping(false);
+        useChatStore.getState().setCanCancel(false);
         if (currentTaskMessageId) {
           updateMessage(currentTaskMessageId, {
             taskStatus: failed ? "failed" : "completed",
@@ -273,6 +275,7 @@ export function TaskEventListener() {
               failedSteps: backendSummary.failed_steps,
               durationMs: backendSummary.duration_ms,
               hadApproval,
+              success: backendSummary.success ?? (backendSummary.failed_steps === 0 && backendSummary.total_steps > 0),
               keyOutputs: (backendSummary.key_outputs ?? []).map((o: any) => ({
                 stepName: o.step_name,
                 skillName: o.skill_name,
@@ -295,6 +298,7 @@ export function TaskEventListener() {
                 failedSteps: failedSteps.length,
                 durationMs: Date.now() - startMs,
                 hadApproval,
+                success: failedSteps.length === 0 && activeTask.steps.length > 0,
                 keyOutputs: completedSteps
                   .filter((s) => s.output_result)
                   .slice(-3)
@@ -316,6 +320,8 @@ export function TaskEventListener() {
           });
         }
 
+        setIsTyping(false);
+        useChatStore.getState().setCanCancel(false);
         setCurrentTaskMessageId(null);
       }
 

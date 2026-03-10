@@ -20,6 +20,7 @@ class SideEffect(str, Enum):
     NETWORK = "network"
     EXEC = "exec"
     HUMAN = "human"
+    BROWSER = "browser"  # 浏览器自动化：需要联网沙箱（browser sandbox）
 
 
 class SkillRiskLevel(str, Enum):

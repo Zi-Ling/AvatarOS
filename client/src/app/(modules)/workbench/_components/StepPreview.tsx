@@ -4,6 +4,7 @@ import {
   Cpu,
   FolderSearch,
   FileText,
+  Folder,
   Code2,
   Globe,
   Database,
@@ -141,7 +142,7 @@ export function OutputBlock({ parsed, skillName }: { parsed: any; skillName?: st
   }
 
   if (skillName === 'fs.list') {
-    const items: string[] = parsed.files ?? parsed.items ?? parsed.result ?? [];
+    const items: any[] = parsed.files ?? parsed.items ?? parsed.result ?? [];
     if (Array.isArray(items)) {
       return (
         <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
@@ -149,12 +150,25 @@ export function OutputBlock({ parsed, skillName }: { parsed: any; skillName?: st
             目录内容 ({items.length} 项)
           </div>
           <div className="p-2 max-h-60 overflow-y-auto">
-            {items.map((item, i) => (
-              <div key={i} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-mono text-slate-600 dark:text-slate-400">
-                <FileText className="w-3 h-3 text-slate-400 shrink-0" />
-                {String(item)}
-              </div>
-            ))}
+            {items.map((item, i) => {
+              const name = typeof item === 'object' && item !== null
+                ? (item.name ?? item.path ?? JSON.stringify(item))
+                : String(item);
+              const isDir = typeof item === 'object' && item !== null && item.type === 'directory';
+              return (
+                <div key={i} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-mono text-slate-600 dark:text-slate-400">
+                  {isDir
+                    ? <Folder className="w-3 h-3 text-indigo-400 shrink-0" />
+                    : <FileText className="w-3 h-3 text-slate-400 shrink-0" />}
+                  <span className={isDir ? 'text-indigo-500 font-medium' : ''}>{name}</span>
+                  {typeof item === 'object' && item?.size != null && (
+                    <span className="ml-auto text-slate-300 dark:text-slate-600 text-[10px]">
+                      {item.size < 1024 ? `${item.size}B` : item.size < 1048576 ? `${(item.size / 1024).toFixed(1)}KB` : `${(item.size / 1048576).toFixed(1)}MB`}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       );

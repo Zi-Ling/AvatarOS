@@ -1,7 +1,30 @@
 FROM python:3.13-slim
 
-# 预装常用数据处理包，一劳永逸
-# 避免 Planner 规划时因包缺失导致沙箱崩溃
+# Chromium 运行时 OS 依赖（browser.run skill 需要）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libdbus-1-3 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libatspi2.0-0 \
+    libwayland-client0 \
+    fonts-noto-cjk \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python 依赖（数据处理 + 网络 + 浏览器自动化）
 RUN pip install --no-cache-dir \
     numpy \
     pandas \
@@ -13,9 +36,14 @@ RUN pip install --no-cache-dir \
     httpx \
     beautifulsoup4 \
     lxml \
-    pydantic
+    pydantic \
+    playwright
 
-# 不安装 pip 以外的包管理工具，保持镜像最小化
-# 网络模式为 none，容器内无法联网，所有依赖必须预装
+# 安装 Chromium（仅 chromium，节省空间）
+RUN playwright install chromium
+
+# 网络模式由容器启动参数控制，不由镜像决定：
+#   python.run  → network_mode=none   （无网络，代码沙箱）
+#   browser.run → network_mode=bridge （有网络，浏览器沙箱）
 
 CMD ["sleep", "infinity"]

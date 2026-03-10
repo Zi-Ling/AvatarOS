@@ -16,7 +16,7 @@ from app.avatar.memory.manager import MemoryManager
 from app.avatar.learning.manager import LearningManager
 from app.avatar.perception.vision.processor import ImageProcessor
 from .session import save_message_to_session, get_session_messages
-from .chat_service import (
+from .service import (
     handle_message_with_route,
     stream_chat_response,
     update_session_last_output,

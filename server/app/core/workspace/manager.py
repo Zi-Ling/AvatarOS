@@ -232,3 +232,21 @@ def get_workspace_manager() -> WorkspaceManager:
         raise RuntimeError("WorkspaceManager 未初始化")
     return workspace_manager
 
+
+def get_current_workspace() -> Path:
+    """
+    获取当前 workspace 路径 — 全局唯一入口。
+
+    所有需要 user workspace 路径的地方统一调此函数，
+    不再散落 workspace_manager.get_workspace() / self.base_path 等多种写法。
+
+    fallback 顺序：
+      1. WorkspaceManager（已初始化）→ 动态取当前值，切换立即生效
+      2. config.avatar_workspace → 启动配置默认值
+    """
+    try:
+        return get_workspace_manager().get_workspace()
+    except RuntimeError:
+        from app.core.config import config
+        return config.avatar_workspace.resolve()
+

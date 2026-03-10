@@ -29,6 +29,7 @@ from .wasm import WASMExecutor
 from .kata import KataExecutor
 from .firecracker import FirecrackerExecutor
 from .sandbox import SandboxExecutor
+from .browser_sandbox import BrowserSandboxExecutor
 from .wasm_plugin import WasmPluginExecutor
 from app.avatar.skills.base import SkillRiskLevel, SideEffect
 
@@ -58,6 +59,7 @@ class ExecutorFactory:
     _docker_executor: Optional[DockerExecutor] = None
     _firecracker_executor: Optional[FirecrackerExecutor] = None
     _sandbox_executor: Optional[SandboxExecutor] = None
+    _browser_sandbox_executor: Optional[BrowserSandboxExecutor] = None
     
     # 执行器优先级映射（用于 AUTO 模式）
     _executor_priority = {
@@ -87,6 +89,11 @@ class ExecutorFactory:
 
         skill_name = skill.spec.name
         logger.debug(f"[ExecutorFactory] Selecting executor for {skill_name} (risk={risk_level}, side_effects={side_effects})")
+
+        # Guardrail: BROWSER side_effect → 强制 Browser Sandbox（联网隔离容器）
+        if SideEffect.BROWSER in side_effects:
+            logger.debug(f"[ExecutorFactory] {skill_name} has BROWSER side_effect, routing to BrowserSandboxExecutor")
+            return cls._get_browser_sandbox_executor()
 
         # Guardrail: EXEC side_effect → 强制 SANDBOX
         if SideEffect.EXEC in side_effects:
@@ -129,6 +136,18 @@ class ExecutorFactory:
             logger.info("[ExecutorFactory] Created SandboxExecutor instance")
         
         return cls._sandbox_executor
+
+    @classmethod
+    def _get_browser_sandbox_executor(cls) -> SkillExecutor:
+        """
+        获取 Browser Sandbox 执行器（联网隔离容器）
+
+        使用 avatar-browser:latest 镜像，bridge 网络模式。
+        """
+        if cls._browser_sandbox_executor is None:
+            cls._browser_sandbox_executor = BrowserSandboxExecutor()
+            logger.info("[ExecutorFactory] Created BrowserSandboxExecutor instance")
+        return cls._browser_sandbox_executor
     
     @classmethod
     def _get_executor_instance(cls, executor_type: str) -> Optional[SkillExecutor]:
@@ -307,6 +326,10 @@ class ExecutorFactory:
         if cls._docker_executor:
             cls._docker_executor.cleanup()
             cls._docker_executor = None
+
+        if cls._browser_sandbox_executor:
+            cls._browser_sandbox_executor.cleanup()
+            cls._browser_sandbox_executor = None
         
         if cls._firecracker_executor:
             cls._firecracker_executor.cleanup()

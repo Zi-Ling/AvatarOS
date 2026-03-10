@@ -167,7 +167,7 @@ class PlannerGuard:
 
         # 3. Workspace isolation (Requirement 31.8, 31.9)
         if self.config.enforce_workspace_isolation:
-            self._check_workspace_isolation(patch, result, context=context)
+            await self._check_workspace_isolation(patch, result, context=context)
             if not result.approved:
                 return result
 
@@ -281,7 +281,7 @@ class PlannerGuard:
                     )
                     result.add_approval_required(capability_name)
 
-    def _check_workspace_isolation(
+    async def _check_workspace_isolation(
         self,
         patch: 'GraphPatch',
         result: ValidationResult,
@@ -289,12 +289,13 @@ class PlannerGuard:
     ) -> None:
         """
         Check that file operations stay within workspace root.
+        - Relative paths: always allowed (resolved against workspace at runtime)
+        - Absolute paths inside workspace: allowed
+        - Absolute paths outside workspace: require user approval via ApprovalService
         Requirements: 31.8, 31.9
         """
         from app.avatar.runtime.graph.models.graph_patch import PatchOperation
 
-        # 优先使用运行时 context 里的 workspace_path（session 动态路径）
-        # 降级到 config.workspace_root（静态初始化路径）
         workspace_path = (
             (context or {}).get("workspace_path")
             or self.config.workspace_root
@@ -310,33 +311,110 @@ class PlannerGuard:
                 continue
 
             capability_name = action.node.capability_name
-            # Check file-related capabilities
-            if not any(capability_name.startswith(prefix) for prefix in ("fs.", "file", "python.run")):
+            if not any(capability_name.startswith(prefix) for prefix in ("fs.", "file")):
                 continue
 
-            # Check path parameters
+            # 收集所有需要检查的路径（支持 str 和 list[dict] 批量参数）
+            paths_to_check: List[str] = []
             for param_name, param_value in action.node.params.items():
-                if not isinstance(param_value, str):
-                    continue
-                if not any(kw in param_name.lower() for kw in ("path", "file", "dir", "output")):
-                    continue
+                if isinstance(param_value, str):
+                    # 单路径参数：只检查明确是路径的 key 名
+                    if any(kw in param_name.lower() for kw in ("path", "file", "dir", "src", "dst", "output")):
+                        paths_to_check.append(param_value)
+                elif isinstance(param_value, list):
+                    # 批量参数：moves=[{src,dst}], copies=[{src,dst}], paths=[str,...]
+                    for item in param_value:
+                        if isinstance(item, str):
+                            paths_to_check.append(item)
+                        elif isinstance(item, dict):
+                            for v in item.values():
+                                if isinstance(v, str):
+                                    paths_to_check.append(v)
+
+            for path_val in paths_to_check:
+                if not os.path.isabs(path_val):
+                    continue  # 相对路径在运行时绑定到 workspace，安全
 
                 try:
-                    # 相对路径以 workspace 为基准解析，绝对路径直接用
-                    if os.path.isabs(param_value):
-                        abs_path_p = _Path(os.path.normpath(param_value))
-                    else:
-                        abs_path_p = _Path(os.path.normpath(os.path.join(str(workspace_p), param_value)))
-                    # 用 Path.is_relative_to 做路径包含检查（Windows 大小写不敏感，无 startswith 边界问题）
-                    try:
-                        abs_path_p.relative_to(workspace_p)
-                    except ValueError:
+                    abs_p = _Path(os.path.normpath(path_val))
+                    abs_p.relative_to(workspace_p)
+                    # 在 workspace 内，允许
+                except ValueError:
+                    # 绝对路径在 workspace 外 → 需要用户确认
+                    approved = await self._request_path_approval(
+                        node_id=action.node.id,
+                        capability_name=capability_name,
+                        path_val=path_val,
+                        workspace_p=workspace_p,
+                        context=context or {},
+                    )
+                    if not approved:
                         result.add_violation(
-                            f"Node '{action.node.id}' param '{param_name}' path '{param_value}' "
-                            f"is outside workspace '{workspace_p}'"
+                            f"Node '{action.node.id}' accesses path '{path_val}' "
+                            f"outside workspace '{workspace_p}' — denied by user"
                         )
                 except Exception:
-                    pass  # Skip non-path values
+                    pass
+
+    async def _request_path_approval(
+        self,
+        node_id: str,
+        capability_name: str,
+        path_val: str,
+        workspace_p: Any,
+        context: Dict[str, Any],
+    ) -> bool:
+        """向用户请求 workspace 外路径访问授权，返回是否批准。"""
+        if not self.approval_manager:
+            # 没有 approval_manager 时保守拒绝
+            logger.warning(
+                f"[PlannerGuard] No ApprovalService: blocking out-of-workspace path '{path_val}'"
+            )
+            return False
+
+        import uuid
+        request_id = str(uuid.uuid4())
+        self.approval_manager.create_request(
+            request_id=request_id,
+            message=(
+                f"Skill '{capability_name}' wants to access path outside workspace:\n"
+                f"  Path: {path_val}\n"
+                f"  Workspace: {workspace_p}\n"
+                f"Allow this operation?"
+            ),
+            operation=capability_name,
+            step_id=node_id,
+            details={
+                "path": path_val,
+                "workspace": str(workspace_p),
+                "goal": context.get("goal", ""),
+            },
+        )
+        logger.info(
+            f"[PlannerGuard] Approval requested for out-of-workspace path: "
+            f"node={node_id}, path={path_val}, request_id={request_id}"
+        )
+        try:
+            approved = await self.approval_manager.wait_for_approval(request_id)
+        except TimeoutError:
+            logger.warning(f"[PlannerGuard] Approval timeout for path '{path_val}', denying")
+            return False
+
+        if approved:
+            # 批准后写入 grant store，供 skill 执行层通过 check_path_access() 放行
+            self.approval_manager.create_grant(
+                path_pattern=path_val,
+                operations=["read", "write", "delete"],
+                scope="session",
+                scope_id=context.get("exec_session_id"),
+                approval_request_id=request_id,
+            )
+            logger.info(
+                f"[PlannerGuard] Grant created for approved path: {path_val}, "
+                f"scope_id={context.get('exec_session_id')!r}"
+            )
+
+        return approved
 
     def _check_cycles(
         self,

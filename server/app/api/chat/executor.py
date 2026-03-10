@@ -359,6 +359,7 @@ async def execute_task(
         return
 
     # 可执行的任务
+    task_start_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     try:
         runtime = avatar_router.runtime
         resolved_goal = decision.goal or user_message
@@ -465,7 +466,6 @@ async def execute_task(
         task_cancel_event = cancellation_mgr.register_task(initial_intent.id, session_id)
         logger.info(f"[TaskExecution] 已注册任务: {initial_intent.id}")
 
-        task_start_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         try:
             run_record = await runtime.run_intent(
                 initial_intent, task_mode=decision.task_mode, cancel_event=task_cancel_event,
@@ -479,8 +479,10 @@ async def execute_task(
             logger.info(f"[TaskExecution] 已注销任务: {initial_intent.id}")
 
     except RuntimeError as e:
+        _failed_run = getattr(e, "_run_record", None)
         return await _handle_planning_failure(
             e, avatar_router, decision, user_message, session_id, prefix_content,
+            run_record=_failed_run, task_start_ms=task_start_ms if 'task_start_ms' in dir() else 0,
         )
     except Exception as e:
         # 兜底：防止 fire-and-forget 任务异常丢失
@@ -645,51 +647,72 @@ async def _emit_plan_and_steps(run_record, intent, session_id: str):
         logger.error(f"[_emit_plan_and_steps] Failed to emit task.completed: {e}", exc_info=True)
 
 
-async def _handle_planning_failure(error, avatar_router, decision, user_message, session_id, prefix_content):
+async def _handle_planning_failure(error, avatar_router, decision, user_message, session_id, prefix_content, run_record=None, task_start_ms: int = 0):
     """处理任务执行失败（RuntimeError）的优雅降级，通过 Socket 推送结果"""
     from .session import save_message_to_session
 
     logger.warning(f"[TaskExecution] Task failed for goal='{decision.goal}': {error}")
     user_language = _detect_language(user_message)
-    error_class = _classify_execution_error(error)
+
+    # 从 graph nodes 取真实错误信息（比 RuntimeError 包装的更具体）
+    graph = getattr(run_record, "_graph", None)
+    skill_error_msg = ""
+    if graph and graph.nodes:
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+        failed_nodes = [n for n in graph.nodes.values() if n.status == NodeStatus.FAILED]
+        if failed_nodes:
+            # 取第一个失败节点的 outputs.message 或 outputs.error（skill 返回的原始错误）
+            for fn in failed_nodes:
+                outputs = fn.outputs or {}
+                skill_error_msg = (
+                    outputs.get("message") or outputs.get("error") or fn.error_message or ""
+                )
+                if skill_error_msg:
+                    break
+
+    # 用 skill 原始错误分类，比 RuntimeError 包装更准确
+    error_for_classify = skill_error_msg or str(error)
+    error_class = _classify_execution_error(Exception(error_for_classify))
 
     if error_class == "infra":
-        # 基础设施错误：LLM 无额外信息，直接给友好提示
         if user_language == "zh":
             result_msg = f"{prefix_content}⚠️ 沙箱暂时不可用，请稍后重试。"
         else:
             result_msg = f"{prefix_content}⚠️ Sandbox is temporarily unavailable. Please try again later."
 
     elif error_class == "code":
-        # 代码错误：LLM 分析 traceback，给出修复建议
         analysis = await _analyze_code_error(
             llm_client=avatar_router.llm,
             goal=decision.goal or user_message,
-            error_detail=str(error),
+            error_detail=error_for_classify,
             user_language=user_language,
         )
         if analysis:
-            if user_language == "zh":
-                result_msg = f"{prefix_content}❌ 代码执行失败\n\n{analysis}"
-            else:
-                result_msg = f"{prefix_content}❌ Code execution failed\n\n{analysis}"
+            result_msg = f"{prefix_content}❌ 代码执行失败\n\n{analysis}" if user_language == "zh" else f"{prefix_content}❌ Code execution failed\n\n{analysis}"
         else:
-            if user_language == "zh":
-                result_msg = f"{prefix_content}❌ 代码执行失败，请检查代码逻辑后重试。"
-            else:
-                result_msg = f"{prefix_content}❌ Code execution failed. Please check your code and retry."
+            result_msg = f"{prefix_content}❌ 代码执行失败，请检查代码逻辑后重试。" if user_language == "zh" else f"{prefix_content}❌ Code execution failed. Please check your code and retry."
 
     else:
-        # 未知错误：简洁提示，不暴露堆栈
-        if user_language == "zh":
-            result_msg = f"{prefix_content}❌ 任务执行失败，请稍后重试。"
+        # skill 业务失败（如 DNS 解析失败、HTTP 错误）：直接透传 skill 错误信息
+        if skill_error_msg:
+            if user_language == "zh":
+                result_msg = f"{prefix_content}❌ 任务执行失败：{skill_error_msg}"
+            else:
+                result_msg = f"{prefix_content}❌ Task failed: {skill_error_msg}"
         else:
-            result_msg = f"{prefix_content}❌ Task execution failed. Please try again."
+            if user_language == "zh":
+                result_msg = f"{prefix_content}❌ 任务执行失败，请稍后重试。"
+            else:
+                result_msg = f"{prefix_content}❌ Task execution failed. Please try again."
 
     save_message_to_session(session_id, "assistant", result_msg)
     await socket_manager.emit("server_event", {
         "type": "task.summary",
-        "payload": {"session_id": session_id, "content": result_msg},
+        "payload": {
+            "session_id": session_id,
+            "content": result_msg,
+            "run_summary": _build_run_summary_payload(graph, run_record, task_start_ms),
+        },
     })
 
 
@@ -728,6 +751,7 @@ def _build_run_summary_payload(graph, run_record, start_time_ms: int = 0) -> dic
             "failed_steps": failed,
             "duration_ms": duration_ms,
             "key_outputs": key_outputs[-3:],  # 最多 3 个
+            "success": failed == 0 and total > 0,
         }
 
     # fallback: DB steps
@@ -742,9 +766,10 @@ def _build_run_summary_payload(graph, run_record, start_time_ms: int = 0) -> dic
             "failed_steps": failed,
             "duration_ms": 0,
             "key_outputs": [],
+            "success": failed == 0 and total > 0,
         }
 
-    return {"total_steps": 0, "completed_steps": 0, "failed_steps": 0, "duration_ms": 0, "key_outputs": []}
+    return {"total_steps": 0, "completed_steps": 0, "failed_steps": 0, "duration_ms": 0, "key_outputs": [], "success": False}
 
 
 async def _format_and_push_result(run_record, decision, avatar_router, session_id, prefix_content, memory_manager=None, task_start_ms: int = 0):

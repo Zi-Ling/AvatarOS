@@ -9,6 +9,9 @@ from typing import Dict, List, Any, Optional, TYPE_CHECKING
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
+
+from app.core.workspace.manager import get_current_workspace
 
 if TYPE_CHECKING:
     from app.avatar.runtime.graph.models.execution_graph import ExecutionGraph
@@ -43,9 +46,10 @@ class GraphExecutor:
         transformer_registry: Optional[Dict[str, Any]] = None,
         artifact_store: Optional['ArtifactStore'] = None,
         granted_permissions: Optional[List[str]] = None,
-        base_path: Optional[Any] = None,
+        base_path: Optional[Any] = None,          # fallback，WorkspaceManager 未初始化时使用
+        workspace_manager: Optional[Any] = None,  # 已废弃，保留向后兼容，不再使用
         memory_manager: Optional[Any] = None,
-        workspace: Optional[Any] = None,   # SessionWorkspace — 传给 SkillContext.extra
+        workspace: Optional[Any] = None,          # SessionWorkspace — 传给 SkillContext.extra
         # Legacy params kept for backward compat during transition
         capability_registry: Optional[Any] = None,
         type_registry: Optional[Any] = None,
@@ -53,10 +57,26 @@ class GraphExecutor:
         self.transformer_registry = transformer_registry or {}
         self.artifact_store = artifact_store
         self.granted_permissions: List[str] = granted_permissions or []
-        self.base_path = base_path
+        self._fallback_base_path = Path(base_path) if base_path else Path(".")
         self.memory_manager = memory_manager
         self.workspace = workspace
         logger.info("GraphExecutor initialized")
+
+    @property
+    def base_path(self) -> Path:
+        """当前生效的 workspace 路径（动态，随 WorkspaceManager 切换而变化）。"""
+        return self._get_base_path()
+
+    def _get_base_path(self) -> Path:
+        """
+        获取当前 user workspace 路径。
+        统一走 get_current_workspace()，workspace 切换后立即生效。
+        """
+        try:
+            return get_current_workspace()
+        except Exception as e:
+            logger.warning(f"[GraphExecutor] get_current_workspace() failed: {e}")
+            return self._fallback_base_path
 
     async def execute_node(
         self,
@@ -223,7 +243,6 @@ class GraphExecutor:
         from app.avatar.skills.registry import skill_registry
         from app.avatar.runtime.executor.factory import ExecutorFactory
         from app.avatar.skills.context import SkillContext
-        from pathlib import Path
 
         skill_cls = skill_registry.get(skill_name)
 
@@ -233,22 +252,40 @@ class GraphExecutor:
                 f"Available: {list(skill_registry._skills.keys())}"
             )
 
-        base_path = Path(self.base_path) if self.base_path else Path(".")
-
-        # workspace.root 作为 base_path：读写都基于 workspace 根目录
-        # 写操作由 Planner 负责指定 output/ 前缀路径
-        if self.workspace is not None:
-            base_path = self.workspace.root
+        # base_path 始终用 user workspace，保证 fs.read/write 等 skill 路径正确。
+        # session_workspace 单独通过 extra["workspace"] 传递给需要它的 skill（如 net.download、python.run）。
+        base_path = self._get_base_path()
 
         # python.run: inject upstream node outputs as variables
         if skill_name == "python.run" and context is not None:
             params = self._inject_node_outputs_into_code(params, context)
 
+        # 构建 extra：workspace + file_registry（懒初始化，存储在 ~/.avatar/）
+        extra: Dict[str, Any] = {}
+        if self.workspace is not None:
+            extra["workspace"] = self.workspace
+        # 注入 exec_session_id，子进程查 Grant 时用于 scope_id 精确匹配
+        if context is not None and getattr(context, "env", None):
+            _exec_sid = context.env.get("exec_session_id") if isinstance(context.env, dict) else None
+            if _exec_sid:
+                extra["exec_session_id"] = _exec_sid
+                logger.debug(f"[GraphExecutor] Injected exec_session_id={_exec_sid!r} into SkillContext.extra")
+            else:
+                logger.warning(f"[GraphExecutor] exec_session_id not found in context.env for skill={skill_name}")
+        try:
+            from app.avatar.runtime.storage.file_registry import FileRegistry
+            if not hasattr(self, "_file_registry") or self._file_registry is None:
+                self._file_registry = FileRegistry()
+            extra["file_registry"] = self._file_registry
+        except Exception as e:
+            logger.warning(f"[GraphExecutor] FileRegistry init failed: {e}")
+
         ctx = SkillContext(
             base_path=base_path,
+            workspace_root=base_path,
             dry_run=False,
             memory_manager=self.memory_manager,
-            extra={"workspace": self.workspace} if self.workspace is not None else {},
+            extra=extra,
         )
 
         try:
@@ -261,11 +298,29 @@ class GraphExecutor:
         result = await executor.execute(skill_instance, input_obj, ctx)
 
         if hasattr(result, "model_dump"):
-            return result.model_dump()
+            result_dict = result.model_dump()
         elif isinstance(result, dict):
-            return result
+            result_dict = result
         else:
-            return {"output": str(result), "success": True}
+            result_dict = {"output": str(result), "success": True}
+
+        # 主进程注册文件产物到 FileRegistry（skill 在子进程里无法访问 registry）
+        registry = extra.get("file_registry")
+        if registry is not None and result_dict.get("success") and result_dict.get("file_path"):
+            try:
+                from pathlib import Path as _Path
+                registry.register(
+                    file_path=_Path(result_dict["file_path"]),
+                    sha256=result_dict.get("sha256", ""),
+                    size=result_dict.get("size", 0),
+                    mime_type=result_dict.get("mime_type", ""),
+                    source_url=result_dict.get("url", ""),
+                    skill_name=skill_name,
+                )
+            except Exception as e:
+                logger.warning(f"[GraphExecutor] FileRegistry registration failed: {e}")
+
+        return result_dict
 
     # Keep _execute_sequential for backward compat with existing tests
     async def _execute_sequential(self, capability_or_skill, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -290,14 +345,18 @@ class GraphExecutor:
                         f"Skill '{skill_name}' not found (required by '{capability_or_skill.name}')"
                     )
 
-                base_path = Path(self.base_path) if self.base_path else Path(".")
+                base_path = self._get_base_path()
+                extra: Dict[str, Any] = {}
                 if self.workspace is not None:
-                    base_path = self.workspace.root
+                    extra["workspace"] = self.workspace
+                if hasattr(self, "_file_registry") and self._file_registry is not None:
+                    extra["file_registry"] = self._file_registry
                 ctx = SkillContext(
                     base_path=base_path,
+                    workspace_root=base_path,
                     dry_run=False,
                     memory_manager=self.memory_manager,
-                    extra={"workspace": self.workspace} if self.workspace is not None else {},
+                    extra=extra,
                 )
 
                 try:
@@ -325,45 +384,156 @@ class GraphExecutor:
         context: 'ExecutionContext',
     ) -> Dict[str, Any]:
         """
-        Prepend completed node outputs as Python variable assignments to the code.
+        把上游节点输出写成 typed input artifacts，通过文件传入容器。
 
-        For each completed node, injects:
-            {node_id}_output = <value>
+        每个上游输出写成一个 JSON 文件（对于 JSON 可序列化的值），
+        或直接引用文件路径（对于文件产物）。
+        同时写一个 manifest.json 列出所有输入。
 
-        This lets Planner reference upstream data by variable name without
-        embedding content as string literals in the prompt.
+        容器内固定读取方式：
+            import json
+            with open('/workspace/inputs/{node_id}_output.json') as f:
+                {node_id}_output = json.load(f)
 
-        The primary output value is chosen with the same priority used by
-        _graph_to_task: stdout > output > content > full outputs dict.
+        结构化输出协议：
+            调用 _output(value) 把结构化数据传给下游节点。
+            框架从 stdout 中识别 __OUTPUT__:<json> 标记行提取数据。
+
+        文件路径产物（file_path 字段）直接映射为容器内路径，不再 JSON 化内容。
         """
+        from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH
+
         all_outputs = context.get_all_node_outputs()
         if not all_outputs:
-            return params
+            return self._inject_output_helper(params)
+
+        if self.workspace is None:
+            return self._inject_node_outputs_repr_fallback(params, context)
+
+        workspace_root = str(Path(self.workspace.root).resolve())
+        inputs_dir = Path(self.workspace.root) / "inputs"
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest: Dict[str, Any] = {}
+        load_lines: List[str] = []
+
+        for node_id, outputs in all_outputs.items():
+            if not outputs:
+                continue
+            if isinstance(outputs, dict) and set(outputs.keys()) == {"__artifacts__"}:
+                continue
+
+            var_name = f"{node_id}_output"
+
+            # 提取最有意义的值：结构化输出优先于原始打印
+            value = (
+                outputs.get("output")
+                or outputs.get("content")
+                or outputs.get("stdout")
+                or outputs
+            )
+
+            # 文件路径产物：直接映射容器内路径，不 JSON 化内容
+            file_path_str = outputs.get("file_path") if isinstance(outputs, dict) else None
+            if file_path_str:
+                host_path = str(Path(file_path_str).resolve())
+                if host_path.startswith(workspace_root):
+                    rel = host_path[len(workspace_root):].lstrip("/\\").replace("\\", "/")
+                    container_path = f"{CONTAINER_WORKSPACE_PATH}/{rel}"
+                else:
+                    container_path = host_path.replace("\\", "/")
+                manifest[var_name] = {
+                    "format": "file_ref",
+                    "container_path": container_path,
+                    "type": type(value).__name__,
+                }
+                load_lines.append(f'{var_name} = "{container_path}"')
+                continue
+
+            # 结构化数据：序列化为 JSON 文件
+            json_filename = f"{var_name}.json"
+            json_path = inputs_dir / json_filename
+            container_json_path = f"{CONTAINER_WORKSPACE_PATH}/inputs/{json_filename}"
+
+            try:
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(value, f, ensure_ascii=False, default=str)
+                manifest[var_name] = {
+                    "format": "json",
+                    "container_path": container_json_path,
+                    "type": type(value).__name__,
+                }
+                load_lines.append(
+                    f'with open("{container_json_path}", encoding="utf-8") as _f:\n'
+                    f'    {var_name} = json.load(_f)'
+                )
+            except Exception as e:
+                logger.warning(f"[GraphExecutor] Failed to serialize {var_name} to JSON: {e}, falling back to repr")
+                repr_val = repr(value)
+                load_lines.append(f"{var_name} = {repr_val}")
+                manifest[var_name] = {"format": "repr_fallback", "type": type(value).__name__}
+
+        # 写 manifest.json
+        manifest_path = inputs_dir / "manifest.json"
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"[GraphExecutor] Failed to write manifest: {e}")
+
+        if not load_lines:
+            return self._inject_output_helper(params)
+
+        injected_prefix = "import json\n" + "\n".join(load_lines) + "\n\n"
+        original_code = params.get("code", "")
+        return {**params, "code": injected_prefix + self._output_helper_code() + original_code}
+
+    # ------------------------------------------------------------------
+    # _output() 显式结构化输出通道
+    # ------------------------------------------------------------------
+
+    _OUTPUT_MARKER = "__OUTPUT__:"
+
+    def _output_helper_code(self) -> str:
+        """注入到每个 python.run 代码头部的 _output() 函数定义"""
+        marker = self._OUTPUT_MARKER
+        return (
+            "import json as _json\n"
+            f"def _output(value):\n"
+            f"    print('{marker}' + _json.dumps(value, ensure_ascii=False, default=str))\n"
+            "\n"
+        )
+
+    def _inject_output_helper(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """无上游输出时，仅注入 _output() helper"""
+        original_code = params.get("code", "")
+        return {**params, "code": self._output_helper_code() + original_code}
+
+    def _inject_node_outputs_repr_fallback(
+        self,
+        params: Dict[str, Any],
+        context: 'ExecutionContext',
+    ) -> Dict[str, Any]:
+        """无 session workspace 时的兜底：repr 注入（旧行为）+ _output() helper"""
+        all_outputs = context.get_all_node_outputs()
 
         lines: List[str] = []
         for node_id, outputs in all_outputs.items():
             if not outputs:
                 continue
-            # Pick the most meaningful scalar value
             value = (
-                outputs.get("stdout")
-                or outputs.get("output")
+                outputs.get("output")
                 or outputs.get("content")
+                or outputs.get("stdout")
                 or outputs
             )
-            # Skip internal artifact keys
             if isinstance(value, dict) and set(value.keys()) == {"__artifacts__"}:
                 continue
-            var_name = f"{node_id}_output"
-            repr_val = repr(value)
-            lines.append(f"{var_name} = {repr_val}")
+            lines.append(f"{node_id}_output = {repr(value)}")
 
-        if not lines:
-            return params
-
-        injected_prefix = "\n".join(lines) + "\n\n"
+        injected_prefix = "\n".join(lines) + "\n\n" if lines else ""
         original_code = params.get("code", "")
-        return {**params, "code": injected_prefix + original_code}
+        return {**params, "code": injected_prefix + self._output_helper_code() + original_code}
 
     async def _offload_large_outputs(
         self,

@@ -50,6 +50,7 @@ class KataExecutor(SkillExecutor):
         cpu_quota: int = 50000,
         use_pool: bool = True,  # 是否使用容器池
         pool_size: int = 4,  # 容器池大小（增加到 4）
+        network_mode: str = "none",  # 默认无网络；browser sandbox 传 "bridge"
     ):
         super().__init__()
         self.strategy = ExecutionStrategy.KATA
@@ -59,6 +60,7 @@ class KataExecutor(SkillExecutor):
         self.cpu_quota = cpu_quota
         self.use_pool = use_pool
         self.pool_size = pool_size
+        self.network_mode = network_mode
         self._docker_client = None
         self._available = False
         self._is_podman = False  # 初始化时检测一次，缓存结果
@@ -262,7 +264,7 @@ class KataExecutor(SkillExecutor):
                 runtime="kata",  # 使用 Kata Runtime
                 mem_limit=self.mem_limit,
                 cpu_quota=self.cpu_quota,
-                network_mode="none",  # 禁用网络
+                network_mode=self.network_mode,  # 默认 none，browser sandbox 传 bridge
                 detach=True,
             )
         )

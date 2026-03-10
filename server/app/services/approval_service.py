@@ -95,7 +95,8 @@ class ApprovalService:
             if grant.expires_at and grant.expires_at < now:
                 continue
             # 检查操作
-            if operation not in grant.operations and "*" not in grant.operations:
+            # operation="*" 表示"任意操作均可"，此时只要 grant 存在即视为匹配
+            if operation != "*" and operation not in grant.operations and "*" not in grant.operations:
                 continue
             # 检查路径（支持 glob 匹配）
             if fnmatch.fnmatch(path, grant.path_pattern) or path.startswith(grant.path_pattern.rstrip("*")):
@@ -180,8 +181,33 @@ class ApprovalService:
             session.commit()
 
         logger.info(f"[ApprovalService] Request created: {request_id}")
-        return {"request_id": request_id, "message": message, "operation": operation,
-                "status": ApprovalStatus.PENDING.value, "expires_at": expires_at.isoformat()}
+
+        # 通过 socket 推送审批请求给前端
+        payload = {
+            "request_id": request_id,
+            "message": message,
+            "operation": operation,
+            "status": ApprovalStatus.PENDING.value,
+            "expires_at": expires_at.isoformat(),
+            "task_id": task_id,
+            "step_id": step_id,
+            "details": details,
+        }
+        try:
+            from app.io.manager import SocketManager
+            socket_mgr = SocketManager.get_instance()
+            loop = asyncio.get_running_loop()
+            loop.create_task(socket_mgr.emit("server_event", {
+                "type": "approval_request",
+                "payload": payload,
+            }))
+        except RuntimeError:
+            # 不在 async 上下文（理论上不应发生，create_request 总在 async 路径调用）
+            logger.warning("[ApprovalService] No running event loop, approval_request socket push skipped")
+        except Exception as e:
+            logger.warning(f"[ApprovalService] Failed to push approval_request via socket: {e}")
+
+        return payload
 
     def get_request(self, request_id: str) -> Optional[Dict[str, Any]]:
         with Session(engine) as session:
@@ -267,7 +293,8 @@ class ApprovalService:
             raise ValueError(f"Invalid approval status: {req['status']}")
 
         if request_id not in self._pending_futures:
-            self._pending_futures[request_id] = asyncio.get_event_loop().create_future()
+            loop = asyncio.get_running_loop()
+            self._pending_futures[request_id] = loop.create_future()
 
         future = self._pending_futures[request_id]
         timeout = timeout_seconds or self.default_timeout

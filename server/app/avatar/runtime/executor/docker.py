@@ -18,6 +18,27 @@ from app.avatar.skills.base import SkillRiskLevel
 
 logger = logging.getLogger(__name__)
 
+_OUTPUT_MARKER = "__OUTPUT__:"
+
+
+def _extract_output_from_stdout(stdout: str):
+    """
+    从 stdout 中识别 __OUTPUT__:<json> 标记行，提取结构化输出。
+    找到则返回解析后的 Python 对象；未找到则返回原始 stdout 字符串。
+    多次调用 _output() 时取最后一次。
+    """
+    import json as _json
+    result = stdout  # 默认退回字符串
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_OUTPUT_MARKER):
+            payload = stripped[len(_OUTPUT_MARKER):]
+            try:
+                result = _json.loads(payload)
+            except Exception:
+                pass  # 解析失败则保持上一次结果
+    return result
+
 
 class DockerExecutor(SkillExecutor):
     """
@@ -38,6 +59,7 @@ class DockerExecutor(SkillExecutor):
         timeout: int = 30,
         use_pool: bool = True,  # 是否使用容器池
         pool_size: int = 4,  # 容器池大小（增加到 4）
+        network_mode: str = "none",  # 默认无网络；browser sandbox 传 "bridge"
     ):
         super().__init__()
         self.strategy = ExecutionStrategy.DOCKER
@@ -47,6 +69,7 @@ class DockerExecutor(SkillExecutor):
         self.timeout = timeout
         self.use_pool = use_pool
         self.pool_size = pool_size
+        self.network_mode = network_mode
         self._client = None
         self._available = False
         self._is_podman = False  # 初始化时检测一次，缓存结果
@@ -78,6 +101,7 @@ class DockerExecutor(SkillExecutor):
                     pool_size=self.pool_size,
                     mem_limit=self.mem_limit,
                     cpu_quota=self.cpu_quota,
+                    network_mode=self.network_mode,
                 )
                 self._pool.start()
                 logger.info(f"[DockerExecutor] Container pool started (size={self.pool_size})")
@@ -193,7 +217,9 @@ class DockerExecutor(SkillExecutor):
     
     def _run_container_sync(self, tmpdir: str, workspace_volumes: Optional[dict] = None) -> dict:
         """同步运行容器（在线程池中执行）"""
-        if self.use_pool and self._pool:
+        # 容器池里的容器创建时没有挂载 workspace volumes，
+        # 如果有 workspace_volumes 必须走 _run_without_pool（新建容器并挂载）
+        if self.use_pool and self._pool and not workspace_volumes:
             return self._run_with_pool(tmpdir)
         return self._run_without_pool(tmpdir, workspace_volumes)
     
@@ -223,13 +249,16 @@ class DockerExecutor(SkillExecutor):
             stderr = output[1].decode("utf-8") if output[1] else ""
 
             if exit_code == 0:
+                # 从 stdout 识别 __OUTPUT__: 标记行提取结构化输出
+                import json as _json
+                structured_output = _extract_output_from_stdout(stdout)
                 return {
                     "success": True,
                     "message": "Execution completed",
                     "stdout": stdout,
                     "stderr": stderr,
                     "result": stdout.strip() if stdout.strip() else None,
-                    "output": stdout.strip() if stdout.strip() else "",
+                    "output": structured_output,
                     "variables": {},
                 }
             else:
@@ -250,21 +279,55 @@ class DockerExecutor(SkillExecutor):
             self._pool.release(container, failed=exec_failed)
     
     def _run_without_pool(self, tmpdir: str, workspace_volumes: Optional[dict] = None) -> dict:
-        """不使用容器池执行（创建新容器），支持 workspace 挂载"""
-        # 基础 volumes：代码文件
-        volumes = {tmpdir: {"bind": "/workspace", "mode": "ro"}}
+        """不使用容器池执行（创建新容器），支持 workspace 挂载。
+        
+        对 Docker Desktop 在 Windows 上的间歇性连接断开做重试容错。
+        """
+        from .container_pool import _DOCKER_TRANSIENT_ERRORS
 
-        # 如果有 session workspace，覆盖挂载（rw，容器可写 /workspace/output）
+        _RETRIES = 3
+        _RETRY_DELAY = 2.0  # 秒
+
+        last_err: Optional[Exception] = None
+        for attempt in range(_RETRIES):
+            try:
+                return self._run_without_pool_once(tmpdir, workspace_volumes)
+            except _DOCKER_TRANSIENT_ERRORS as e:
+                last_err = e
+                if attempt < _RETRIES - 1:
+                    logger.warning(
+                        f"[DockerExecutor] Transient connection error (attempt {attempt + 1}/{_RETRIES}), "
+                        f"retrying in {_RETRY_DELAY}s: {e}"
+                    )
+                    import time
+                    time.sleep(_RETRY_DELAY)
+            except Exception:
+                raise
+
+        raise RuntimeError(
+            f"Docker execution failed after {_RETRIES} attempts due to connection errors: {last_err}"
+        )
+
+    def _run_without_pool_once(self, tmpdir: str, workspace_volumes: Optional[dict] = None) -> dict:
+        """单次尝试：创建新容器并执行，支持 workspace 挂载"""
         if workspace_volumes:
-            volumes = workspace_volumes
+            # workspace 模式：session root 挂到 /workspace，script.py 额外挂到 /script/script.py
+            # 这样容器内既能访问 /workspace/inputs/ 又能执行 /script/script.py
+            volumes = dict(workspace_volumes)
+            volumes[tmpdir] = {"bind": "/script", "mode": "ro"}
+            command = ["python", "/script/script.py"]
+        else:
+            # 基础模式：tmpdir 挂到 /workspace，执行 /workspace/script.py
+            volumes = {tmpdir: {"bind": "/workspace", "mode": "ro"}}
+            command = ["python", "/workspace/script.py"]
 
         container = self._client.containers.create(
             image=self.image,
-            command=["python", "/workspace/script.py"] if not workspace_volumes else ["python", "-c", open(os.path.join(tmpdir, "script.py")).read()],
+            command=command,
             volumes=volumes,
             mem_limit=self.mem_limit,
             cpu_quota=self.cpu_quota,
-            network_mode="none",
+            network_mode=self.network_mode,
             detach=True,
         )
         
@@ -276,13 +339,16 @@ class DockerExecutor(SkillExecutor):
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8")
             exit_code = result.get("StatusCode", 0)
             
+            # 尝试从 stdout 提取结构化输出（__OUTPUT__: 标记行协议）
+            structured_output = _extract_output_from_stdout(stdout)
+
             return {
                 "success": exit_code == 0,
                 "message": "Execution completed" if exit_code == 0 else f"Container exited with code {exit_code}",
                 "stdout": stdout,
                 "stderr": stderr,
                 "result": stdout.strip() if stdout.strip() and exit_code == 0 else None,
-                "output": stdout.strip() if exit_code == 0 else stderr,
+                "output": structured_output if exit_code == 0 else stderr,
                 "variables": {},
             }
         finally:

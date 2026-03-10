@@ -95,23 +95,24 @@ class _SkillCaller:
 
         skill_instance = skill_cls()
 
-        # 动态获取当前工作目录
-        current_workspace = self.base_path
-        if self.workspace_manager:
-            try:
-                current_workspace = self.workspace_manager.get_workspace()
-            except Exception as e:
-                logger.warning(f"Failed to get workspace from manager, using default: {e}")
+        # 动态获取当前工作目录（统一入口）
+        from app.core.workspace.manager import get_current_workspace
+        try:
+            current_workspace = get_current_workspace()
+        except Exception as e:
+            logger.warning(f"Failed to get current workspace, using default: {e}")
+            current_workspace = self.base_path
 
         ctx = SkillContext(
             base_path=current_workspace,
+            workspace_root=current_workspace,
             dry_run=self.dry_run,
             memory_manager=self.memory_manager,
             learning_manager=self.learning_manager,
             execution_context=self.execution_context,
             extra={
                 "step_ctx": step_ctx,
-                "user_request": self.user_request  # 传递用户原始请求
+                "user_request": self.user_request
             } if step_ctx else {"user_request": self.user_request}
         )
         
@@ -149,7 +150,7 @@ class AvatarMain:
         workspace_manager: Optional[Any] = None,
         use_tool_calling: bool = False,  # deprecated, kept for backward compat
     ) -> None:
-        self.base_path = Path(base_path)
+        self.base_path = Path(base_path).resolve()
         self.base_path.mkdir(parents=True, exist_ok=True)
         self.dry_run = dry_run
         self.llm_client = llm_client
@@ -286,11 +287,12 @@ class AvatarMain:
                 except Exception as ws_err:
                     logger.warning(f"[AvatarMain] Workspace/Artifact/Trace init failed: {ws_err}")
 
-                graph_executor = GraphExecutor(
-                    base_path=self.base_path,
+                self._graph_executor = GraphExecutor(
+                    base_path=self.base_path,  # fallback（WorkspaceManager 未初始化时）
                     memory_manager=self.memory_manager,
                     workspace=_workspace,
                 )
+                graph_executor = self._graph_executor
                 node_runner = NodeRunner(
                     executor=graph_executor,
                     workspace=_workspace,
@@ -373,13 +375,12 @@ class AvatarMain:
 
     async def run_task(self, task: Task) -> Task:
         from platform import system as get_os
-        # 动态获取当前工作目录
-        current_workspace = self.base_path
-        if self.workspace_manager:
-            try:
-                current_workspace = self.workspace_manager.get_workspace()
-            except Exception as e:
-                logger.warning(f"Failed to get workspace from manager, using default: {e}")
+        from app.core.workspace.manager import get_current_workspace
+        try:
+            current_workspace = get_current_workspace()
+        except Exception as e:
+            logger.warning(f"Failed to get current workspace, using default: {e}")
+            current_workspace = self.base_path
         
         env = {
             "os": get_os(),
@@ -470,6 +471,13 @@ class AvatarMain:
                 )
 
                 if graph_result.final_status == "failed":
+                    # 把 graph 挂到 run_record 上，让外部 catch 能读取节点错误信息
+                    _fail_result = RunStore.get(run_record.id)
+                    if _fail_result:
+                        _fail_result._graph = graph_result.graph
+                        err = RuntimeError(graph_result.error_message or "GraphController execution failed")
+                        err._run_record = _fail_result
+                        raise err
                     raise RuntimeError(graph_result.error_message or "GraphController execution failed")
 
                 RunStore.update_status(run_record.id, "completed", summary=f"✅ 成功完成任务：{task_record.title}")
@@ -502,13 +510,12 @@ class AvatarMain:
         return self.state.load_task(task_id)
 
     def _build_env_context(self, user_request: str = None) -> Dict[str, Any]:
-        # 动态获取当前工作目录
-        current_workspace = self.base_path
-        if self.workspace_manager:
-            try:
-                current_workspace = self.workspace_manager.get_workspace()
-            except Exception as e:
-                logger.warning(f"Failed to get workspace from manager, using default: {e}")
+        from app.core.workspace.manager import get_current_workspace
+        try:
+            current_workspace = get_current_workspace()
+        except Exception as e:
+            logger.warning(f"Failed to get current workspace, using default: {e}")
+            current_workspace = self.base_path
         
         # 架构重构：移除 Runtime 层的技能搜索
         # 职责下放：让 Planner 自己搜索技能（符合"谁决策，谁搜索"原则）
@@ -667,6 +674,7 @@ class AvatarMain:
             from app.avatar.skills.context import SkillContext
             fallback_ctx = SkillContext(
                 base_path=self.base_path,
+                workspace_root=self.base_path,
                 dry_run=self.dry_run,
                 memory_manager=self.memory_manager,
                 learning_manager=self.learning_manager

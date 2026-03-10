@@ -171,39 +171,72 @@ class GraphController:
     ) -> 'ExecutionResult':
         """
         Execute in ReAct mode (iterative planning).
-        
-        ReAct mode loop:
-        1. Plan next step
-        2. Validate patch
-        3. Apply patch to graph
-        4. Execute ready nodes
-        5. Check if terminal
-        6. Repeat
-        
-        Enforces limits:
-        - max_react_iterations: Maximum number of planning iterations (default: 200)
-        - max_graph_nodes: Maximum number of nodes in graph (default: 200)
-        
-        Requirements: 26.2, 26.5, 26.6, 26.8, 26.9, 19.6, 19.7, 19.8, 19.9
+
+        生命周期：
+          created -> planned（首个有效 plan 产出后）
+                  -> running（第一个节点开始执行时）
+                  -> completed/failed/cancelled（统一 finally 出口）
+
+        result_status 与 lifecycle status 分离：
+          lifecycle: completed / failed / cancelled
+          result:    success / partial_success / failed / unknown / cancelled
         """
+        import time
         from app.avatar.runtime.graph.models.execution_graph import ExecutionGraph
         from app.avatar.runtime.graph.models.graph_patch import PatchOperation
-        
-        # Get limits from config (Requirements 19.6, 19.7)
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+        from app.avatar.runtime.graph.lifecycle.execution_lifecycle import ExecutionLifecycle
+        from app.services.session_store import ExecutionSessionStore, InvalidTransitionError
+
         max_react_iterations = config.get('max_react_iterations', 200)
         max_graph_nodes = config.get('max_graph_nodes', 200)
-        
-        # Create empty graph
-        graph = ExecutionGraph(
-            goal=intent,
-            nodes={},
-            edges={},
+
+        # 创建 ExecutionSession
+        _workspace_path = env_context.get("workspace_path") or (
+            str(self.guard.config.workspace_root)
+            if self.guard and self.guard.config.workspace_root else ""
         )
-        # Propagate session_id and env into graph metadata so ExecutionContext picks them up
+        _policy_snap = None
+        _runtime_config_snap = {
+            "max_concurrent_graphs": self.max_concurrent_graphs,
+            "max_planner_invocations_per_graph": self.max_planner_invocations_per_graph,
+            "max_planner_tokens": self.max_planner_tokens,
+            "max_planner_calls": self.max_planner_calls,
+            "max_planner_cost": self.max_planner_cost,
+            "max_execution_cost": self.max_execution_cost,
+            "max_react_iterations": max_react_iterations,
+            "max_graph_nodes": max_graph_nodes,
+        }
+        if self.guard:
+            _policy_snap = {
+                "workspace_root": str(self.guard.config.workspace_root),
+                "enforce_workspace_isolation": self.guard.config.enforce_workspace_isolation,
+                "default_policy": self.guard.config.default_policy,
+                "max_nodes_per_patch": self.guard.config.max_nodes_per_patch,
+            }
+        _exec_session = ExecutionSessionStore.create(
+            goal=intent,
+            run_id=env_context.get("run_id"),
+            task_id=env_context.get("task_id"),
+            request_id=env_context.get("request_id"),
+            trace_id=env_context.get("trace_id"),
+            workspace_path=_workspace_path,
+            policy_snapshot=_policy_snap,
+            runtime_config_snapshot=_runtime_config_snap,
+        )
+        _exec_session_id = _exec_session.id
+        _lifecycle = ExecutionLifecycle(_exec_session_id)
+        await _lifecycle.on_session_start()
+
+        # 把 exec_session_id 写入 env_context，供 guard 创建 Grant 和 executor 查 Grant 时使用
+        env_context = dict(env_context)
+        env_context["exec_session_id"] = _exec_session_id
+
+        # Create empty graph
+        graph = ExecutionGraph(goal=intent, nodes={}, edges={})
         graph.metadata["session_id"] = env_context.get("session_id")
         graph.metadata["env"] = env_context
 
-        # 立即注册 graph id 别名，让前端在任务执行中就能用 graph id 取消
         on_graph_created = env_context.get("on_graph_created")
         if on_graph_created:
             try:
@@ -211,7 +244,6 @@ class GraphController:
             except Exception as _e:
                 logger.warning(f"[GraphController] on_graph_created failed: {_e}")
 
-        # 创建整个 ReAct 循环共享的 ExecutionContext，保证节点输出跨轮可见
         from app.avatar.runtime.graph.context.execution_context import ExecutionContext as _ExecCtx
         _session_id = env_context.get("session_id")
         _workspace = None
@@ -232,231 +264,245 @@ class GraphController:
             env=env_context,
             workspace=_workspace,
         )
-        
-        # Decompose goal into sub_goals for completion tracking (zero LLM calls)
+
         sub_goals = self._decompose_goal(intent)
         logger.info(f"[GoalTracker] Decomposed '{intent}' into {len(sub_goals)} sub-goals: {sub_goals}")
-        
-        # Track planner usage
+
         planner_invocations = 0
-        
-        # Extract cancel_event from env_context (set by task_executor)
         cancel_event = env_context.get("cancel_event")
 
-        # ReAct loop
-        while True:
-            # Check cancellation signal
-            if cancel_event is not None and cancel_event.is_set():
-                logger.info("[GraphController] Cancellation signal received, stopping ReAct loop")
-                from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                graph.status = GraphStatus.FAILED
-                return self._make_error_result(
-                    graph,
-                    error_message="Task cancelled by user"
-                )
+        # outcome 变量：统一 finally 出口通过它决定 lifecycle/result_status
+        _lifecycle_status = "failed"
+        _result_status = "unknown"
+        _error_message: Optional[str] = None
+        _final_result: Optional['ExecutionResult'] = None
 
-            # Check planner invocation limit
-            if planner_invocations >= self.max_planner_invocations_per_graph:
-                logger.error(
-                    f"Exceeded max_planner_invocations: {planner_invocations} >= "
-                    f"{self.max_planner_invocations_per_graph}"
-                )
-                from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                graph.status = GraphStatus.FAILED
-                return self._make_error_result(
-                    graph,
-                    error_message=f"Exceeded max planner invocations: {planner_invocations}"
-                )
-            
-            # Check ReAct iteration limit (Requirement 19.6, 19.8)
-            if planner_invocations >= max_react_iterations:
-                logger.error(
-                    f"Exceeded max_react_iterations: {planner_invocations} >= {max_react_iterations}"
-                )
-                from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                graph.status = GraphStatus.FAILED
-                return self._make_error_result(
-                    graph,
-                    error_message=f"Exceeded max ReAct iterations: {planner_invocations}"
-                )
-            
-            # Check graph node limit (Requirement 19.7, 19.9)
-            if len(graph.nodes) >= max_graph_nodes:
-                logger.error(
-                    f"Exceeded max_graph_nodes: {len(graph.nodes)} >= {max_graph_nodes}"
-                )
-                from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                graph.status = GraphStatus.FAILED
-                return self._make_error_result(
-                    graph,
-                    error_message=f"Exceeded max graph nodes: {len(graph.nodes)}"
-                )
-            
-            # 1. Plan next step
-            planner_invocations += 1
-            logger.info(f"Planner invocation {planner_invocations}/{self.max_planner_invocations_per_graph}")
-            
-            # Check planner budget before invocation (Requirements 26.10, 26.11, 26.12, 26.13)
-            budget_error = self._check_planner_budget()
-            if budget_error:
-                logger.error(f"Planner budget exceeded: {budget_error}")
-                from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                graph.status = GraphStatus.FAILED
-                return self._make_error_result(
-                    graph,
-                    error_message=f"Planner budget exceeded: {budget_error}"
-                )
-            
-            patch = await self.planner.plan_next_step(graph, env_context)
-            
-            # Track planner usage (Requirements 26.6, 26.10)
-            self._track_planner_usage(patch)
-            
-            # Check if finished
-            if patch is None or (
-                len(patch.actions) == 1 and
-                patch.actions[0].operation == PatchOperation.FINISH
-            ):
-                logger.info("Planner returned FINISH")
-                # Framework-level goal completion check — LLM cannot bypass this
-                uncovered = self._get_uncovered_sub_goals(sub_goals, graph)
-                if uncovered:
-                    logger.warning(
-                        f"[GoalTracker] FINISH rejected: {len(uncovered)} sub-goal(s) uncovered: {uncovered}"
-                    )
-                    # Inject uncovered goals into env_context so next planner call is aware
-                    env_context = dict(env_context)
-                    env_context["uncovered_sub_goals"] = uncovered
-                    env_context["goal_tracker_hint"] = (
-                        f"The following sub-goals are NOT yet completed: {uncovered}. "
-                        f"You MUST complete them before finishing."
-                    )
-                    continue  # Reject FINISH, force another planning iteration
-                logger.info("Planner returned FINISH — all sub-goals covered")
-                break
-            
-            # 2. Validate patch
-            if self.guard:
-                validation = await self.guard.validate(patch, graph, context=env_context)
-                
-                if not validation.approved:
-                    logger.error(f"Patch validation failed: {validation.violations}")
+        try:
+            while True:
+                # 1. 取消检查
+                if cancel_event is not None and cancel_event.is_set():
+                    logger.info("[GraphController] Cancellation signal received")
                     from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                     graph.status = GraphStatus.FAILED
-                    return self._make_error_result(
-                        graph,
-                        error_message=f"Patch validation failed: {validation.violations}"
+                    _lifecycle_status = "cancelled"
+                    _result_status = "cancelled"
+                    _error_message = "Task cancelled by user"
+                    _final_result = self._make_error_result(graph, error_message=_error_message)
+                    return _final_result
+
+                # 2. Limit 检查
+                if planner_invocations >= self.max_planner_invocations_per_graph:
+                    _error_message = f"Exceeded max planner invocations: {planner_invocations}"
+                    logger.error(_error_message)
+                    from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                    graph.status = GraphStatus.FAILED
+                    _final_result = self._make_error_result(graph, error_message=_error_message)
+                    return _final_result
+
+                if planner_invocations >= max_react_iterations:
+                    _error_message = f"Exceeded max ReAct iterations: {planner_invocations}"
+                    logger.error(_error_message)
+                    from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                    graph.status = GraphStatus.FAILED
+                    _final_result = self._make_error_result(graph, error_message=_error_message)
+                    return _final_result
+
+                if len(graph.nodes) >= max_graph_nodes:
+                    _error_message = f"Exceeded max graph nodes: {len(graph.nodes)}"
+                    logger.error(_error_message)
+                    from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                    graph.status = GraphStatus.FAILED
+                    _final_result = self._make_error_result(graph, error_message=_error_message)
+                    return _final_result
+
+                # 3. Planner budget 检查
+                budget_error = self._check_planner_budget()
+                if budget_error:
+                    _error_message = f"Planner budget exceeded: {budget_error}"
+                    logger.error(_error_message)
+                    from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                    graph.status = GraphStatus.FAILED
+                    _final_result = self._make_error_result(graph, error_message=_error_message)
+                    return _final_result
+
+                # 4. Plan
+                planner_invocations += 1
+                logger.info(f"Planner invocation {planner_invocations}/{self.max_planner_invocations_per_graph}")
+                _plan_start = time.monotonic()
+                patch = await self.planner.plan_next_step(graph, env_context)
+                _plan_latency_ms = int((time.monotonic() - _plan_start) * 1000)
+
+                self._track_planner_usage(patch)
+                _patch_meta = (patch.metadata or {}) if patch else {}
+
+                is_finish = patch is None or (
+                    len(patch.actions) == 1 and
+                    patch.actions[0].operation == PatchOperation.FINISH
+                )
+
+                if not is_finish:
+                    # 有效 plan：触发 lifecycle（首次触发 created->planned）
+                    await _lifecycle.on_plan_generated(
+                        planner_input={"goal": intent, "graph_nodes": len(graph.nodes)},
+                        planner_output={"actions": len(patch.actions)},
+                        tokens_used=_patch_meta.get("tokens_used", 0),
+                        cost_usd=_patch_meta.get("cost", 0.0),
+                        latency_ms=_plan_latency_ms,
                     )
-            
-            # 3. Apply patch to graph
-            self._apply_patch(patch, graph)
 
-            # 发 plan.generated，让前端实时看到步骤列表
-            self._emit_plan_generated(graph, env_context)
-
-            # ParamBinder: 在节点执行前，把 resolved_inputs 绑定到新增节点的空参数槽位
-            resolved_inputs = env_context.get("resolved_inputs")
-            if resolved_inputs:
-                from app.avatar.runtime.context.param_binder import bind_params
-                from app.avatar.runtime.graph.models.step_node import NodeStatus
-                for node in graph.nodes.values():
-                    if node.status == NodeStatus.PENDING and node.params is not None:
-                        bound, binding_log = bind_params(
-                            skill_name=node.capability_name,
-                            params=node.params,
-                            resolved_inputs=resolved_inputs,
+                if is_finish:
+                    logger.info("Planner returned FINISH")
+                    uncovered = self._get_uncovered_sub_goals(sub_goals, graph)
+                    if uncovered:
+                        logger.warning(
+                            f"[GoalTracker] FINISH rejected: {len(uncovered)} sub-goal(s) uncovered: {uncovered}"
                         )
-                        if binding_log:
-                            node.params = bound
-                            logger.info(
-                                f"[ParamBinder] {node.capability_name}: "
-                                f"bound {len(binding_log)} param(s): "
-                                f"{[b['param'] for b in binding_log]}"
-                            )
-
-            # 4. Execute ready nodes
-            result = await self.runtime.execute_ready_nodes(graph, context=_shared_context)
-
-            # llm.fallback is a terminal action — if it just ran, stop the loop immediately.
-            # It means the planner couldn't proceed and delegated back to the user.
-            last_nodes = [
-                n for n in graph.nodes.values()
-                if n.capability_name == "llm.fallback"
-            ]
-            if last_nodes:
-                from app.avatar.runtime.graph.models.step_node import NodeStatus
-                if any(n.status == NodeStatus.SUCCESS for n in last_nodes):
-                    logger.info("[GraphController] llm.fallback succeeded — terminating ReAct loop")
+                        env_context = dict(env_context)
+                        env_context["uncovered_sub_goals"] = uncovered
+                        env_context["goal_tracker_hint"] = (
+                            f"The following sub-goals are NOT yet completed: {uncovered}. "
+                            f"You MUST complete them before finishing."
+                        )
+                        continue
+                    logger.info("Planner returned FINISH -- all sub-goals covered")
                     break
-            
-            # Check execution cost budget (Requirements 32.7, 32.8)
-            if self.max_execution_cost:
-                from app.avatar.runtime.graph.context.execution_context import ExecutionContext
-                # Create context if not exists
-                if not hasattr(graph, '_context'):
-                    graph._context = ExecutionContext(graph_id=graph.id)
-                
-                current_cost = self.runtime.get_execution_cost(graph, graph._context)
-                if current_cost >= self.max_execution_cost:
-                    error_msg = (
-                        f"Execution cost budget exceeded: ${current_cost:.4f} >= "
-                        f"${self.max_execution_cost:.4f}"
-                    )
-                    logger.error(f"[GraphController] {error_msg}")
-                    from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                    graph.status = GraphStatus.FAILED
-                    return self._make_error_result(
-                        graph,
-                        error_message=error_msg
-                    )
-            
-            # 5. Check if terminal
-            if result.final_status in ("failed", "partial_success"):
-                # Failure is always terminal — no point continuing
-                return result
 
-            if result.final_status == "success":
-                # On success, run GoalTracker for multi-goal tasks first
-                uncovered = self._get_uncovered_sub_goals(sub_goals, graph)
-                if uncovered:
-                    logger.warning(
-                        f"[GoalTracker] Runtime success but {len(uncovered)} sub-goal(s) "
-                        f"uncovered: {uncovered} — continuing ReAct loop"
+                # 5. Guard validate
+                if self.guard:
+                    validation = await self.guard.validate(patch, graph, context=env_context)
+                    await _lifecycle.on_policy_evaluated(
+                        approved=validation.approved,
+                        violations=validation.violations,
+                        warnings=validation.warnings,
+                        requires_approval=validation.requires_approval,
                     )
-                    env_context = dict(env_context)
-                    env_context["uncovered_sub_goals"] = uncovered
-                    env_context["goal_tracker_hint"] = (
-                        f"The following sub-goals are NOT yet completed: {uncovered}. "
-                        f"You MUST complete them before finishing."
-                    )
-                    continue  # Reject premature success, force another planning iteration
+                    if not validation.approved:
+                        _error_message = f"Patch validation failed: {validation.violations}"
+                        logger.error(_error_message)
+                        from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                        graph.status = GraphStatus.FAILED
+                        _final_result = self._make_error_result(graph, error_message=_error_message)
+                        return _final_result
 
-                # For all tasks (single or multi-goal): continue the ReAct loop and
-                # let the Planner decide when to FINISH. This prevents premature
-                # termination after a probe step (e.g. fs.list before fs.write).
-                # The loop will exit when Planner returns FINISH above.
-                logger.debug(
-                    f"[ReAct] Node(s) succeeded, continuing loop for Planner FINISH decision"
-                )
-        
-        # Planner returned FINISH — all sub-goals covered.
-        # All nodes were already executed incrementally; just compute the final result.
-        from app.avatar.runtime.graph.models.step_node import NodeStatus
-        completed = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SUCCESS)
-        failed = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.FAILED)
-        skipped = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SKIPPED)
-        final_status = self.runtime._compute_graph_status(graph)
-        from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
-        result = ExecutionResult(
-            success=final_status in ("success", "partial_success"),
-            final_status=final_status,
-            completed_nodes=completed,
-            failed_nodes=failed,
-            skipped_nodes=skipped,
-            graph=graph,
-        )
-        return result
-    
+                # 6. Apply patch
+                self._apply_patch(patch, graph)
+                self._emit_plan_generated(graph, env_context)
+
+                # ParamBinder
+                resolved_inputs = env_context.get("resolved_inputs")
+                if resolved_inputs:
+                    from app.avatar.runtime.context.param_binder import bind_params
+                    for node in graph.nodes.values():
+                        if node.status == NodeStatus.PENDING and node.params is not None:
+                            bound, binding_log = bind_params(
+                                skill_name=node.capability_name,
+                                params=node.params,
+                                resolved_inputs=resolved_inputs,
+                            )
+                            if binding_log:
+                                node.params = bound
+                                logger.info(
+                                    f"[ParamBinder] {node.capability_name}: "
+                                    f"bound {len(binding_log)} param(s): "
+                                    f"{[b['param'] for b in binding_log]}"
+                                )
+
+                # 7. 第一个节点执行前触发 planned -> running
+                await _lifecycle.on_execution_started()
+
+                # 8. Execute ready nodes
+                result = await self.runtime.execute_ready_nodes(graph, context=_shared_context)
+
+                # llm.fallback terminal
+                last_nodes = [n for n in graph.nodes.values() if n.capability_name == "llm.fallback"]
+                if last_nodes and any(n.status == NodeStatus.SUCCESS for n in last_nodes):
+                    logger.info("[GraphController] llm.fallback succeeded -- terminating ReAct loop")
+                    break
+
+                # 9. Execution cost budget
+                if self.max_execution_cost:
+                    from app.avatar.runtime.graph.context.execution_context import ExecutionContext
+                    if not hasattr(graph, '_context'):
+                        graph._context = ExecutionContext(graph_id=graph.id)
+                    current_cost = self.runtime.get_execution_cost(graph, graph._context)
+                    if current_cost >= self.max_execution_cost:
+                        _error_message = (
+                            f"Execution cost budget exceeded: ${current_cost:.4f} >= "
+                            f"${self.max_execution_cost:.4f}"
+                        )
+                        logger.error(f"[GraphController] {_error_message}")
+                        from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                        graph.status = GraphStatus.FAILED
+                        _final_result = self._make_error_result(graph, error_message=_error_message)
+                        return _final_result
+
+                # 10. Terminal check
+                if result.final_status in ("failed", "partial_success"):
+                    _final_result = result
+                    return _final_result
+
+                if result.final_status == "success":
+                    uncovered = self._get_uncovered_sub_goals(sub_goals, graph)
+                    if uncovered:
+                        logger.warning(
+                            f"[GoalTracker] Runtime success but {len(uncovered)} sub-goal(s) "
+                            f"uncovered: {uncovered} -- continuing ReAct loop"
+                        )
+                        env_context = dict(env_context)
+                        env_context["uncovered_sub_goals"] = uncovered
+                        env_context["goal_tracker_hint"] = (
+                            f"The following sub-goals are NOT yet completed: {uncovered}. "
+                            f"You MUST complete them before finishing."
+                        )
+                        continue
+                    logger.debug("[ReAct] Node(s) succeeded, continuing loop for Planner FINISH decision")
+
+            # FINISH 后计算最终结果
+            completed = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SUCCESS)
+            failed = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.FAILED)
+            skipped = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SKIPPED)
+            final_status = self.runtime._compute_graph_status(graph)
+
+            from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
+            _final_result = ExecutionResult(
+                success=final_status in ("success", "partial_success"),
+                final_status=final_status,
+                completed_nodes=completed,
+                failed_nodes=failed,
+                skipped_nodes=skipped,
+                graph=graph,
+            )
+            return _final_result
+
+        finally:
+            # 统一出口：根据 _final_result 决定 lifecycle/result_status
+            if _final_result is not None:
+                fs = _final_result.final_status
+                if fs == "success":
+                    _lifecycle_status = "completed"
+                    _result_status = "success"
+                elif fs == "partial_success":
+                    _lifecycle_status = "completed"
+                    _result_status = "partial_success"
+                elif fs == "failed":
+                    _lifecycle_status = "failed"
+                    _result_status = "failed"
+                # cancelled 已在 return 前设置，不覆盖
+
+            _ns = NodeStatus
+            _total = len(graph.nodes)
+            _completed_n = sum(1 for n in graph.nodes.values() if n.status == _ns.SUCCESS)
+            _failed_n = sum(1 for n in graph.nodes.values() if n.status == _ns.FAILED)
+
+            await _lifecycle.on_session_end(
+                lifecycle_status=_lifecycle_status,
+                result_status=_result_status,
+                total_nodes=_total,
+                completed_nodes=_completed_n,
+                failed_nodes=_failed_n,
+                error_message=_error_message,
+            )
+
     async def _execute_dag_mode(
         self,
         intent: str,
@@ -557,7 +603,7 @@ class GraphController:
             elif action.operation == PatchOperation.ADD_EDGE and action.edge:
                 graph.add_edge(action.edge)
                 logger.debug(
-                    f"Added edge: {action.edge.source_node} → {action.edge.target_node}"
+                    f"Added edge: {action.edge.source_node} 鈫?{action.edge.target_node}"
                 )
             
             elif action.operation == PatchOperation.REMOVE_NODE and action.node_id:
@@ -849,9 +895,9 @@ class GraphController:
     # -------------------------------------------------------------------------
 
     # Connectors used to split a goal into sub-goals.
-    # Only split on explicit multi-goal connectors (并且/然后/and then/etc.).
+    # Only split on explicit multi-goal connectors (骞朵笖/鐒跺悗/and then/etc.).
     # Bare commas/semicolons are NOT treated as sub-goal separators because they
-    # often appear within a single compound task (e.g. "读取test.txt，找到最大的数").
+    # often appear within a single compound task (e.g. "璇诲彇test.txt锛屾壘鍒版渶澶х殑鏁?).
     _GOAL_SPLIT_PATTERN = re.compile(
         r'\s+(?:并且?|然后|接着|之后|and then|then also|after that|additionally)\s+',
         re.IGNORECASE,

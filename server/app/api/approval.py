@@ -26,10 +26,12 @@ class ApprovalStatusResponse(BaseModel):
     status: str
     message: str
     operation: str
-    created_at: str
-    expires_at: str
+    expires_at: Optional[str] = None
     responded_at: Optional[str] = None
     user_comment: Optional[str] = None
+    task_id: Optional[str] = None
+    step_id: Optional[str] = None
+    details: Optional[dict] = None
 
 
 @router.post("/respond")
@@ -96,10 +98,12 @@ async def get_approval_status(request_id: str):
             status=request_data['status'],
             message=request_data['message'],
             operation=request_data['operation'],
-            created_at=request_data['created_at'],
-            expires_at=request_data['expires_at'],
+            expires_at=request_data.get('expires_at'),
             responded_at=request_data.get('responded_at'),
-            user_comment=request_data.get('user_comment')
+            user_comment=request_data.get('user_comment'),
+            task_id=request_data.get('task_id'),
+            step_id=request_data.get('step_id'),
+            details=request_data.get('details'),
         )
     
     except HTTPException:
@@ -113,33 +117,36 @@ async def get_approval_status(request_id: str):
 async def get_pending_approvals():
     """
     获取所有待审批请求
-    
-    Returns:
-        待审批请求列表
     """
     try:
+        from sqlmodel import Session, select
+        from app.db.database import engine
+        from app.db.system import ApprovalRequest
+        from datetime import datetime, timezone
+
         service = get_approval_service()
-        
-        # 先清理过期请求
         service.cleanup_expired()
-        
-        # 获取所有 pending 请求
-        with service._get_conn() as conn:
-            rows = conn.execute("""
-                SELECT request_id, message, operation, created_at, expires_at
-                FROM approval_requests
-                WHERE status = ?
-                ORDER BY created_at DESC
-            """, (ApprovalStatus.PENDING.value,)).fetchall()
-            
-            pending = [dict(row) for row in rows]
-        
-        return {
-            "success": True,
-            "count": len(pending),
-            "requests": pending
-        }
-    
+
+        with Session(engine) as session:
+            stmt = select(ApprovalRequest).where(
+                ApprovalRequest.status == ApprovalStatus.PENDING.value
+            ).order_by(ApprovalRequest.created_at.desc())
+            reqs = session.exec(stmt).all()
+            pending = [
+                {
+                    "request_id": r.request_id,
+                    "message": r.message,
+                    "operation": r.operation,
+                    "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+                    "task_id": r.task_id,
+                    "step_id": r.step_id,
+                    "details": r.details,
+                }
+                for r in reqs
+            ]
+
+        return {"success": True, "count": len(pending), "requests": pending}
+
     except Exception as e:
         logger.error(f"Failed to get pending approvals: {e}")
         raise HTTPException(status_code=500, detail=str(e))

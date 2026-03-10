@@ -25,7 +25,7 @@ class PythonRunInput(SkillInput):
     timeout: int = Field(30, description="Execution timeout in seconds")
 
 class PythonRunOutput(SkillOutput):
-    output: str = Field("", description="Primary output: stdout content")
+    output: Any = Field("", description="Primary output: parsed JSON object if stdout is valid JSON, else stdout string")
     stdout: str = ""
     stderr: str = ""
     result: Optional[Any] = None
@@ -110,6 +110,19 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
         output_stdout = stdout_buf.getvalue()
         output_stderr = stderr_buf.getvalue()
 
+        # 从 stdout 识别 __OUTPUT__: 标记行提取结构化输出（与 DockerExecutor 协议一致）
+        structured_output: Any = output_stdout
+        _OUTPUT_MARKER = "__OUTPUT__:"
+        for line in output_stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(_OUTPUT_MARKER):
+                payload = stripped[len(_OUTPUT_MARKER):]
+                try:
+                    import json as _json
+                    structured_output = _json.loads(payload)
+                except Exception:
+                    pass  # 解析失败保持上一次结果
+
         safe_vars = {}
         for k, v in local_vars.items():
             if k.startswith("__") or k == "base_path":
@@ -142,7 +155,7 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
         return PythonRunOutput(
             success=success,
             message="Execution completed" if success else f"Execution failed: {error_msg}",
-            output=output_stdout,
+            output=structured_output,
             stdout=output_stdout,
             stderr=output_stderr,
             variables=safe_vars,

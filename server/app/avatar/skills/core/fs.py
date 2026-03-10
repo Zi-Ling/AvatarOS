@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import shutil
-from typing import Optional, List
-from pydantic import Field
+from typing import Optional, List, Dict, Any
+from pydantic import Field, model_validator
 
 from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
@@ -198,18 +198,28 @@ class FsListSkill(BaseSkill[FsListInput, FsListOutput]):
 # ── fs.delete ─────────────────────────────────────────────────────────────────
 
 class FsDeleteInput(SkillInput):
-    path: str = Field(..., description="Path to delete")
+    path: Optional[str] = Field(None, description="Path to delete (single)")
     recursive: bool = Field(False, description="Delete directory recursively")
+    paths: Optional[List[str]] = Field(None, description="Batch delete list: [\"a.txt\", \"b.txt\", ...]")
+
+    @model_validator(mode="after")
+    def check_params(self) -> "FsDeleteInput":
+        if not self.path and not self.paths:
+            raise ValueError("Either path or paths must be provided")
+        return self
+
 
 class FsDeleteOutput(SkillOutput):
-    output: Optional[str] = Field(None, description="Deleted path")
-    path: str
+    output: Optional[str] = Field(None, description="Deleted path (single)")
+    path: Optional[str] = None
+    results: Optional[List[Dict[str, Any]]] = Field(None, description="Batch delete results")
+
 
 @register_skill
 class FsDeleteSkill(BaseSkill[FsDeleteInput, FsDeleteOutput]):
     spec = SkillSpec(
         name="fs.delete",
-        description="Delete file or directory. 删除文件或目录。",
+        description="Delete file or directory. Supports batch mode via `paths` list. 删除文件或目录，支持批量。",
         input_model=FsDeleteInput,
         output_model=FsDeleteOutput,
         side_effects={SideEffect.FS},
@@ -218,43 +228,87 @@ class FsDeleteSkill(BaseSkill[FsDeleteInput, FsDeleteOutput]):
     )
 
     async def run(self, ctx: SkillContext, params: FsDeleteInput) -> FsDeleteOutput:
-        target = ctx.resolve_path(params.path)
+        targets = params.paths if params.paths else [params.path]
 
         if ctx.dry_run:
-            return FsDeleteOutput(success=True, message=f"[dry_run] Would delete: {target}", path=str(target), output=str(target))
+            results = [{"path": p, "success": True, "message": "[dry_run]"} for p in targets]
+            if len(targets) == 1:
+                return FsDeleteOutput(success=True, message="[dry_run]", path=targets[0], output=targets[0], results=results)
+            return FsDeleteOutput(success=True, message=f"[dry_run] Would delete {len(targets)} items", results=results)
 
-        if not target.exists():
-            return FsDeleteOutput(success=False, message=f"Not found: {target}", path=str(target))
-
-        try:
-            if target.is_dir():
-                if params.recursive:
-                    shutil.rmtree(target)
+        results: List[Dict[str, Any]] = []
+        all_ok = True
+        for p in targets:
+            target = ctx.resolve_path(p)
+            if not target.exists():
+                results.append({"path": p, "success": False, "message": f"Not found: {target}"})
+                all_ok = False
+                continue
+            try:
+                if target.is_dir():
+                    if params.recursive:
+                        shutil.rmtree(target)
+                    else:
+                        target.rmdir()
                 else:
-                    target.rmdir()
-            else:
-                target.unlink()
-            return FsDeleteOutput(success=True, message=f"Deleted: {target}", path=str(target), output=str(target))
-        except Exception as e:
-            return FsDeleteOutput(success=False, message=str(e), path=str(target))
+                    target.unlink()
+                results.append({"path": p, "success": True, "message": f"Deleted: {target.name}"})
+            except Exception as e:
+                results.append({"path": p, "success": False, "message": str(e)})
+                all_ok = False
+
+        if len(targets) == 1:
+            r = results[0]
+            return FsDeleteOutput(
+                success=r["success"],
+                message=r["message"],
+                path=r["path"],
+                output=r["path"] if r["success"] else None,
+                results=results,
+            )
+
+        ok_count = sum(1 for r in results if r["success"])
+        return FsDeleteOutput(
+            success=all_ok,
+            message=f"Deleted {ok_count}/{len(targets)} items" + ("" if all_ok else " (some failed)"),
+            results=results,
+        )
 
 
 # ── fs.move ───────────────────────────────────────────────────────────────────
 
 class FsMoveInput(SkillInput):
-    src: str = Field(..., description="Source path")
-    dst: str = Field(..., description="Destination path")
+    src: Optional[str] = Field(None, description="Source path (single move)")
+    dst: Optional[str] = Field(None, description="Destination path (single move)")
+    moves: Optional[List[Dict[str, str]]] = Field(
+        None,
+        description='Batch move list: [{"src": "old.txt", "dst": "new.txt"}, ...]',
+    )
+
+    @model_validator(mode="after")
+    def check_params(self) -> "FsMoveInput":
+        has_single = self.src is not None and self.dst is not None
+        has_batch = bool(self.moves)
+        if not has_single and not has_batch:
+            raise ValueError("Either (src, dst) or moves must be provided")
+        return self
+
 
 class FsMoveOutput(SkillOutput):
-    output: Optional[str] = Field(None, description="Destination path")
-    src: str
-    dst: str
+    output: Optional[str] = Field(None, description="Destination path (single move)")
+    src: Optional[str] = None
+    dst: Optional[str] = None
+    results: Optional[List[Dict[str, Any]]] = Field(None, description="Batch move results")
+
 
 @register_skill
 class FsMoveSkill(BaseSkill[FsMoveInput, FsMoveOutput]):
     spec = SkillSpec(
         name="fs.move",
-        description="Move or rename file/directory. 移动或重命名。",
+        description=(
+            "Move or rename file/directory. Supports batch mode via `moves` list. "
+            "移动或重命名，支持批量。"
+        ),
         input_model=FsMoveInput,
         output_model=FsMoveOutput,
         side_effects={SideEffect.FS},
@@ -263,42 +317,93 @@ class FsMoveSkill(BaseSkill[FsMoveInput, FsMoveOutput]):
     )
 
     async def run(self, ctx: SkillContext, params: FsMoveInput) -> FsMoveOutput:
-        src = ctx.resolve_path(params.src)
-        dst = ctx.resolve_path(params.dst)
+        pairs: List[Dict[str, str]] = params.moves if params.moves else [{"src": params.src, "dst": params.dst}]
 
         if ctx.dry_run:
-            return FsMoveOutput(success=True, message=f"[dry_run] Would move {src} -> {dst}", src=str(src), dst=str(dst), output=str(dst))
+            results = [{"src": p["src"], "dst": p["dst"], "success": True, "message": "[dry_run]"} for p in pairs]
+            if len(pairs) == 1:
+                return FsMoveOutput(
+                    success=True, message="[dry_run]",
+                    src=pairs[0]["src"], dst=pairs[0]["dst"],
+                    output=pairs[0]["dst"], results=results,
+                )
+            return FsMoveOutput(success=True, message=f"[dry_run] Would move {len(pairs)} items", results=results)
 
-        if not src.exists():
-            return FsMoveOutput(success=False, message=f"Source not found: {src}", src=str(src), dst=str(dst))
-        if dst.exists():
-            return FsMoveOutput(success=False, message=f"Destination exists: {dst}", src=str(src), dst=str(dst))
+        results: List[Dict[str, Any]] = []
+        all_ok = True
+        for p in pairs:
+            src = ctx.resolve_path(p["src"])
+            dst = ctx.resolve_path(p["dst"])
+            if not src.exists():
+                results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": f"Source not found: {src}"})
+                all_ok = False
+                continue
+            if dst.exists():
+                results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": f"Destination exists: {dst}"})
+                all_ok = False
+                continue
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                results.append({"src": p["src"], "dst": p["dst"], "success": True, "message": f"Moved {src.name} -> {dst.name}"})
+            except Exception as e:
+                results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": str(e)})
+                all_ok = False
 
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
-            return FsMoveOutput(success=True, message=f"Moved {src.name} -> {dst}", src=str(src), dst=str(dst), output=str(dst))
-        except Exception as e:
-            return FsMoveOutput(success=False, message=str(e), src=str(src), dst=str(dst))
+        if len(pairs) == 1:
+            r = results[0]
+            return FsMoveOutput(
+                success=r["success"],
+                message=r["message"],
+                src=r["src"],
+                dst=r["dst"],
+                output=r["dst"] if r["success"] else None,
+                results=results,
+            )
+
+        ok_count = sum(1 for r in results if r["success"])
+        return FsMoveOutput(
+            success=all_ok,
+            message=f"Moved {ok_count}/{len(pairs)} items" + ("" if all_ok else " (some failed)"),
+            results=results,
+        )
 
 
 # ── fs.copy ───────────────────────────────────────────────────────────────────
 
 class FsCopyInput(SkillInput):
-    src: str = Field(..., description="Source path")
-    dst: str = Field(..., description="Destination path")
+    src: Optional[str] = Field(None, description="Source path (single copy)")
+    dst: Optional[str] = Field(None, description="Destination path (single copy)")
     overwrite: bool = Field(False, description="Overwrite if destination exists")
+    copies: Optional[List[Dict[str, str]]] = Field(
+        None,
+        description='Batch copy list: [{"src": "a.txt", "dst": "b.txt"}, ...]',
+    )
+
+    @model_validator(mode="after")
+    def check_params(self) -> "FsCopyInput":
+        has_single = self.src is not None and self.dst is not None
+        has_batch = bool(self.copies)
+        if not has_single and not has_batch:
+            raise ValueError("Either (src, dst) or copies must be provided")
+        return self
+
 
 class FsCopyOutput(SkillOutput):
-    output: Optional[str] = Field(None, description="Destination path")
-    src: str
-    dst: str
+    output: Optional[str] = Field(None, description="Destination path (single copy)")
+    src: Optional[str] = None
+    dst: Optional[str] = None
+    results: Optional[List[Dict[str, Any]]] = Field(None, description="Batch copy results")
+
 
 @register_skill
 class FsCopySkill(BaseSkill[FsCopyInput, FsCopyOutput]):
     spec = SkillSpec(
         name="fs.copy",
-        description="Copy file or directory. 复制文件或目录。",
+        description=(
+            "Copy file or directory. Supports batch mode via `copies` list. "
+            "复制文件或目录，支持批量。"
+        ),
         input_model=FsCopyInput,
         output_model=FsCopyOutput,
         side_effects={SideEffect.FS},
@@ -307,25 +412,58 @@ class FsCopySkill(BaseSkill[FsCopyInput, FsCopyOutput]):
     )
 
     async def run(self, ctx: SkillContext, params: FsCopyInput) -> FsCopyOutput:
-        src = ctx.resolve_path(params.src)
-        dst = ctx.resolve_path(params.dst)
+        pairs: List[Dict[str, str]] = params.copies if params.copies else [{"src": params.src, "dst": params.dst}]
 
         if ctx.dry_run:
-            return FsCopyOutput(success=True, message=f"[dry_run] Would copy {src} -> {dst}", src=str(src), dst=str(dst), output=str(dst))
+            results = [{"src": p["src"], "dst": p["dst"], "success": True, "message": "[dry_run]"} for p in pairs]
+            if len(pairs) == 1:
+                return FsCopyOutput(
+                    success=True, message="[dry_run]",
+                    src=pairs[0]["src"], dst=pairs[0]["dst"],
+                    output=pairs[0]["dst"], results=results,
+                )
+            return FsCopyOutput(success=True, message=f"[dry_run] Would copy {len(pairs)} items", results=results)
 
-        if not src.exists():
-            return FsCopyOutput(success=False, message=f"Source not found: {src}", src=str(src), dst=str(dst))
-        if dst.exists() and not params.overwrite:
-            return FsCopyOutput(success=False, message=f"Destination exists: {dst}", src=str(src), dst=str(dst))
+        results: List[Dict[str, Any]] = []
+        all_ok = True
+        for p in pairs:
+            src = ctx.resolve_path(p["src"])
+            dst = ctx.resolve_path(p["dst"])
+            if not src.exists():
+                results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": f"Source not found: {src}"})
+                all_ok = False
+                continue
+            if dst.exists() and not params.overwrite:
+                results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": f"Destination exists: {dst}"})
+                all_ok = False
+                continue
+            try:
+                if dst.exists():
+                    shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+                if src.is_dir():
+                    shutil.copytree(src, dst)
+                else:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                results.append({"src": p["src"], "dst": p["dst"], "success": True, "message": f"Copied {src.name} -> {dst.name}"})
+            except Exception as e:
+                results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": str(e)})
+                all_ok = False
 
-        try:
-            if dst.exists():
-                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
-            if src.is_dir():
-                shutil.copytree(src, dst)
-            else:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-            return FsCopyOutput(success=True, message=f"Copied {src.name} -> {dst}", src=str(src), dst=str(dst), output=str(dst))
-        except Exception as e:
-            return FsCopyOutput(success=False, message=str(e), src=str(src), dst=str(dst))
+        if len(pairs) == 1:
+            r = results[0]
+            return FsCopyOutput(
+                success=r["success"],
+                message=r["message"],
+                src=r["src"],
+                dst=r["dst"],
+                output=r["dst"] if r["success"] else None,
+                results=results,
+            )
+
+        ok_count = sum(1 for r in results if r["success"])
+        return FsCopyOutput(
+            success=all_ok,
+            message=f"Copied {ok_count}/{len(pairs)} items" + ("" if all_ok else " (some failed)"),
+            results=results,
+        )

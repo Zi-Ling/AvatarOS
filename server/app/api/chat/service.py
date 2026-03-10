@@ -15,7 +15,7 @@ from app.avatar.memory.manager import MemoryManager
 from app.avatar.learning.manager import LearningManager
 from app.avatar.runtime.core import SessionContext
 from .session import save_message_to_session, get_session_messages
-from .task_executor import execute_task, generate_capability_explanation
+from .executor import execute_task, generate_capability_explanation
 
 logger = logging.getLogger(__name__)
 

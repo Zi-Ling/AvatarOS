@@ -165,12 +165,10 @@ class NodeRunner:
                     try:
                         export_to = None
                         try:
-                            from app.core.workspace.manager import get_workspace_manager
-                            export_to = get_workspace_manager().get_workspace()
+                            from app.core.workspace.manager import get_current_workspace
+                            export_to = get_current_workspace()
                         except Exception:
-                            if self.executor.base_path:
-                                from pathlib import Path
-                                export_to = Path(self.executor.base_path)
+                            export_to = self.executor._fallback_base_path
                         collected = await self.artifact_collector.collect(
                             workspace=workspace,
                             before_snapshot=before_snapshot,

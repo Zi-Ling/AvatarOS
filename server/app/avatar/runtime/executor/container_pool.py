@@ -156,6 +156,7 @@ class ContainerPool:
         max_idle_time: int = 300,
         mem_limit: str = "256m",
         cpu_quota: int = 50000,
+        network_mode: str = "none",
     ):
         self.client       = client
         self.image        = image
@@ -164,6 +165,7 @@ class ContainerPool:
         self.max_idle_time = max_idle_time
         self.mem_limit    = mem_limit
         self.cpu_quota    = cpu_quota
+        self.network_mode = network_mode
 
         self.ready_queue:   deque[ContainerEntry]       = deque()
         self.busy_set:      Dict[str, ContainerEntry]   = {}
@@ -498,7 +500,7 @@ class ContainerPool:
             "command":      ["sleep", "infinity"],
             "mem_limit":    self.mem_limit,
             "cpu_quota":    self.cpu_quota,
-            "network_mode": "none",
+            "network_mode": self.network_mode,
             "detach":       True,
         }
         if self.runtime:

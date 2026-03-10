@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Any, Dict
@@ -22,6 +23,10 @@ class SkillContext:
 
     # Root workspace for all relative paths (REQUIRED for file skills)
     base_path: Optional[Path] = None
+
+    # Workspace boundary for absolute path validation (optional, but recommended)
+    # When set, resolve_path will raise if an absolute path escapes this boundary.
+    workspace_root: Optional[Path] = None
 
     # Dry-run mode (no real side effects)
     dry_run: bool = False
@@ -55,8 +60,39 @@ class SkillContext:
 
         p = Path(path)
 
-        # Absolute path → trust caller
+        # Absolute path → validate against workspace_root if set
         if p.is_absolute():
+            if self.workspace_root is not None:
+                try:
+                    p.resolve().relative_to(self.workspace_root.resolve())
+                    return p  # 在 workspace 内，直接放行
+                except ValueError:
+                    pass
+
+                # workspace 外 → 查 grant store，用 exec_session_id 精确匹配
+                from app.services.approval_service import get_approval_service, ApprovalDecision
+                _exec_sid = self.extra.get("exec_session_id")
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    f"[SkillContext] resolve_path: checking grant for path='{path}', "
+                    f"exec_session_id={_exec_sid!r}"
+                )
+                result = get_approval_service().check_path_access(
+                    path=str(p),
+                    operation="*",
+                    scope="session",
+                    scope_id=_exec_sid,
+                )
+                _logging.getLogger(__name__).debug(
+                    f"[SkillContext] resolve_path: grant check result={result.decision}, reason={result.reason}"
+                )
+                if result.decision == ApprovalDecision.ALLOW:
+                    return p
+
+                raise PermissionError(
+                    f"resolve_path: absolute path '{path}' is outside workspace "
+                    f"'{self.workspace_root}' — operation denied"
+                )
             return p
 
         # Relative path → must bind to base_path
@@ -119,14 +155,18 @@ class SkillContext:
     def __getstate__(self):
         """
         自定义序列化：排除不可序列化的对象
-        
+
         ProcessExecutor 需要通过 pickle 传递 SkillContext 到子进程。
         我们只保留可序列化的字段（base_path, dry_run, extra）。
+        extra 中含有不可 pickle 对象（如 sqlite3.Connection）的 key 会被剔除。
         """
+        _UNPICKLABLE_EXTRA_KEYS = {"file_registry", "workspace"}
+        safe_extra = {k: v for k, v in self.extra.items() if k not in _UNPICKLABLE_EXTRA_KEYS}
         state = {
             'base_path': self.base_path,
+            'workspace_root': self.workspace_root,
             'dry_run': self.dry_run,
-            'extra': self.extra,
+            'extra': safe_extra,
             # 不序列化：memory_manager, learning_manager, execution_context
         }
         return state
@@ -134,14 +174,11 @@ class SkillContext:
     def __setstate__(self, state):
         """
         自定义反序列化：恢复可序列化的字段
-        
-        不可序列化的字段（memory_manager 等）在子进程中设置为 None。
-        这是安全的，因为子进程中的 Skill 不应该依赖这些运行时对象。
         """
         self.base_path = state.get('base_path')
+        self.workspace_root = state.get('workspace_root')
         self.dry_run = state.get('dry_run', False)
         self.extra = state.get('extra', {})
-        # 不可序列化的字段设置为 None
         self.memory_manager = None
         self.learning_manager = None
         self.execution_context = None

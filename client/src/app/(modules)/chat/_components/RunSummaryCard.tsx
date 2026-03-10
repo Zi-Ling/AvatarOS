@@ -15,7 +15,7 @@ export function RunSummaryCard({ data }: RunSummaryCardProps) {
   const { setActiveTab } = useWorkbenchStore();
 
   const durationSec = (data.durationMs / 1000).toFixed(1);
-  const allOk = data.failedSteps === 0;
+  const allOk = data.success !== false && data.failedSteps === 0;
 
   return (
     <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 overflow-hidden">

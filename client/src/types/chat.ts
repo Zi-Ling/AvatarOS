@@ -43,6 +43,7 @@ export type RunSummaryData = {
   failedSteps: number;
   durationMs: number;
   hadApproval: boolean;
+  success: boolean;
   keyOutputs: Array<{ stepName: string; skillName?: string; summary?: string }>;
 };
 
