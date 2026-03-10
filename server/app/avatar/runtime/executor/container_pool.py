@@ -94,9 +94,9 @@ class ContainerState(str, Enum):
     CREATING  = "creating"
     READY     = "ready"
     BUSY      = "busy"
+    DRAINING  = "draining"   # 优雅下线：不再接新任务，等当前任务完成后移除
     BROKEN    = "broken"
     REMOVING  = "removing"
-    # DRAINING = "draining"  # 预留：滚动升级用
 
 
 class SandboxFailureReason(str, Enum):
@@ -157,6 +157,8 @@ class ContainerPool:
         mem_limit: str = "256m",
         cpu_quota: int = 50000,
         network_mode: str = "none",
+        max_task_count: int = 100,   # 单容器最大复用次数，超过后进入 DRAINING
+        max_lifetime_s: int = 3600,  # 单容器最大存活秒数，超过后进入 DRAINING
     ):
         self.client       = client
         self.image        = image
@@ -166,11 +168,14 @@ class ContainerPool:
         self.mem_limit    = mem_limit
         self.cpu_quota    = cpu_quota
         self.network_mode = network_mode
+        self.max_task_count = max_task_count
+        self.max_lifetime_s = max_lifetime_s
 
         self.ready_queue:   deque[ContainerEntry]       = deque()
         self.busy_set:      Dict[str, ContainerEntry]   = {}
         self.creating_set:  Dict[str, ContainerEntry]   = {}
         self.broken_set:    Dict[str, ContainerEntry]   = {}
+        self.draining_set:  Dict[str, ContainerEntry]   = {}
 
         self._lock = threading.Lock()
         self._replenish_lock = threading.Lock()  # 防止并发补建堆积
@@ -215,11 +220,13 @@ class ContainerPool:
                 + list(self.busy_set.values())
                 + list(self.creating_set.values())
                 + list(self.broken_set.values())
+                + list(self.draining_set.values())
             )
             self.ready_queue.clear()
             self.busy_set.clear()
             self.creating_set.clear()
             self.broken_set.clear()
+            self.draining_set.clear()
 
         for entry in all_entries:
             self._remove_container(entry, reason="shutdown")
@@ -278,6 +285,19 @@ class ContainerPool:
             self._mark_broken(entry, reason="execution failure reported by caller")
             return
 
+        # 检查是否超过生命周期阈值 → DRAINING
+        now = time.time()
+        lifetime_exceeded = (now - entry.created_at) >= self.max_lifetime_s
+        task_count_exceeded = entry.task_count >= self.max_task_count
+        if lifetime_exceeded or task_count_exceeded:
+            reason = (
+                f"lifetime={now - entry.created_at:.0f}s >= {self.max_lifetime_s}s"
+                if lifetime_exceeded
+                else f"task_count={entry.task_count} >= {self.max_task_count}"
+            )
+            self._mark_draining(entry, reason=reason)
+            return
+
         # 检查容器是否还活着（带重试）
         err = self._reload_with_retry(entry)
         if err is None and entry.container.status == "running":
@@ -305,7 +325,9 @@ class ContainerPool:
         while not self._stop_event.wait(timeout=self.HEALTH_CHECK_INTERVAL):
             try:
                 self._check_ready_containers()
+                self._drain_expired_containers()
                 self._cleanup_broken_containers()
+                self._cleanup_drained_containers()
                 self._replenish_pool()
             except Exception as e:
                 logger.error(f"[ContainerPool] Health loop error: {e}", exc_info=True)
@@ -510,6 +532,65 @@ class ContainerPool:
         container.start()
         return container
 
+    def _mark_draining(self, entry: ContainerEntry, reason: str = ""):
+        """
+        将容器标记为 DRAINING（优雅下线）。
+        DRAINING 容器不再接新任务，等待当前任务完成后由 _cleanup_drained_containers 移除。
+        """
+        entry.state = ContainerState.DRAINING
+        entry.last_error = reason
+
+        with self._lock:
+            self.ready_queue = deque(e for e in self.ready_queue if e.container_id != entry.container_id)
+            self.busy_set.pop(entry.container_id, None)
+            self.draining_set[entry.container_id] = entry
+
+        logger.info(f"[ContainerPool] {entry.short_id} → DRAINING ({reason})")
+
+        # 立即补建，保持 pool_size
+        threading.Thread(
+            target=self._spawn_container,
+            kwargs={"reason": "replenish after draining"},
+            daemon=True,
+            name="ContainerPool-Spawn-Drain",
+        ).start()
+
+    def _drain_expired_containers(self):
+        """把 READY 队列中超过生命周期阈值的容器移入 DRAINING"""
+        now = time.time()
+        with self._lock:
+            entries = list(self.ready_queue)
+
+        for entry in entries:
+            lifetime_exceeded = (now - entry.created_at) >= self.max_lifetime_s
+            task_count_exceeded = entry.task_count >= self.max_task_count
+            if lifetime_exceeded or task_count_exceeded:
+                reason = (
+                    f"lifetime={now - entry.created_at:.0f}s >= {self.max_lifetime_s}s"
+                    if lifetime_exceeded
+                    else f"task_count={entry.task_count} >= {self.max_task_count}"
+                )
+                with self._lock:
+                    try:
+                        self.ready_queue.remove(entry)
+                    except ValueError:
+                        continue
+                self._mark_draining(entry, reason=reason)
+
+    def _cleanup_drained_containers(self):
+        """清理 DRAINING 集合中已完成（不在 busy_set 中）的容器"""
+        with self._lock:
+            # DRAINING 容器不在 busy_set 里，说明任务已完成，可以安全移除
+            to_clean = [
+                e for e in self.draining_set.values()
+                if e.container_id not in self.busy_set
+            ]
+
+        for entry in to_clean:
+            self._remove_container(entry, reason="drained")
+            with self._lock:
+                self.draining_set.pop(entry.container_id, None)
+
     def _mark_broken(self, entry: ContainerEntry, reason: str = ""):
         """将容器标记为 BROKEN，移入 broken_set"""
         entry.state = ContainerState.BROKEN
@@ -520,6 +601,7 @@ class ContainerPool:
             self.ready_queue = deque(e for e in self.ready_queue if e.container_id != entry.container_id)
             self.busy_set.pop(entry.container_id, None)
             self.creating_set.pop(entry.container_id, None)
+            self.draining_set.pop(entry.container_id, None)
             self.broken_set[entry.container_id] = entry
 
         logger.warning(f"[ContainerPool] {entry.short_id} → BROKEN ({reason})")
@@ -551,6 +633,7 @@ class ContainerPool:
                 "ready":    len(self.ready_queue),
                 "busy":     len(self.busy_set),
                 "creating": len(self.creating_set),
+                "draining": len(self.draining_set),
                 "broken":   len(self.broken_set),
             }
 

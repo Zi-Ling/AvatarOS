@@ -557,6 +557,9 @@ async def _emit_plan_and_steps(run_record, intent, session_id: str):
                 if isinstance(outputs, dict):
                     b64_image = outputs.get("base64_image")
 
+                # 从 node outputs 取 artifact_ids
+                artifact_ids = outputs.get("__artifacts__", []) if isinstance(outputs, dict) else []
+
                 await socket_manager.emit("server_event", {
                     "type": event_type,
                     "step_id": str(node.id),
@@ -564,9 +567,10 @@ async def _emit_plan_and_steps(run_record, intent, session_id: str):
                         "session_id": session_id,
                         "skill_name": node.capability_name,
                         "status": "failed" if is_failed else "completed",
-                        "raw_output": outputs,
+                        "raw_output": {k: v for k, v in outputs.items() if k != "__artifacts__"},
                         "base64_image": b64_image,
                         "error": node.error_message if is_failed else None,
+                        "artifact_ids": artifact_ids,
                     },
                 })
 

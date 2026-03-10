@@ -1,59 +1,92 @@
-// client/src/app/api/history/historyApi.ts
+// client/src/lib/api/history.ts
 
-export interface TaskStep {
-  id: string;
-  step_index: number;
-  step_name: string;
-  skill_name: string;
-  status: string;
-  input_params?: any;
-  output_result?: any;
-  error_message?: string;
-  created_at: string;
-  started_at?: string;
-  finished_at?: string;
+export interface StepTiming {
+  started_at: string | null;
+  ended_at: string | null;
+  duration_s: number | null;
 }
 
-export interface TaskRun {
-  id: string;
+export interface SessionStep {
+  id: number;
+  step_id: string;
+  step_type: string | null;
   status: string;
-  created_at: string;
-  started_at?: string;
-  finished_at?: string;
-  summary?: string;
-  error_message?: string;
-  steps?: TaskStep[];
+  summary: string | null;
+  error_message: string | null;
+  artifact_ids: string[];
+  retry_count: number;
+  timing: StepTiming;
 }
 
-export interface TaskHistoryItem {
+export interface SessionItem {
   id: string;
-  title: string;
-  intent_spec: any;
-  task_mode: string;
+  goal: string | null;
+  status: string;
+  result_status: string | null;
+  conversation_id: string | null;
+  workspace_path: string | null;
+  total_nodes: number;
+  completed_nodes: number;
+  failed_nodes: number;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface SessionDetail extends SessionItem {
+  steps: SessionStep[];
+}
+
+export interface ArtifactRecord {
+  id: string;
+  artifact_id: string;
+  session_id: string;
+  step_id: string | null;
+  filename: string;
+  storage_uri: string;
+  size: number;
+  checksum: string | null;
+  mime_type: string | null;
+  artifact_type: string;
   created_at: string;
-  updated_at: string;
-  runs?: TaskRun[];
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export const historyApi = {
-  listTasks: async (limit: number = 50): Promise<TaskHistoryItem[]> => {
-    const res = await fetch(`${API_BASE}/history/tasks?limit=${limit}`);
-    if (!res.ok) throw new Error('Failed to fetch task history');
+  listSessions: async (limit = 50, conversationId?: string): Promise<SessionItem[]> => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (conversationId) params.set('conversation_id', conversationId);
+    const res = await fetch(`${API_BASE}/history/sessions?${params}`);
+    if (!res.ok) throw new Error('Failed to fetch sessions');
     return res.json();
   },
 
-  getTask: async (taskId: string): Promise<TaskHistoryItem> => {
-    const res = await fetch(`${API_BASE}/history/tasks/${taskId}`);
-    if (!res.ok) throw new Error('Failed to fetch task details');
+  getSession: async (sessionId: string): Promise<SessionDetail> => {
+    const res = await fetch(`${API_BASE}/history/sessions/${sessionId}`);
+    if (!res.ok) throw new Error('Failed to fetch session');
     return res.json();
   },
-
-  getTaskDetails: async (taskId: string): Promise<TaskHistoryItem> => {
-    const res = await fetch(`${API_BASE}/history/tasks/${taskId}`);
-    if (!res.ok) throw new Error('Failed to fetch task details');
-    return res.json();
-  }
 };
 
+export const artifactApi = {
+  listBySession: async (sessionId: string): Promise<ArtifactRecord[]> => {
+    const res = await fetch(`${API_BASE}/artifacts/session/${sessionId}`);
+    if (!res.ok) throw new Error('Failed to fetch artifacts');
+    return res.json();
+  },
+
+  listByStep: async (stepId: string): Promise<ArtifactRecord[]> => {
+    const res = await fetch(`${API_BASE}/artifacts/step/${stepId}`);
+    if (!res.ok) throw new Error('Failed to fetch artifacts');
+    return res.json();
+  },
+
+  get: async (artifactId: string): Promise<ArtifactRecord> => {
+    const res = await fetch(`${API_BASE}/artifacts/${artifactId}`);
+    if (!res.ok) throw new Error('Failed to fetch artifact');
+    return res.json();
+  },
+
+  downloadUrl: (artifactId: string) => `${API_BASE}/artifacts/${artifactId}/download`,
+};

@@ -1,22 +1,23 @@
 # app/avatar/runtime/workspace/session_workspace.py
 """
-SessionWorkspace — 受控 IO 边界
+SessionWorkspace -- Controlled IO boundary
 
-用户 workspace 只含用户可见目录：
-  {workspace}/
-    input/    — 输入文件
-    output/   — 业务输出
+Five-directory structure (architecture doc section 8):
+  ~/.avatar/sessions/{session_id}/
+    input/      -- Runtime-injected input files (not collected as artifacts)
+    output/     -- Container write target (ArtifactCollector scans only this dir)
+    artifacts/  -- Promoted structured artifact cache
+    logs/       -- stdout / stderr / event logs (not collected as artifacts)
+    tmp/        -- Runtime temp files (not collected as artifacts)
 
-系统目录统一在 ~/.avatar/ 下，不随 workspace 变化：
-  ~/.avatar/sessions/{session_id}/   — session sandbox（本文件管理）
-  ~/.avatar/artifacts/               — artifact 存储
-  ~/.avatar/logs/                    — 运行日志
-  ~/.avatar/.tmp/                    — 临时文件
+Container mount point: /workspace
+Container may only write to /workspace/output/*
 
-设计原则：
-- SessionWorkspace 只管 session sandbox 目录边界
-- ArtifactCollector 扫描 sandbox 根目录，排除系统目录
-- SandboxExecutor 通过 get_mount_config() 获取挂载配置
+Design principles:
+- SessionWorkspace manages only the session sandbox directory boundary
+- ArtifactCollector scans only output/, excludes input/artifacts/logs/tmp
+- SandboxExecutor gets mount config via get_mount_config()
+- stdout/stderr written to logs/ by Runtime, not mixed with artifacts
 """
 
 import logging
@@ -29,28 +30,21 @@ from app.core.config import AVATAR_SESSIONS_DIR
 
 logger = logging.getLogger(__name__)
 
-# 容器内固定挂载点
+# Container fixed mount point
 CONTAINER_WORKSPACE_PATH = "/workspace"
 
 # ---------------------------------------------------------------------------
-# 目录常量（单一定义，所有地方引用这里）
+# Directory constants
 # ---------------------------------------------------------------------------
 
-# 用户可见目录（跟随用户 workspace）
 USER_DIRS: List[str] = ["input", "output"]
-
-# Session sandbox 内的系统目录（不收集 artifact，不暴露给用户）
-# 注意：这里是 session sandbox 内的子目录，不是 ~/.avatar/ 下的系统目录
-SYSTEM_DIRS: List[str] = []   # session sandbox 根目录下无系统子目录，全部是用户文件
-
-# ArtifactCollector 扫描时排除的根目录名集合
-# inputs/ 是框架注入的上游数据目录，不是用户产出，不应收集
-SCAN_EXCLUDE_DIRS: frozenset = frozenset({"inputs"})
+SYSTEM_DIRS: List[str] = ["artifacts", "logs", "tmp"]
+SCAN_EXCLUDE_DIRS: frozenset = frozenset({"input", "artifacts", "logs", "tmp", "inputs"})
 
 
 @dataclass
 class MountConfig:
-    """SandboxExecutor 挂载配置"""
+    """SandboxExecutor mount configuration"""
     host_path: str
     container_path: str
     mode: str = "rw"
@@ -58,10 +52,10 @@ class MountConfig:
 
 class SessionWorkspace:
     """
-    单个 session 的 sandbox workspace。
+    Sandbox workspace for a single session.
 
-    通过 SessionWorkspaceManager.get_or_create() 获取，不要直接实例化。
-    根目录在 ~/.avatar/sessions/{session_id}/
+    Obtain via SessionWorkspaceManager.get_or_create(), do not instantiate directly.
+    Root directory: ~/.avatar/sessions/{session_id}/
     """
 
     def __init__(self, session_id: str, root: Path):
@@ -71,9 +65,40 @@ class SessionWorkspace:
 
     def _ensure_dirs(self):
         self.root.mkdir(parents=True, exist_ok=True)
+        for d in USER_DIRS + SYSTEM_DIRS:
+            (self.root / d).mkdir(exist_ok=True)
 
     # ------------------------------------------------------------------
-    # SandboxExecutor 挂载配置
+    # Subdirectory accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def input_dir(self) -> Path:
+        """Runtime-injected input files directory"""
+        return self.root / "input"
+
+    @property
+    def output_dir(self) -> Path:
+        """Result directory (ArtifactCollector scans this directory)"""
+        return self.root / "output"
+
+    @property
+    def artifacts_dir(self) -> Path:
+        """Promoted structured artifact cache directory"""
+        return self.root / "artifacts"
+
+    @property
+    def logs_dir(self) -> Path:
+        """stdout / stderr / event log directory"""
+        return self.root / "logs"
+
+    @property
+    def tmp_dir(self) -> Path:
+        """Runtime temp files directory"""
+        return self.root / "tmp"
+
+    # ------------------------------------------------------------------
+    # SandboxExecutor mount configuration
     # ------------------------------------------------------------------
 
     def get_mount_config(self) -> MountConfig:
@@ -88,27 +113,42 @@ class SessionWorkspace:
         return {cfg.host_path: {"bind": cfg.container_path, "mode": cfg.mode}}
 
     # ------------------------------------------------------------------
-    # Workspace 快照（供 ArtifactCollector 使用）
+    # stdout / stderr writing (separated into logs/)
+    # ------------------------------------------------------------------
+
+    def write_stdout(self, node_id: str, content: bytes) -> Path:
+        """Write stdout to logs/{node_id}_stdout.txt, return path"""
+        path = self.logs_dir / f"{node_id}_stdout.txt"
+        path.write_bytes(content)
+        return path
+
+    def write_stderr(self, node_id: str, content: bytes) -> Path:
+        """Write stderr to logs/{node_id}_stderr.txt, return path"""
+        path = self.logs_dir / f"{node_id}_stderr.txt"
+        path.write_bytes(content)
+        return path
+
+    # ------------------------------------------------------------------
+    # Workspace snapshot (for ArtifactCollector)
+    # Scans only output/, other directories are not user output
     # ------------------------------------------------------------------
 
     def snapshot_workspace(self) -> Dict[str, float]:
         """
-        返回 session sandbox 根目录下所有文件的 {相对路径: mtime} 快照。
-        排除 SCAN_EXCLUDE_DIRS 中的根目录（当前为空，所有文件均收集）。
-        ArtifactCollector 用前后快照 diff 找到新增/修改文件。
+        Return {relative_path: mtime} snapshot of all files under output/.
+        ArtifactCollector uses before/after snapshot diff to find new/modified files.
+        Only scans output/, not input/artifacts/logs/tmp.
         """
         snapshot: Dict[str, float] = {}
-        if not self.root.exists():
+        scan_root = self.output_dir
+        if not scan_root.exists():
             return snapshot
-        for p in self.root.rglob("*"):
+        for p in scan_root.rglob("*"):
             if not p.is_file():
                 continue
             try:
                 rel = p.relative_to(self.root)
             except ValueError:
-                continue
-            # 排除根目录系统目录（仅排第一级）
-            if SCAN_EXCLUDE_DIRS and rel.parts and rel.parts[0] in SCAN_EXCLUDE_DIRS:
                 continue
             snapshot[str(rel)] = p.stat().st_mtime
         return snapshot
@@ -118,28 +158,28 @@ class SessionWorkspace:
         before: Dict[str, float],
     ) -> Dict[str, List[Path]]:
         """
-        对比 before 快照，返回新增和修改的文件。
+        Compare against before snapshot, return new and modified files in output/.
 
         Returns:
             {"new": [...], "modified": [...]}
         """
         after = self.snapshot_workspace()
-        new_keys      = set(after.keys()) - set(before.keys())
+        new_keys = set(after.keys()) - set(before.keys())
         modified_keys = {
             k for k in after.keys() & before.keys()
             if after[k] != before[k]
         }
         return {
-            "new":      [self.root / k for k in sorted(new_keys)],
+            "new": [self.root / k for k in sorted(new_keys)],
             "modified": [self.root / k for k in sorted(modified_keys)],
         }
 
     # ------------------------------------------------------------------
-    # 清理
+    # Cleanup
     # ------------------------------------------------------------------
 
     def cleanup_all(self):
-        """删除整个 session sandbox（session 结束后调用）"""
+        """Delete entire session sandbox (call when session ends)"""
         if self.root.exists():
             shutil.rmtree(self.root, ignore_errors=True)
             logger.info(f"[SessionWorkspace] Cleaned up {self.session_id}")
@@ -148,10 +188,17 @@ class SessionWorkspace:
         return f"<SessionWorkspace session_id={self.session_id} root={self.root}>"
 
 
+# ---------------------------------------------------------------------------
+# Global singleton manager
+# ---------------------------------------------------------------------------
+
+_manager: Optional["SessionWorkspaceManager"] = None
+
+
 class SessionWorkspaceManager:
     """
-    管理所有 session 的 sandbox workspace。
-    根目录固定在 ~/.avatar/sessions/，不随用户 workspace 变化。
+    Manages sandbox workspaces for all sessions.
+    Root directory fixed at ~/.avatar/sessions/, independent of user workspace.
     """
 
     def __init__(self, base_path: Optional[Path] = None):
@@ -179,10 +226,6 @@ class SessionWorkspaceManager:
     def cleanup_all(self, delete_files: bool = False):
         for session_id in list(self._sessions.keys()):
             self.cleanup(session_id, delete_files=delete_files)
-
-
-# 全局单例
-_manager: Optional[SessionWorkspaceManager] = None
 
 
 def init_session_workspace_manager(base_path: Optional[Path] = None) -> SessionWorkspaceManager:

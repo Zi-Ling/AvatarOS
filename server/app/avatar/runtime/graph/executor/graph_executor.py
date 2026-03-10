@@ -49,6 +49,7 @@ class GraphExecutor:
         base_path: Optional[Any] = None,          # fallback，WorkspaceManager 未初始化时使用
         workspace_manager: Optional[Any] = None,  # 已废弃，保留向后兼容，不再使用
         memory_manager: Optional[Any] = None,
+        learning_manager: Optional[Any] = None,
         workspace: Optional[Any] = None,          # SessionWorkspace — 传给 SkillContext.extra
         # Legacy params kept for backward compat during transition
         capability_registry: Optional[Any] = None,
@@ -59,8 +60,8 @@ class GraphExecutor:
         self.granted_permissions: List[str] = granted_permissions or []
         self._fallback_base_path = Path(base_path) if base_path else Path(".")
         self.memory_manager = memory_manager
+        self.learning_manager = learning_manager
         self.workspace = workspace
-        logger.info("GraphExecutor initialized")
 
     @property
     def base_path(self) -> Path:
@@ -253,17 +254,20 @@ class GraphExecutor:
             )
 
         # base_path 始终用 user workspace，保证 fs.read/write 等 skill 路径正确。
-        # session_workspace 单独通过 extra["workspace"] 传递给需要它的 skill（如 net.download、python.run）。
+        # session_workspace 优先从 ExecutionContext 取（按 session_id 动态创建），
+        # 其次 fallback 到 self.workspace（向后兼容）。
         base_path = self._get_base_path()
 
         # python.run: inject upstream node outputs as variables
         if skill_name == "python.run" and context is not None:
             params = self._inject_node_outputs_into_code(params, context)
 
-        # 构建 extra：workspace + file_registry（懒初始化，存储在 ~/.avatar/）
+        # 构建 extra：workspace 优先从 context 取，保证 session 隔离
         extra: Dict[str, Any] = {}
-        if self.workspace is not None:
-            extra["workspace"] = self.workspace
+        _ctx_workspace = getattr(context, "workspace", None) if context is not None else None
+        _effective_workspace = _ctx_workspace or self.workspace
+        if _effective_workspace is not None:
+            extra["workspace"] = _effective_workspace
         # 注入 exec_session_id，子进程查 Grant 时用于 scope_id 精确匹配
         if context is not None and getattr(context, "env", None):
             _exec_sid = context.env.get("exec_session_id") if isinstance(context.env, dict) else None
@@ -285,6 +289,7 @@ class GraphExecutor:
             workspace_root=base_path,
             dry_run=False,
             memory_manager=self.memory_manager,
+            learning_manager=self.learning_manager,
             extra=extra,
         )
 
@@ -323,7 +328,7 @@ class GraphExecutor:
         return result_dict
 
     # Keep _execute_sequential for backward compat with existing tests
-    async def _execute_sequential(self, capability_or_skill, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_sequential(self, capability_or_skill, params: Dict[str, Any], context: Optional['ExecutionContext'] = None) -> Dict[str, Any]:
         """
         Backward-compatible sequential execution.
         Accepts either a Capability object (legacy) or a skill name string.
@@ -347,8 +352,10 @@ class GraphExecutor:
 
                 base_path = self._get_base_path()
                 extra: Dict[str, Any] = {}
-                if self.workspace is not None:
-                    extra["workspace"] = self.workspace
+                _ctx_workspace = getattr(context, "workspace", None) if context is not None else None
+                _eff_ws = _ctx_workspace or self.workspace
+                if _eff_ws is not None:
+                    extra["workspace"] = _eff_ws
                 if hasattr(self, "_file_registry") and self._file_registry is not None:
                     extra["file_registry"] = self._file_registry
                 ctx = SkillContext(
@@ -356,6 +363,7 @@ class GraphExecutor:
                     workspace_root=base_path,
                     dry_run=False,
                     memory_manager=self.memory_manager,
+                    learning_manager=self.learning_manager,
                     extra=extra,
                 )
 
@@ -392,7 +400,7 @@ class GraphExecutor:
 
         容器内固定读取方式：
             import json
-            with open('/workspace/inputs/{node_id}_output.json') as f:
+            with open('/workspace/input/{node_id}_output.json') as f:
                 {node_id}_output = json.load(f)
 
         结构化输出协议：
@@ -407,11 +415,13 @@ class GraphExecutor:
         if not all_outputs:
             return self._inject_output_helper(params)
 
-        if self.workspace is None:
+        # 优先从 context 取 workspace（session 隔离），fallback 到 self.workspace
+        _effective_ws = getattr(context, "workspace", None) or self.workspace
+        if _effective_ws is None:
             return self._inject_node_outputs_repr_fallback(params, context)
 
-        workspace_root = str(Path(self.workspace.root).resolve())
-        inputs_dir = Path(self.workspace.root) / "inputs"
+        workspace_root = str(Path(_effective_ws.root).resolve())
+        inputs_dir = Path(_effective_ws.root) / "input"  # 使用标准 input/ 目录
         inputs_dir.mkdir(parents=True, exist_ok=True)
 
         manifest: Dict[str, Any] = {}
@@ -453,7 +463,7 @@ class GraphExecutor:
             # 结构化数据：序列化为 JSON 文件
             json_filename = f"{var_name}.json"
             json_path = inputs_dir / json_filename
-            container_json_path = f"{CONTAINER_WORKSPACE_PATH}/inputs/{json_filename}"
+            container_json_path = f"{CONTAINER_WORKSPACE_PATH}/input/{json_filename}"
 
             try:
                 with open(json_path, "w", encoding="utf-8") as f:

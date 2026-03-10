@@ -33,10 +33,11 @@ class ExecutionSession(SQLModel, table=True):
     )
 
     # ── 业务身份锚点 ──────────────────────────────────────────────────
-    run_id: Optional[str] = Field(default=None, index=True)     # 对应 runs.id
-    task_id: Optional[str] = Field(default=None, index=True)    # 对应 tasks.id
-    request_id: Optional[str] = Field(default=None, index=True) # 来自 HTTP/socket 请求 id
-    trace_id: Optional[str] = Field(default=None, index=True)   # 分布式 trace id（供 inspector/replay）
+    run_id: Optional[str] = Field(default=None, index=True)          # 对应 runs.id
+    task_id: Optional[str] = Field(default=None, index=True)         # 对应 tasks.id
+    request_id: Optional[str] = Field(default=None, index=True)      # 来自 HTTP/socket 请求 id
+    trace_id: Optional[str] = Field(default=None, index=True)        # 分布式 trace id（供 inspector/replay）
+    conversation_id: Optional[str] = Field(default=None, index=True) # 对应 chat session_id，供按对话过滤
 
     # ── 生命周期状态机 ────────────────────────────────────────────────
     status: str = Field(default="created", index=True)

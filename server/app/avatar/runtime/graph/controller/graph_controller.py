@@ -220,6 +220,7 @@ class GraphController:
             task_id=env_context.get("task_id"),
             request_id=env_context.get("request_id"),
             trace_id=env_context.get("trace_id"),
+            conversation_id=env_context.get("session_id"),  # chat session_id → conversation_id
             workspace_path=_workspace_path,
             policy_snapshot=_policy_snap,
             runtime_config_snapshot=_runtime_config_snap,

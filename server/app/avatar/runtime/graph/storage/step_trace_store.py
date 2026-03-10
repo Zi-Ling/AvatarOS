@@ -1,9 +1,12 @@
 # app/avatar/runtime/graph/storage/step_trace_store.py
-# StepTraceStore - 执行证据链（append-only）
-# SessionTraceRecord 使用 event_type + payload_json 统一结构，避免字段爆炸。
-# 支持的 event_type：session_created/session_planned/session_running/
-#   plan_generated/policy_decision/node_completed/node_failed/
-#   session_completed/session_failed/session_cancelled/invalid_transition
+# StepTraceStore - 执行证据链（append-only，三层）
+#
+# 层级：
+#   SessionTraceRecord — session 级事件（session_created/plan_generated/policy_decision/...）
+#   StepTraceRecord    — step 级详情（每个 node 的完整执行记录）
+#   EventTraceRecord   — 细粒度事件（sandbox_start/artifact_collected/retry_scheduled/container_broken/...）
+#
+# 所有表均 append-only，不做 UPDATE。
 
 import json
 import logging
@@ -31,6 +34,34 @@ class SessionTraceRecord(SQLModel, table=True):
     event_type: str = Field(index=True)
     payload_json: Optional[str] = Field(default=None)
     summary: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class EventTraceRecord(SQLModel, table=True):
+    """
+    第三层：细粒度执行事件（append-only）。
+
+    覆盖 SessionTrace / StepTrace 无法表达的细粒度时间点：
+      sandbox_start       — 容器 acquire 成功，开始执行
+      sandbox_end         — 容器 release，执行结束
+      sandbox_broken      — 容器在 BUSY 中崩溃，SandboxFailure 触发
+      artifact_collected  — 单个 artifact promotion 完成
+      retry_scheduled     — retry 决策，记录 attempt/delay/error
+      container_created   — pool 新建容器
+      container_removed   — pool 移除容器
+      policy_block        — policy 拦截单个操作（非 session 级）
+    """
+    __tablename__ = "event_traces"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: str = Field(index=True)
+    step_id: Optional[str] = Field(default=None, index=True)   # 关联 StepTraceRecord.step_id
+    event_type: str = Field(index=True)
+    # 细粒度关联
+    container_id: Optional[str] = Field(default=None, index=True)
+    artifact_id: Optional[str] = Field(default=None, index=True)
+    # 通用 payload
+    payload_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -68,6 +99,47 @@ class StepTraceStore:
             engine = default_engine
         self._engine = engine
         logger.info("[StepTraceStore] Initialized")
+
+    # ------------------------------------------------------------------
+    # 第三层：细粒度 Event Trace
+    # ------------------------------------------------------------------
+
+    def record_event(
+        self,
+        session_id: str,
+        event_type: str,
+        step_id: Optional[str] = None,
+        container_id: Optional[str] = None,
+        artifact_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        写一条细粒度 EventTraceRecord（append-only，失败静默）。
+
+        event_type 约定值：
+          sandbox_start / sandbox_end / sandbox_broken
+          artifact_collected
+          retry_scheduled
+          container_created / container_removed
+          policy_block
+        """
+        record = EventTraceRecord(
+            session_id=session_id,
+            step_id=step_id,
+            event_type=event_type,
+            container_id=container_id,
+            artifact_id=artifact_id,
+            payload_json=json.dumps(payload or {}, default=str, ensure_ascii=False),
+        )
+        try:
+            with Session(self._engine) as db:
+                db.add(record)
+                db.commit()
+            logger.debug(
+                f"[StepTraceStore] event session={session_id} step={step_id} type={event_type}"
+            )
+        except Exception as e:
+            logger.warning(f"[StepTraceStore] record_event failed: {e}")
 
     def record_session_event(
         self,
@@ -144,6 +216,31 @@ class StepTraceStore:
                 .where(SessionTraceRecord.session_id == session_id)
                 .order_by(SessionTraceRecord.created_at)
             ).all()
+        result = []
+        for r in records:
+            d = r.model_dump()
+            d["payload"] = json.loads(r.payload_json) if r.payload_json else {}
+            result.append(d)
+        return result
+
+    def get_event_traces(
+        self,
+        session_id: str,
+        step_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """查询细粒度 EventTraceRecord，可按 step_id / event_type 过滤。"""
+        with Session(self._engine) as db:
+            stmt = (
+                select(EventTraceRecord)
+                .where(EventTraceRecord.session_id == session_id)
+                .order_by(EventTraceRecord.created_at)
+            )
+            if step_id:
+                stmt = stmt.where(EventTraceRecord.step_id == step_id)
+            if event_type:
+                stmt = stmt.where(EventTraceRecord.event_type == event_type)
+            records = db.exec(stmt).all()
         result = []
         for r in records:
             d = r.model_dump()

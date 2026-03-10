@@ -23,6 +23,14 @@ from app.avatar.runtime.events.bridge import SocketBridge
 
 logger = logging.getLogger(__name__)
 
+# 全局 AvatarMain 实例引用（供 ReplayEngine 等内部组件访问）
+_avatar_main_instance: "AvatarMain | None" = None
+
+
+def get_avatar_main() -> "AvatarMain | None":
+    """返回全局 AvatarMain 实例，未初始化时返回 None。"""
+    return _avatar_main_instance
+
 
 class AppBootstrap:
     """应用组件的初始化和关闭管理"""
@@ -207,6 +215,7 @@ class AppBootstrap:
 
     def _init_runtime(self, llm_client):
         logger.info("🚀 初始化 Avatar 运行时...")
+        global _avatar_main_instance
         self.app.state.avatar_runtime = AvatarMain(
             base_path=config.avatar_workspace,
             memory_manager=self.app.state.memory_manager,
@@ -215,6 +224,7 @@ class AppBootstrap:
             dry_run=False,
             workspace_manager=self.app.state.workspace_manager,
         )
+        _avatar_main_instance = self.app.state.avatar_runtime
 
     def _init_router(self, llm_client, llm_logger):
         logger.info("🧭 初始化智能路由...")

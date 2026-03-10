@@ -30,7 +30,7 @@ setup_logging(
 
 from app.api import (
     chat_router, task_router, speech_router, skill_router,
-    filesystem_router, schedule_router, history_router, workspace_router,
+    filesystem_router, schedule_router, history_router, artifacts_router, workspace_router,
     state_router, memory_router, approval_router,
 )
 from app.api.learning import learning_router
@@ -83,7 +83,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 for router in [
     chat_router, task_router, speech_router, learning_router,
     logging_router, skill_router, filesystem_router, schedule_router,
-    history_router, workspace_router, knowledge_router, workflow_router,
+    history_router, artifacts_router, workspace_router, knowledge_router, workflow_router,
     state_router, memory_router, approval_router,
 ]:
     fastapi_app.include_router(router)

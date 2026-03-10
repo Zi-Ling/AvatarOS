@@ -130,6 +130,28 @@ class ArtifactCollector:
                     f"→ artifact {artifact.artifact_id} (node={node_id})"
                 )
 
+                # 持久化到 ArtifactRecord 表
+                try:
+                    from app.db.artifact_record import ArtifactRecord
+                    from app.db.database import engine
+                    from sqlmodel import Session as DBSession
+                    record = ArtifactRecord(
+                        artifact_id=artifact.artifact_id,
+                        session_id=session_id,
+                        step_id=node_id,
+                        filename=artifact.filename,
+                        storage_uri=artifact.storage_uri,
+                        size=artifact.size,
+                        checksum=artifact.checksum,
+                        mime_type=artifact.mime_type,
+                        artifact_type=artifact.artifact_type,
+                    )
+                    with DBSession(engine) as db:
+                        db.add(record)
+                        db.commit()
+                except Exception as db_err:
+                    logger.warning(f"[ArtifactCollector] ArtifactRecord persist failed: {db_err}")
+
                 # 导出到用户 workspace
                 if export_to is not None:
                     try:

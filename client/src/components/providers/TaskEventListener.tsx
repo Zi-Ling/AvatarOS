@@ -193,6 +193,7 @@ export function TaskEventListener() {
         updateStep(stepId, {
           status: "completed",
           output_result: payload.raw_output || payload.result,
+          ...(payload.artifact_ids?.length ? { artifact_ids: payload.artifact_ids } : {}),
         });
 
         const { activeTask } = useTaskStore.getState();

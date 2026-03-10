@@ -155,9 +155,33 @@ class NodeRunner:
         # Main execution loop with retry logic
         while True:
             try:
+                # --- Event Trace: sandbox_start ---
+                if self.trace_store:
+                    try:
+                        self.trace_store.record_event(
+                            session_id=session_id,
+                            event_type="sandbox_start",
+                            step_id=node.id,
+                            payload={"attempt": node.retry_count + 1, "capability": node.capability_name},
+                        )
+                    except Exception:
+                        pass
+
                 await self.executor.execute_node(graph, node, context)
 
                 execution_time = (datetime.now() - start_time).total_seconds()
+
+                # --- Event Trace: sandbox_end ---
+                if self.trace_store:
+                    try:
+                        self.trace_store.record_event(
+                            session_id=session_id,
+                            event_type="sandbox_end",
+                            step_id=node.id,
+                            payload={"execution_time_s": execution_time, "status": "success"},
+                        )
+                    except Exception:
+                        pass
 
                 # --- artifact collection（执行后）---
                 artifact_ids: List[str] = []
@@ -187,10 +211,31 @@ class NodeRunner:
                                 f"[NodeRunner] Node {node.id} produced "
                                 f"{len(artifact_ids)} artifact(s)"
                             )
+                            # --- Event Trace: artifact_collected（每个 artifact 一条）---
+                            if self.trace_store:
+                                for ca in collected:
+                                    try:
+                                        self.trace_store.record_event(
+                                            session_id=session_id,
+                                            event_type="artifact_collected",
+                                            step_id=node.id,
+                                            artifact_id=ca.artifact_id,
+                                            payload={
+                                                "filename": ca.filename,
+                                                "size": ca.size,
+                                                "artifact_type": ca.artifact_type,
+                                                "mime_type": ca.mime_type,
+                                            },
+                                        )
+                                    except Exception:
+                                        pass
                     except Exception as e:
                         logger.warning(
                             f"[NodeRunner] Artifact collection failed for node {node.id}: {e}"
                         )
+
+                # --- 记录 artifact 消费关系（当前 node 消费了哪些 artifact）---
+                self._record_artifact_consumption(node, session_id)
 
                 logger.info(
                     f"[NodeRunner] Node {node.id} completed successfully "
@@ -206,7 +251,9 @@ class NodeRunner:
                     ended_at=datetime.now(),
                     execution_time_s=execution_time,
                     artifact_ids=artifact_ids,
-                    output_summary=self._summarize(node.outputs),
+                    output_summary=self._summarize(
+                        {k: v for k, v in (node.outputs or {}).items() if k != "__artifacts__"}
+                    ),
                     workspace_path=str(workspace.root) if workspace else None,
                 )
 
@@ -243,6 +290,24 @@ class NodeRunner:
                         "retry",
                         {"attempt": node.retry_count, "delay": delay, "error": error_message}
                     )
+
+                    # --- Event Trace: retry_scheduled ---
+                    if self.trace_store:
+                        try:
+                            self.trace_store.record_event(
+                                session_id=session_id,
+                                event_type="retry_scheduled",
+                                step_id=node.id,
+                                payload={
+                                    "attempt": node.retry_count,
+                                    "max_retries": node.retry_policy.max_retries,
+                                    "delay_s": delay,
+                                    "error": error_message,
+                                },
+                            )
+                        except Exception:
+                            pass
+
                     await asyncio.sleep(delay)
                     continue
 
@@ -254,6 +319,24 @@ class NodeRunner:
                         f"[NodeRunner] Node {node.id} failed permanently "
                         f"after {node.retry_count} retries in {execution_time:.2f}s: {error_message}"
                     )
+
+                    # --- Event Trace: sandbox_broken（如果是 SandboxFailure）---
+                    if self.trace_store:
+                        try:
+                            from app.avatar.runtime.executor.container_pool import SandboxFailure
+                            is_sandbox_failure = isinstance(
+                                getattr(e, "__cause__", None) or e,
+                                SandboxFailure
+                            )
+                            if is_sandbox_failure:
+                                self.trace_store.record_event(
+                                    session_id=session_id,
+                                    event_type="sandbox_broken",
+                                    step_id=node.id,
+                                    payload={"error": error_message, "retry_count": node.retry_count},
+                                )
+                        except Exception:
+                            pass
 
                     # --- trace 记录 ---
                     self._write_trace(
@@ -409,6 +492,8 @@ class NodeRunner:
         error_message: Optional[str] = None,
         output_summary: Optional[str] = None,
         workspace_path: Optional[str] = None,
+        container_id: Optional[str] = None,
+        sandbox_backend: Optional[str] = None,
     ) -> None:
         """写一条 step trace，失败时静默（不影响主流程）"""
         if self.trace_store is None:
@@ -431,9 +516,52 @@ class NodeRunner:
                 workspace_path=workspace_path,
                 artifact_ids=artifact_ids or [],
                 output_summary=output_summary,
+                container_id=container_id,
+                sandbox_backend=sandbox_backend,
             )
         except Exception as e:
             logger.warning(f"[NodeRunner] Trace write failed for node {node.id}: {e}")
+
+    def _record_artifact_consumption(self, node: 'StepNode', session_id: str) -> None:
+        """
+        记录当前 node 消费了哪些 artifact（通过 params 里的 artifact_id 引用）。
+        扫描 node.params，找出值为 artifact_id 格式的字段，
+        在 ArtifactRecord 里追加 consumed_by_step_ids。
+        """
+        try:
+            import json as _json
+            params = node.params or {}
+            # 收集所有 param 值中看起来像 artifact_id 的字符串
+            candidate_ids: List[str] = []
+            for v in params.values():
+                if isinstance(v, str) and len(v) == 36 and v.count("-") == 4:
+                    candidate_ids.append(v)
+                elif isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, str) and len(item) == 36 and item.count("-") == 4:
+                            candidate_ids.append(item)
+
+            if not candidate_ids:
+                return
+
+            from app.db.artifact_record import ArtifactRecord
+            from app.db.database import engine
+            from sqlmodel import Session as DBSession, select as db_select
+
+            with DBSession(engine) as db:
+                for aid in candidate_ids:
+                    record = db.exec(
+                        db_select(ArtifactRecord).where(ArtifactRecord.artifact_id == aid)
+                    ).first()
+                    if record:
+                        existing = _json.loads(record.consumed_by_step_ids_json) if record.consumed_by_step_ids_json else []
+                        if node.id not in existing:
+                            existing.append(node.id)
+                            record.consumed_by_step_ids_json = _json.dumps(existing)
+                            db.add(record)
+                db.commit()
+        except Exception as e:
+            logger.debug(f"[NodeRunner] _record_artifact_consumption failed for {node.id}: {e}")
 
     @staticmethod
     def _summarize(data: Optional[Dict[str, Any]], max_len: int = 200) -> Optional[str]:

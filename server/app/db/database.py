@@ -28,8 +28,9 @@ def init_db():
     from app.db.logging import LLMCall, RouterRequest                     # noqa: F401
     from app.db.workflow import WorkflowTemplateDB, WorkflowRunDB, WorkflowStageRunDB  # noqa: F401
     from app.db.system import ApprovalRequest, Grant, KVState, AuditLog, ExecutionSession, PlannerInvocation  # noqa: F401
-    from app.avatar.runtime.graph.storage.step_trace_store import SessionTraceRecord, StepTraceRecord  # noqa: F401
+    from app.avatar.runtime.graph.storage.step_trace_store import SessionTraceRecord, StepTraceRecord, EventTraceRecord  # noqa: F401
     from app.db.file_artifact import FileArtifact                         # noqa: F401
+    from app.db.artifact_record import ArtifactRecord                     # noqa: F401
 
     SQLModel.metadata.create_all(engine)
     logging.getLogger(__name__).info(f"数据库初始化完成: {AVATAR_DB_PATH}")

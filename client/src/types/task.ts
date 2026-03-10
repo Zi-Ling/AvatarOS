@@ -14,6 +14,7 @@ export type TaskStep = {
   params?: any;
   depends_on?: string[];
   output_result?: any;
+  artifact_ids?: string[];
 };
 
 export type TaskState = {
