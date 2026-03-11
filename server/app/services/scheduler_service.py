@@ -54,10 +54,6 @@ class SchedulerService:
         Helper to add a job based on Schedule model
         """
         try:
-            # 解析 cron 表达式 "0 9 * * *" -> {minute:0, hour:9 ...}
-            # APScheduler CronTrigger.from_crontab 并不是标准支持，我们手动解析简单格式
-            # 或者直接传给 CronTrigger
-            # 假设 cron_expression 是 5位标准格式 "min hour day month day_of_week"
             parts = schedule.cron_expression.split()
             if len(parts) != 5:
                 logger.warning(f"Invalid cron expression for schedule {schedule.id}: {schedule.cron_expression}")
@@ -70,12 +66,7 @@ class SchedulerService:
                 month=parts[3],
                 day_of_week=parts[4]
             )
-            
-            # 我们需要把 execute_scheduled_task 包装成同步函数给 APScheduler 调用
-            # 但 execute_scheduled_task 内部需要 await agent_loop.run
-            # APScheduler 3.x 默认在线程池运行同步函数
-            # 我们需要用 asyncio.run_coroutine_threadsafe 或者其它桥接方式
-            
+
             self.scheduler.add_job(
                 func=self.execute_wrapper,
                 trigger=trigger,
@@ -84,6 +75,20 @@ class SchedulerService:
                 replace_existing=True,
                 name=schedule.name
             )
+
+            # 回写 next_run_at
+            try:
+                job = self.scheduler.get_job(schedule.id)
+                if job and job.next_run_time:
+                    with Session(engine) as session:
+                        s = session.get(Schedule, schedule.id)
+                        if s:
+                            s.next_run_at = job.next_run_time.replace(tzinfo=None)
+                            session.add(s)
+                            session.commit()
+            except Exception as e:
+                logger.warning(f"Failed to update next_run_at for {schedule.id}: {e}")
+
         except Exception as e:
             logger.error(f"Failed to add job {schedule.id}: {e}")
 
@@ -109,7 +114,10 @@ class SchedulerService:
                 intent_type=intent_spec.get("intent_type", "unknown"),
                 domain=IntentDomain(intent_spec.get("domain", "other")),
                 raw_user_input=intent_spec.get("goal"), # Fallback
-                params=intent_spec.get("params", {})
+                params={
+                    **intent_spec.get("params", {}),
+                    "_schedule_id": schedule_id,  # 注入 schedule_id 供依赖检查使用
+                }
             )
             
             if self.main_loop and not self.main_loop.is_closed():
@@ -138,35 +146,49 @@ class SchedulerService:
 
     def _check_dependencies(self, schedule_id: str) -> bool:
         """
-        检查任务依赖是否满足
-        返回 True 表示可以执行，False 表示依赖未满足
+        检查任务依赖是否满足：所有依赖 schedule 的最近一次 Run 必须是 completed
         """
         with Session(engine) as session:
             schedule = session.get(Schedule, schedule_id)
             if not schedule or not schedule.depends_on:
-                return True  # 无依赖，可以执行
-            
-            # 检查每个依赖任务的最近一次执行状态
+                return True
+
             from app.db.task.task import Task, Run
-            
+
             for dep_schedule_id in schedule.depends_on:
-                # 查找依赖任务的最近一次执行记录
-                # 通过 schedule_id 关联到 Task，再到 Run
                 dep_schedule = session.get(Schedule, dep_schedule_id)
                 if not dep_schedule:
-                    logger.warning(f"Dependency {dep_schedule_id} not found")
+                    logger.warning(f"Dependency {dep_schedule_id} not found, blocking execution")
                     return False
-                
-                # 查找最近一次执行（通过 Task 的 intent_spec 匹配）
-                # 简化逻辑：检查 last_run_at 是否存在且成功
-                # 更严格的实现应该查询 Run 表
-                if not dep_schedule.last_run_at:
+
+                # 找到该 schedule 触发的最近一次 Task（task_mode=scheduled，
+                # intent_spec 里 metadata.schedule_id 匹配）
+                dep_tasks = session.exec(
+                    select(Task).where(Task.task_mode == "scheduled")
+                ).all()
+                dep_task_ids = [
+                    t.id for t in dep_tasks
+                    if t.intent_spec.get("metadata", {}).get("schedule_id") == dep_schedule_id
+                ]
+
+                if not dep_task_ids:
                     logger.info(f"Dependency {dep_schedule_id} has never run")
                     return False
-                
-                # TODO: 更严格的检查应该查询 Run 表的状态
-                # 这里简化为：只要依赖任务执行过就算满足
-            
+
+                # 取最近一次 Run
+                latest_run = session.exec(
+                    select(Run)
+                    .where(Run.task_id.in_(dep_task_ids))  # type: ignore[attr-defined]
+                    .order_by(Run.created_at.desc())  # type: ignore[attr-defined]
+                ).first()
+
+                if not latest_run or latest_run.status != "completed":
+                    logger.info(
+                        f"Dependency {dep_schedule_id} last run status: "
+                        f"{latest_run.status if latest_run else 'none'}"
+                    )
+                    return False
+
             return True
 
     def update_last_run(self, schedule_id: str):
@@ -188,12 +210,19 @@ class SchedulerService:
             session.add(s)
             session.commit()
             session.refresh(s)
-            
+
+            # 把 schedule_id 写入 intent_spec.metadata，供依赖检查关联 Task
+            intent_with_id = {
+                **intent,
+                "metadata": {**intent.get("metadata", {}), "schedule_id": s.id},
+            }
+            s.intent_spec = intent_with_id
+            session.add(s)
+            session.commit()
+            session.refresh(s)
+
             self._add_job_to_scheduler(s)
-            
-            # 🔔 发送 Socket.IO 事件通知前端
             self._emit_schedule_event('created', s)
-            
             return s
     
     def _emit_schedule_event(self, event_type: str, schedule: Schedule):

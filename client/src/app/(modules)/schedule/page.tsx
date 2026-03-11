@@ -9,13 +9,13 @@ import {
   CheckCircle2,
   AlertCircle,
   RefreshCw,
-  ArrowRight,
   BarChart3,
   XCircle
 } from "lucide-react";
 import { TimelineView, TimelineNode } from "./_components/TimelineView";
 import { CalendarView } from "./_components/CalendarView";
 import { EditScheduleDialog } from "./_components/EditScheduleDialog";
+import { CreateScheduleDialog } from "./_components/CreateScheduleDialog";
 import { StatsPanel } from "./_components/StatsPanel";
 import { DependencySelector } from "./_components/DependencySelector";
 import { scheduleApi, ScheduleItem } from "@/lib/api/schedule";
@@ -118,11 +118,6 @@ export default function SchedulePage() {
   const handleSetDependency = (scheduleId: string) => {
     const schedule = schedules.find(s => s.id === scheduleId);
     if (schedule) setDependencySchedule(schedule);
-  };
-
-  const handleGoToChat = () => {
-    setShowCreateDialog(false);
-    window.location.href = '/chat';
   };
 
   return (
@@ -309,68 +304,12 @@ export default function SchedulePage() {
         onSuccess={loadData}
       />
 
-      {/* 创建任务引导 Dialog */}
-      {showCreateDialog && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl max-w-lg w-full p-8 animate-in zoom-in-95 duration-300">
-            {/* Header */}
-            <div className="text-center mb-6">
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-indigo-500/30">
-                <Clock className="w-8 h-8 text-white" />
-              </div>
-              <h2 className="text-2xl font-bold text-slate-800 dark:text-white mb-2">
-                创建定时任务
-              </h2>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                使用自然语言，让 AI 助手帮你创建和管理任务
-              </p>
-            </div>
-
-            {/* 示例 */}
-            <div className="bg-slate-50 dark:bg-slate-800/50 rounded-xl p-4 mb-6">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
-                💡 示例
-              </h3>
-              <div className="space-y-2">
-                {[
-                  "每天早上9点提醒我查看邮件",
-                  "每周一下午3点帮我生成周报",
-                  "每月1号早上10点检查账单"
-                ].map((example, i) => (
-                  <div key={i} className="flex items-start gap-2 text-sm">
-                    <span className="text-indigo-500 mt-0.5">•</span>
-                    <span className="text-slate-600 dark:text-slate-300">{example}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div className="flex flex-col gap-3">
-              <button
-                onClick={handleGoToChat}
-                className="w-full px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl shadow-lg shadow-indigo-500/30 transition-all active:scale-95 flex items-center justify-center gap-2"
-              >
-                <span>前往聊天窗口创建</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => setShowCreateDialog(false)}
-                className="w-full px-6 py-2 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 font-medium transition-colors"
-              >
-                取消
-              </button>
-            </div>
-
-            {/* Footer Tip */}
-            <div className="mt-6 pt-6 border-t border-slate-200 dark:border-slate-700">
-              <p className="text-xs text-slate-400 text-center leading-relaxed">
-                💡 提示：AI 会自动理解你的时间表达，并创建对应的定时任务
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* 创建任务 Dialog */}
+      <CreateScheduleDialog
+        open={showCreateDialog}
+        onClose={() => setShowCreateDialog(false)}
+        onSuccess={loadData}
+      />
 
     </div>
   );

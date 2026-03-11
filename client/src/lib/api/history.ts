@@ -110,7 +110,7 @@ export interface ApprovalHistoryRecord {
   responded_at: string | null;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE = '';
 
 export const historyApi = {
   listSessions: async (limit = 50, conversationId?: string): Promise<SessionItem[]> => {

@@ -228,6 +228,34 @@ class UserConfig:
         low_risk_ops = approval_config.get("low_risk_operations", [])
         return operation in low_risk_ops
     
+    def set(self, key: str, value: Any) -> None:
+        """
+        设置配置值（支持点号分隔的嵌套键），并持久化到文件
+        
+        Examples:
+            config.set("llm.model", "deepseek-chat")
+            config.set("agent.max_replan_attempts", 3)
+        """
+        keys = key.split(".")
+        d = self._config
+        for k in keys[:-1]:
+            if k not in d or not isinstance(d[k], dict):
+                d[k] = {}
+            d = d[k]
+        d[keys[-1]] = value
+        self.save()
+
+    def save(self) -> None:
+        """将当前配置持久化到 config.yaml"""
+        try:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                yaml.dump(self._config, f, allow_unicode=True, default_flow_style=False)
+            logger.info(f"User config saved to {self.config_path}")
+        except Exception as e:
+            logger.error(f"Failed to save user config: {e}")
+            raise
+
     def reload(self):
         """重新加载配置文件"""
         self._load_config()

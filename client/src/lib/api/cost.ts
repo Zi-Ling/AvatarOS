@@ -1,6 +1,6 @@
 // client/src/lib/api/cost.ts
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE = '';
 
 export interface CostSummary {
   total_sessions: number;

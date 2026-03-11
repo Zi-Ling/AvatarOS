@@ -5,8 +5,10 @@ import { X } from "lucide-react";
 import { GeneralSettings } from "./_components/GeneralSettings";
 import { ModelSettings } from "./_components/ModelSettings";
 import { AdvancedSettings } from "./_components/AdvancedSettings";
+import { MaintenanceView } from "./_components/MaintenanceView";
+import { PolicyView } from "./_components/PolicyView";
 
-type SettingsTab = "general" | "model" | "advanced";
+type SettingsTab = "model" | "general" | "advanced" | "policy" | "maintenance";
 
 interface SettingsDialogProps {
   isOpen: boolean;
@@ -18,10 +20,12 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
 
   if (!isOpen) return null;
 
-  const tabs = [
-    { id: "model" as const, label: "模型设置", icon: "🤖" },
-    { id: "general" as const, label: "通用设置", icon: "⚙️" },
-    { id: "advanced" as const, label: "高级选项", icon: "🛠️" },
+  const tabs: { id: SettingsTab; label: string; icon: string }[] = [
+    { id: "model",       label: "模型设置", icon: "🤖" },
+    { id: "general",     label: "通用设置", icon: "⚙️" },
+    { id: "advanced",    label: "高级选项", icon: "🛠️" },
+    { id: "policy",      label: "访问策略", icon: "🛡️" },
+    { id: "maintenance", label: "系统维护", icon: "🔧" },
   ];
 
   return (
@@ -72,9 +76,11 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
           {/* Main Content */}
           <div className="flex-1 overflow-y-auto">
             <div className="h-full p-6">
-              {activeTab === "general" && <GeneralSettings />}
-              {activeTab === "model" && <ModelSettings />}
-              {activeTab === "advanced" && <AdvancedSettings />}
+              {activeTab === "model"       && <ModelSettings />}
+              {activeTab === "general"     && <GeneralSettings />}
+              {activeTab === "advanced"    && <AdvancedSettings />}
+              {activeTab === "policy"      && <PolicyView />}
+              {activeTab === "maintenance" && <MaintenanceView />}
             </div>
           </div>
         </div>

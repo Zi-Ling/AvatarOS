@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { ChevronLeft, ChevronRight, Plus, MoreHorizontal } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, Calendar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TimelineNode } from "./TimelineView";
 

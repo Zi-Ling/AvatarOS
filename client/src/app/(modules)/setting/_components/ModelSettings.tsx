@@ -59,6 +59,16 @@ export function ModelSettings() {
   const dropRef = useRef<HTMLDivElement>(null);
   const cur = PROVIDERS.find((p) => p.id === config.provider) || PROVIDERS[2];
 
+  // 初始化时从后端加载已保存配置
+  useEffect(() => {
+    fetch("/api/v1/settings/llm")
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => {
+        if (d) setConfig((c) => ({ ...c, ...d }));
+      })
+      .catch(() => {/* 后端未就绪时静默失败，使用默认值 */});
+  }, []);
+
   useEffect(() => {
     const h = (e: MouseEvent) => {
       if (dropRef.current && !dropRef.current.contains(e.target as Node)) {

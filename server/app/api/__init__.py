@@ -16,6 +16,7 @@ from .approval import router as approval_router
 from .policy import router as policy_router
 from .cost import router as cost_router
 from .maintenance import router as maintenance_router
+from .settings import router as settings_router
 
 __all__ = [
     "chat_router",
@@ -33,4 +34,5 @@ __all__ = [
     "policy_router",
     "cost_router",
     "maintenance_router",
+    "settings_router",
 ]

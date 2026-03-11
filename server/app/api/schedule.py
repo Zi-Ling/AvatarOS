@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from app.db.database import engine
 from app.db.task.schedule import Schedule
-from app.db.task.task import Task as TaskHistory, Run
+from app.db.task.task import Task, Run
 from app.services.scheduler_service import scheduler_service
 
 import logging
@@ -26,44 +26,47 @@ class UpdateDependenciesRequest(BaseModel):
 
 @router.get("/stats")
 async def get_schedule_stats() -> Dict[str, Any]:
-    """获取定时任务统计数据"""
+    """获取定时任务统计数据（只统计 scheduled task 触发的 Run）"""
     with Session(engine) as session:
         # 1. 基础统计
         total_schedules = session.exec(select(Schedule)).all()
         active_count = len([s for s in total_schedules if s.is_active])
-        
-        # 2. 执行历史统计（最近7天）
+
+        # 2. 只统计 task_mode="scheduled" 的 Task 下的 Run（最近7天）
         seven_days_ago = datetime.utcnow() - timedelta(days=7)
-        
-        # 获取所有任务的执行记录
-        runs = session.exec(
-            select(Run).where(Run.created_at >= seven_days_ago)
+
+        scheduled_tasks = session.exec(
+            select(Task).where(Task.task_mode == "scheduled")
         ).all()
-        
+        scheduled_task_ids = {t.id for t in scheduled_tasks}
+
+        runs = session.exec(
+            select(Run).where(
+                Run.created_at >= seven_days_ago,
+                Run.task_id.in_(scheduled_task_ids),  # type: ignore[attr-defined]
+            )
+        ).all() if scheduled_task_ids else []
+
         total_runs = len(runs)
-        success_runs = len([r for r in runs if r.status == 'completed'])
-        failed_runs = len([r for r in runs if r.status == 'failed'])
-        
+        success_runs = len([r for r in runs if r.status == "completed"])
+        failed_runs = len([r for r in runs if r.status == "failed"])
         success_rate = (success_runs / total_runs * 100) if total_runs > 0 else 0
-        
+
         # 3. 每日趋势（最近7天）
         trend = []
         for i in range(7):
-            day = datetime.utcnow() - timedelta(days=6-i)
+            day = datetime.utcnow() - timedelta(days=6 - i)
             day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
             day_end = day_start + timedelta(days=1)
-            
-            day_runs = [r for r in runs if day_start <= r.created_at < day_end]
-            day_success = len([r for r in day_runs if r.status == 'completed'])
-            day_failed = len([r for r in day_runs if r.status == 'failed'])
-            
+
+            day_runs = [r for r in runs if day_start <= r.created_at.replace(tzinfo=None) < day_end]
             trend.append({
                 "date": day.strftime("%m-%d"),
-                "success": day_success,
-                "failed": day_failed,
-                "total": len(day_runs)
+                "success": len([r for r in day_runs if r.status == "completed"]),
+                "failed": len([r for r in day_runs if r.status == "failed"]),
+                "total": len(day_runs),
             })
-        
+
         return {
             "total_schedules": len(total_schedules),
             "active_schedules": active_count,
@@ -72,7 +75,7 @@ async def get_schedule_stats() -> Dict[str, Any]:
             "success_runs": success_runs,
             "failed_runs": failed_runs,
             "success_rate": round(success_rate, 1),
-            "trend": trend
+            "trend": trend,
         }
 
 @router.get("/")
