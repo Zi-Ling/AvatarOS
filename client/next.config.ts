@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const BACKEND = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const nextConfig: NextConfig = {
+  // standalone 模式：Docker 部署必须，生成独立的 server.js
+  output: "standalone",
   devIndicators: {
     position: "bottom-right",
   },

@@ -49,6 +49,33 @@
 
 ## 🚀 快速开始
 
+### 方式一 — Docker（推荐）
+
+```bash
+git clone https://github.com/Zi-Ling/AvatarOS.git
+cd AvatarOS/docker
+
+# 配置 LLM API Key
+cp .env.example .env
+# 编辑 .env，填入 LLM_API_KEY
+
+# 构建镜像并启动（首次约需 10-20 分钟）
+docker compose up -d
+```
+
+浏览器打开 `http://localhost:3000` 即可使用。
+
+```bash
+docker compose logs -f     # 查看日志
+docker compose down        # 停止
+```
+
+> 依赖：Docker Desktop（或 Docker Engine + Compose 插件）
+
+---
+
+### 方式二 — 手动安装
+
 ```bash
 # 1. Clone
 git clone https://github.com/Zi-Ling/AvatarOS.git

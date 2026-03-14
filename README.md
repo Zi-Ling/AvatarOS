@@ -49,6 +49,33 @@ It is a local-first AI agent runtime. You describe a goal in natural language, a
 
 ## 🚀 Quick Start
 
+### Option A — Docker (recommended)
+
+```bash
+git clone https://github.com/Zi-Ling/AvatarOS.git
+cd AvatarOS/docker
+
+# Configure your LLM API key
+cp .env.example .env
+# Edit .env — set LLM_API_KEY
+
+# Build images and start (first run takes 10–20 min)
+docker compose up -d
+```
+
+Open `http://localhost:3000` in your browser.
+
+```bash
+docker compose logs -f     # view logs
+docker compose down        # stop
+```
+
+> Requires: Docker Desktop (or Docker Engine + Compose plugin)
+
+---
+
+### Option B — Manual
+
 ```bash
 # 1. Clone
 git clone https://github.com/Zi-Ling/AvatarOS.git
