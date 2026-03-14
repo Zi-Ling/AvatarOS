@@ -76,3 +76,4 @@ client/next-env.d.ts
 /server/tests/
 /server/examples/
 /server/docs
+/.kiro/
