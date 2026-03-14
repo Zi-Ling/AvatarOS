@@ -5,6 +5,7 @@ import {
   User, Clock, CheckCircle2, XCircle, Search, Trash2, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { knowledgeApi, UserPrefItem, EpisodicItem, MemorySearchResult } from "@/lib/api/knowledge";
+import { LoadingSpinner } from "@/components/ui/StateViews";
 
 type StatusFilter = "all" | "success" | "failed";
 
@@ -62,7 +63,7 @@ export function MemoriesView({ searchQuery = "" }: { searchQuery?: string }) {
   });
 
   if (loading) {
-    return <div className="h-full flex items-center justify-center text-slate-400">加载中...</div>;
+    return <LoadingSpinner size="lg" />;
   }
 
   return (

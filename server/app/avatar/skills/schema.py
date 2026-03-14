@@ -19,7 +19,9 @@ class SkillOutput(BaseModel):
     success: bool = True
     message: Optional[str] = None
     data: Optional[Any] = None
-    
+    # 语义失败时设为 False，告知 graph_executor 不要重试（重试同一操作不会有不同结果）
+    retryable: Optional[bool] = None
+
     # 文件系统操作元数据（用于自动刷新）
     fs_operation: Optional[str] = None  # 'created', 'modified', 'deleted'
     fs_path: Optional[str] = None  # 相对路径

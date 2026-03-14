@@ -65,6 +65,10 @@ const nextConfig: NextConfig = {
         source: "/chat/:path*",
         destination: `${BACKEND}/chat/:path*`,
       },
+      {
+        source: "/fs/:path*",
+        destination: `${BACKEND}/fs/:path*`,
+      },
     ];
   },
 };

@@ -7,9 +7,11 @@ import { TopBar } from "./TopBar";
 import Workbench from "@/app/(modules)/workbench/Workbench";
 import ChatInterface from "@/app/(modules)/chat/ChatInterface";
 import FileExplorer from "@/app/(modules)/workspace/FileExplorer";
+import HomeDashboard from "@/app/(modules)/home/page";
 import { SettingsDialog } from "@/app/(modules)/setting/SettingsDialog";
 import { cn } from "@/lib/utils";
 import { Panel, PanelGroup, PanelResizeHandle, ImperativePanelHandle } from "react-resizable-panels";
+import { useTaskStore } from "@/stores/taskStore";
 
 type MainShellProps = {
   children?: ReactNode;
@@ -19,6 +21,7 @@ export function MainShell({ children }: MainShellProps) {
   const router = useRouter();
   const pathname = usePathname();
   const [activeTab, setActiveTab] = useState<DockTab>('chat');
+  const { activeTask } = useTaskStore();
   
   // Left Panel (Files/History)
   const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(false);
@@ -33,27 +36,32 @@ export function MainShell({ children }: MainShellProps) {
 
   // 判断当前是否在Chat页面
   const isChatPage = pathname === '/chat';
-  // 判断是否是需要全屏显示的页面（home, schedule, knowledge等）
-  const isFullPageView = ['/home', '/schedule', '/knowledge', '/skills', '/analytics'].includes(pathname || '');
+  // 判断是否是需要全屏显示的页面（schedule, knowledge等）
+  // home 页降级：不再作为独立全屏页，由 chat 页的空状态承担
+  const isFullPageView = ['/schedule', '/knowledge', '/skills', '/analytics'].includes(pathname || '');
+
+  // chat 页中间面板显示逻辑：有活跃任务 → Workbench，无任务 → Home Dashboard
+  const hasActiveTask = !!activeTask;
+  const showWorkbench = isChatPage && hasActiveTask;
+  const showHomeDashboard = isChatPage && !hasActiveTask;
 
   const handleTabChange = (tab: DockTab) => {
     setActiveTab(tab);
     
     if (tab === 'chat') {
         router.push('/chat');
-        setIsLeftPanelOpen(false); // Auto close panel when going to chat
+        setIsLeftPanelOpen(false);
     } else if (tab === 'home') {
-        router.push('/home');
+        // Home 降级：回到 chat 页，中间面板会自动显示 Dashboard（无任务时）
+        router.push('/chat');
         setIsLeftPanelOpen(false);
     } else if (tab === 'files') {
-        // Keep on chat route but open files
         router.push('/chat'); 
         setIsLeftPanelOpen(true);
     } else if (tab === 'schedule') {
         router.push('/schedule');
         setIsLeftPanelOpen(false);
     } else if (tab === 'workspace') {
-        // Keep on chat route but open workspace panel
         router.push('/chat'); 
         setIsLeftPanelOpen(true);
     } else if (tab === 'knowledge') {
@@ -85,6 +93,7 @@ export function MainShell({ children }: MainShellProps) {
             onTabChange={handleTabChange}
             isLeftPanelOpen={isLeftPanelOpen}
             onToggleLeftPanel={() => setIsLeftPanelOpen(!isLeftPanelOpen)}
+            onOpenSettings={() => setIsSettingsOpen(true)}
           />
           
           {/* 2.2 Resizable Panels */}
@@ -117,10 +126,19 @@ export function MainShell({ children }: MainShellProps) {
             <Panel id="middle-panel" order={2} minSize={30} defaultSize={50}>
               <main className="h-full flex flex-col bg-slate-50 dark:bg-slate-900/40 relative overflow-hidden">
                 {isChatPage ? (
-                  // Chat页面：显示Workbench（任务监控中心）
-                  <Workbench />
+                  // Chat页面：有任务时显示Workbench，无任务时显示Home Dashboard
+                  <>
+                    {/* Workbench：始终挂载保持状态，有任务时置顶 */}
+                    <div className={cn("absolute inset-0", showWorkbench ? "z-10" : "z-0 pointer-events-none opacity-0")}>
+                      <Workbench />
+                    </div>
+                    {/* Home Dashboard：无任务时作为空状态填充 */}
+                    <div className={cn("absolute inset-0", showHomeDashboard ? "z-10" : "z-0 pointer-events-none opacity-0")}>
+                      <HomeDashboard />
+                    </div>
+                  </>
                 ) : (
-                  // 其他页面：页面内容直接替换Workbench位置（完全覆盖）
+                  // 其他页面：页面内容直接替换（schedule, knowledge等）
                   <>{children}</>
                 )}
               </main>

@@ -134,30 +134,31 @@ class GraphController:
         mode: ExecutionMode = ExecutionMode.REACT,
         env_context: Optional[Dict[str, Any]] = None,
         config: Optional[Dict[str, Any]] = None,
+        control_handle: Optional[Any] = None,
     ) -> 'ExecutionResult':
         """
         Execute a graph from intent.
-        
-        This is the main entry point for graph execution.
-        
+
         Args:
             intent: High-level goal description
             mode: Execution mode (REACT or DAG)
-            env_context: Environment context (workspace_path, available_skills, etc.)
+            env_context: Environment context (workspace, skills, session metadata, etc.)
             config: Optional configuration overrides
-            
+            control_handle: TaskControlHandle for cancel/pause/resume control.
+                            Kept separate from env_context to avoid semantic pollution.
+
         Returns:
             ExecutionResult with execution outcome
-            
+
         Requirements: 26.1, 26.2, 26.3, 26.4, 26.7
         """
         env_context = env_context or {}
         config = config or {}
-        
+
         # Enforce concurrent graph limit
         async with self._graph_semaphore:
             if mode == ExecutionMode.REACT:
-                return await self._execute_react_mode(intent, env_context, config)
+                return await self._execute_react_mode(intent, env_context, config, control_handle)
             elif mode == ExecutionMode.DAG:
                 return await self._execute_dag_mode(intent, env_context, config)
             else:
@@ -168,18 +169,13 @@ class GraphController:
         intent: str,
         env_context: Dict[str, Any],
         config: Dict[str, Any],
+        control_handle: Optional[Any] = None,
     ) -> 'ExecutionResult':
         """
         Execute in ReAct mode (iterative planning).
 
-        生命周期：
-          created -> planned（首个有效 plan 产出后）
-                  -> running（第一个节点开始执行时）
-                  -> completed/failed/cancelled（统一 finally 出口）
-
-        result_status 与 lifecycle status 分离：
-          lifecycle: completed / failed / cancelled
-          result:    success / partial_success / failed / unknown / cancelled
+        control_handle: TaskControlHandle，提供 cancel/pause/resume 控制。
+        不从 env_context 读取控制信号，保持 env_context 语义纯净（仅环境上下文）。
         """
         import time
         from app.avatar.runtime.graph.models.execution_graph import ExecutionGraph
@@ -260,7 +256,7 @@ class GraphController:
             graph_id=graph.id,
             goal_desc=intent,
             inputs=env_context,
-            session_id=_session_id,
+            session_id=_exec_session_id,  # ExecutionSession.id，用于 StepTraceRecord 关联
             task_id=graph.id,
             env=env_context,
             workspace=_workspace,
@@ -270,7 +266,9 @@ class GraphController:
         logger.info(f"[GoalTracker] Decomposed '{intent}' into {len(sub_goals)} sub-goals: {sub_goals}")
 
         planner_invocations = 0
-        cancel_event = env_context.get("cancel_event")
+        # control_handle 提供 cancel/pause/resume 控制原语
+        # 不从 env_context 读取，保持 env_context 语义纯净
+        _handle = control_handle
 
         # outcome 变量：统一 finally 出口通过它决定 lifecycle/result_status
         _lifecycle_status = "failed"
@@ -281,7 +279,7 @@ class GraphController:
         try:
             while True:
                 # 1. 取消检查
-                if cancel_event is not None and cancel_event.is_set():
+                if _handle is not None and _handle.is_cancelled():
                     logger.info("[GraphController] Cancellation signal received")
                     from app.avatar.runtime.graph.models.execution_graph import GraphStatus
                     graph.status = GraphStatus.FAILED
@@ -290,6 +288,20 @@ class GraphController:
                     _error_message = "Task cancelled by user"
                     _final_result = self._make_error_result(graph, error_message=_error_message)
                     return _final_result
+
+                # 2. 暂停检查（阻塞直到恢复，在每轮 ReAct 循环边界生效）
+                if _handle is not None:
+                    await _handle.wait_if_paused()
+                    # 恢复后再检查一次取消
+                    if _handle.is_cancelled():
+                        logger.info("[GraphController] Cancellation signal received after resume")
+                        from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                        graph.status = GraphStatus.FAILED
+                        _lifecycle_status = "cancelled"
+                        _result_status = "cancelled"
+                        _error_message = "Task cancelled by user"
+                        _final_result = self._make_error_result(graph, error_message=_error_message)
+                        return _final_result
 
                 # 2. Limit 检查
                 if planner_invocations >= self.max_planner_invocations_per_graph:

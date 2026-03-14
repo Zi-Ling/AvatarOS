@@ -50,7 +50,7 @@ export function MessageList({
           {message.role === "assistant" && (
             <div className="group flex items-start gap-2 max-w-[75%]">
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-xs font-bold text-white shadow-sm">
-                IA
+                AO
               </div>
               <div className="flex-1 space-y-2">
                 <div className="rounded-2xl rounded-tl-sm border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-3 py-2 text-slate-800 dark:text-slate-200 shadow-sm dark:shadow-none">
@@ -170,7 +170,7 @@ export function MessageList({
         <div className="flex justify-start">
           <div className="flex items-start gap-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-xs font-bold text-white">
-              IA
+              AO
             </div>
             <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-4 py-3">
               <div className="flex gap-1">

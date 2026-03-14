@@ -461,14 +461,15 @@ async def execute_task(
             except Exception as pe:
                 logger.debug(f"[ParamExtractor] Non-fatal extraction error: {pe}")
 
-        # 注册取消事件（生命周期绑定 task_id，task 真正完成后才注销）
+        # 注册任务控制句柄（生命周期绑定 task_id，task 真正完成后才注销）
         cancellation_mgr = get_cancellation_manager()
-        task_cancel_event = cancellation_mgr.register_task(initial_intent.id, session_id)
+        task_handle = cancellation_mgr.register_task(initial_intent.id, session_id)
         logger.info(f"[TaskExecution] 已注册任务: {initial_intent.id}")
 
         try:
             run_record = await runtime.run_intent(
-                initial_intent, task_mode=decision.task_mode, cancel_event=task_cancel_event,
+                initial_intent, task_mode=decision.task_mode,
+                control_handle=task_handle,
                 on_graph_created=lambda gid: cancellation_mgr.alias_task(gid, initial_intent.id),
             )
             # 任务执行完成后，向前端推送完整的执行计划和每个步骤的结果

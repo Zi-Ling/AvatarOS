@@ -5,15 +5,14 @@
 
 <h1 align="center">AvatarOS</h1>
 <p align="center">
-  你的 AI 数字分身 —— 规划、执行、自动化。
+  本地优先的 AI Agent 运行时 —— 在你自己的机器上规划、执行、自动化。
 </p>
 
 ---
 
 **AvatarOS 不是聊天机器人。**
 
-它是一个运行在桌面上的 AI Agent 运行时，像数字员工一样操作你的电脑——
-规划多步骤任务、调用技能、管理文件、运行代码，并在失败时自动恢复。
+它是一个本地优先的 AI Agent 运行时。你用自然语言描述目标，它自动规划并执行多步骤任务——在沙箱里运行代码、用浏览器抓取网页、管理文件，并在失败时自动恢复。
 
 > 让 AI 拥有*行动能力*，而不仅仅是对话能力。
 
@@ -23,14 +22,15 @@
 
 ## ✨ 当前能力
 
-- **自然语言 → 任务执行** —— 描述你想做的事，它自动规划并执行
-- **技能系统** —— 文件操作、Python 执行、Excel、Word、HTTP、系统命令等
-- **DAG 任务引擎** —— 支持依赖关系的多步骤任务
-- **自动重规划** —— 某步骤失败时，自动重新规划并继续执行
-- **记忆系统** —— 记住历史任务，从经验中学习
-- **Web UI** —— 聊天界面、执行流程可视化、工作区文件浏览器
+- **自然语言 → 任务执行** —— 描述你想做的事，它自动规划并逐步执行
+- **图执行引擎** —— 任务以动态 DAG 形式运行，节点由 Planner 增量添加
+- **ReAct 循环** —— 规划 → 执行 → 观察 → 重规划，全自动
+- **技能系统** —— `python.run`、`browser.run`（Playwright）、`net.get/download`、`fs.*`、`state.*` 等
+- **沙箱执行** —— Python 在 Docker 容器中运行，浏览器在隔离的 Chromium 上下文中运行
+- **Web UI** —— 聊天界面、实时执行图可视化、工作区文件浏览器
 - **任务调度器** —— 支持定时和周期性任务
 - **知识库** —— 存储和检索领域知识
+- **会话工作区** —— 每个任务独立的文件系统，产物自动追踪
 
 ---
 
@@ -41,8 +41,9 @@
 | 前端 | Next.js + Electron |
 | 后端 | FastAPI + Python |
 | LLM | DeepSeek / OpenAI 兼容接口 |
+| 执行层 | Docker（Python 沙箱）+ Playwright（浏览器） |
 | 数据库 | SQLite (SQLModel) |
-| 记忆 | ChromaDB（向量）+ 情节日志 |
+| 向量存储 | ChromaDB |
 
 ---
 
@@ -59,7 +60,7 @@ pip install -r requirements.txt
 
 # 3. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入你的 LLM_API_KEY
+# 编辑 .env，填入 LLM_API_KEY 和 LLM_BASE_URL
 
 # 4. 下载 Embedding 模型（约 1.1GB，语义搜索必需）
 # 国内网络建议先设置镜像：
@@ -75,7 +76,7 @@ npm install
 npm run dev
 ```
 
-依赖：Python 3.10+、Node.js 18+、兼容 OpenAI 接口的 LLM API Key。
+依赖：Python 3.10+、Node.js 18+、Docker（Python 沙箱）、兼容 OpenAI 接口的 LLM API Key。
 
 ---
 
@@ -84,33 +85,45 @@ npm run dev
 ```
 用户输入
     ↓
-意图路由（分类 → 任务 / 聊天 / 问答）
+意图路由  （分类 → 任务 / 聊天 / 问答）
     ↓
-规划器（LLM → JSON 步骤计划）
+Planner  （LLM → 下一步 JSON，每次一步）
     ↓
-DAG 执行器（按依赖顺序执行步骤）
+PlannerGuard  （应用前校验 patch）
     ↓
-技能引擎（文件 / Python / Excel / HTTP / GUI / ...）
+图运行时  （增量 DAG 执行）
     ↓
-重规划器（失败时 → LLM 重新规划剩余步骤）
+节点执行器  （并行执行 + 重试）
     ↓
-记忆系统（记录结果 → 优化未来规划）
+执行器工厂
+    ├── SandboxExecutor  → Docker 容器  (python.run)
+    ├── BrowserSandboxExecutor  → Playwright  (browser.run)
+    └── ProcessExecutor  → 子进程  (net.*, fs.*, ...)
+    ↓
+技能引擎  （类型化输入输出，副作用声明）
+    ↓
+Planner 观察结果 → 决定下一步或 FINISH
 ```
 
 ---
 
 ## 📌 当前状态
 
-- [x] 端到端任务执行管道
-- [x] 基于 DAG 的多步骤规划器
-- [x] 失败自动重规划
-- [x] 文件、Python、Excel、Word、HTTP 技能
-- [x] Web UI（聊天 + 执行流程可视化）
-- [x] 记忆系统 & 基于 RAG 的计划检索
+- [x] 端到端 ReAct 任务执行管道
+- [x] 增量图规划器（每次一步）
+- [x] PlannerGuard —— 校验并限速 Planner 输出
+- [x] Docker 沙箱 Python 执行
+- [x] Playwright 浏览器自动化（`browser.run`）
+- [x] 文件、HTTP、状态技能
+- [x] 会话工作区，每任务独立隔离
+- [x] 产物追踪与文件注册表
+- [x] Web UI —— 聊天、执行图、工作区浏览器
 - [x] 任务调度器
-- [ ] GUI 自动化（屏幕识别 / 点击操作）—— 开发中
+- [x] 知识库
+- [x] OS 环境动态注入（平台感知路径）
+- [x] 4xx 不重试 + 语义失败信号
+- [ ] GUI 自动化（屏幕识别 / 点击操作）—— 计划中
 - [ ] 多 Agent 支持 —— 计划中
-- [ ] 技能插件市场 —— 计划中
 
 ---
 

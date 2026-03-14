@@ -250,8 +250,8 @@ export function useChat() {
       role: "assistant",
       content:
         language === "zh"
-          ? "你好！我是 IntelliAvatar 智能助手 🤖\n\n我可以和你聊天，回答问题，或者帮助你完成各种任务。\n\n有什么我可以帮助你的吗？"
-          : "Hello! I'm IntelliAvatar AI Assistant 🤖\n\nI can chat with you, answer questions, or help you complete tasks.\n\nHow can I help you today?",
+          ? "新对话已开始，有什么需要执行的任务？"
+          : "New session started. What would you like to do?",
       timestamp: new Date().toISOString(),
     });
   }, [language, clearChat, setSessionId, addMessage]);

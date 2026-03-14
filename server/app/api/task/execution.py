@@ -122,8 +122,89 @@ def delete_task(
     success = TaskStore.delete(task_id, db=db)
     if not success:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     return {"message": "Task deleted successfully"}
+
+
+@router.post("/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    """取消正在执行的任务。幂等：任务不存在或已结束时返回 accepted=false。"""
+    from app.api.chat.cancellation import get_cancellation_manager
+    from app.io.manager import SocketManager
+    mgr = get_cancellation_manager()
+    accepted, prev_status, curr_status = mgr.cancel_task(task_id)
+    if prev_status == "unknown":
+        raise HTTPException(status_code=404, detail="Task not found or already finished")
+    if accepted:
+        socket_manager = SocketManager.get_instance()
+        await socket_manager.emit("server_event", {
+            "type": "task_status_changed",
+            "payload": {
+                "task_id": task_id,
+                "previous_status": prev_status,
+                "current_status": curr_status,
+            },
+        })
+    return {
+        "task_id": task_id,
+        "accepted": accepted,
+        "previous_status": prev_status,
+        "current_status": curr_status,
+    }
+
+
+@router.post("/{task_id}/pause")
+async def pause_task(task_id: str):
+    """暂停正在执行的任务。幂等：已暂停时返回 accepted=false。"""
+    from app.api.chat.cancellation import get_cancellation_manager
+    from app.io.manager import SocketManager
+    mgr = get_cancellation_manager()
+    accepted, prev_status, curr_status = mgr.pause_task(task_id)
+    if prev_status == "unknown":
+        raise HTTPException(status_code=404, detail="Task not found or already finished")
+    if accepted:
+        socket_manager = SocketManager.get_instance()
+        await socket_manager.emit("server_event", {
+            "type": "task_status_changed",
+            "payload": {
+                "task_id": task_id,
+                "previous_status": prev_status,
+                "current_status": curr_status,
+            },
+        })
+    return {
+        "task_id": task_id,
+        "accepted": accepted,
+        "previous_status": prev_status,
+        "current_status": curr_status,
+    }
+
+
+@router.post("/{task_id}/resume")
+async def resume_task(task_id: str):
+    """恢复已暂停的任务。幂等：非暂停状态时返回 accepted=false。"""
+    from app.api.chat.cancellation import get_cancellation_manager
+    from app.io.manager import SocketManager
+    mgr = get_cancellation_manager()
+    accepted, prev_status, curr_status = mgr.resume_task(task_id)
+    if prev_status == "unknown":
+        raise HTTPException(status_code=404, detail="Task not found or already finished")
+    if accepted:
+        socket_manager = SocketManager.get_instance()
+        await socket_manager.emit("server_event", {
+            "type": "task_status_changed",
+            "payload": {
+                "task_id": task_id,
+                "previous_status": prev_status,
+                "current_status": curr_status,
+            },
+        })
+    return {
+        "task_id": task_id,
+        "accepted": accepted,
+        "previous_status": prev_status,
+        "current_status": curr_status,
+    }
 
 
 # ============ Run API ============

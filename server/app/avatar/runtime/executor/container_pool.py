@@ -15,6 +15,7 @@ import logging
 import time
 import threading
 import concurrent.futures
+import os
 from enum import Enum
 from typing import Optional, Dict, Any, List
 from collections import deque
@@ -70,10 +71,25 @@ def exec_run_in_container(container: Any, cmd: list, workdir: str = "/", demux: 
     if use_podman:
         full_cmd = ["podman", "exec", "--workdir", workdir, container.id] + cmd
         try:
+            # 在 Windows 上子进程可能继承不到 podman 的 PATH，显式补全
+            import sys as _sys
+            env = os.environ.copy()
+            if _sys.platform == "win32":
+                # 常见 podman 安装路径
+                extra_paths = [
+                    r"C:\Program Files\RedHat\Podman",
+                    r"C:\Program Files\Podman",
+                    os.path.expanduser(r"~\AppData\Local\Programs\RedHat\Podman"),
+                ]
+                current_path = env.get("PATH", "")
+                additions = [p for p in extra_paths if p not in current_path]
+                if additions:
+                    env["PATH"] = os.pathsep.join(additions) + os.pathsep + current_path
             proc = subprocess.run(
                 full_cmd,
                 capture_output=True,
                 timeout=300,
+                env=env,
             )
             if demux:
                 return proc.returncode, (proc.stdout, proc.stderr)

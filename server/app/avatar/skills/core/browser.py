@@ -360,6 +360,33 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
                 except Exception:
                     pass
 
+            # 语义校验：脚本有抓取意图但没有任何产出
+            # stdout 为空 + artifacts 为空 = 脚本执行了但什么都没抓到
+            # 这是一个语义失败，返回 success=False 让 Planner 知道需要换策略
+            # retryable=False：重试同一脚本不会有不同结果，让 Planner 换策略
+            has_fetch_intent = (
+                params.start_url is not None
+                or any(kw in params.script for kw in ("open_page", "new_page", "goto"))
+            )
+            has_output = bool(stdout_out.strip()) or bool(artifacts)
+            if has_fetch_intent and not has_output:
+                return BrowserRunOutput(
+                    success=False,
+                    message=(
+                        "Script executed but produced no output. "
+                        "The script called open_page() but did not print() any data or save any artifacts. "
+                        "Possible causes: selector not found, page content blocked, or missing print() call. "
+                        "Try a different URL, a different selector, or add explicit print() statements."
+                    ),
+                    stdout=stdout_out,
+                    stderr=stderr_out,
+                    artifacts=artifacts,
+                    final_url=final_url,
+                    page_title=page_title,
+                    truncated=truncated,
+                    retryable=False,
+                )
+
             return BrowserRunOutput(
                 success=True,
                 message="Browser script executed successfully",

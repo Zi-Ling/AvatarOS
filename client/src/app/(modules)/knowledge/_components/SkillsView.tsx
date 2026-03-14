@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import { Zap, Plug, ChevronRight } from "lucide-react";
 import { knowledgeApi, SkillItem, McpTool } from "@/lib/api/knowledge";
 import { useChatStore } from "@/stores/chatStore";
+import { LoadingSpinner } from "@/components/ui/StateViews";
 
 const CATEGORY_ORDER = ["文件系统", "代码执行", "网络", "记忆", "电脑控制", "AI 推理"];
 
@@ -42,7 +43,7 @@ export function SkillsView({ searchQuery = "" }: { searchQuery?: string }) {
   });
 
   if (loading) {
-    return <div className="h-full flex items-center justify-center text-slate-400">加载中...</div>;
+    return <LoadingSpinner size="lg" />;
   }
 
   return (

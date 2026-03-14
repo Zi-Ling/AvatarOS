@@ -13,6 +13,7 @@ import {
   SessionArtifact, TimelineEvent, ArtifactLineage,
 } from "@/lib/api/history";
 import { getSkillMeta } from "./StepPreview";
+import { LoadingSpinner, EmptyState } from "@/components/ui/StateViews";
 
 // -----------------------------------------------------------------------
 // HistoryView root
@@ -42,16 +43,15 @@ export function HistoryView() {
     return detail.steps.length > 0 ? detail.steps[detail.steps.length - 1] : null;
   }, [selectedStepId, detail]);
 
-  if (loading) return <div className="h-full flex items-center justify-center"><Loader2 className="w-6 h-6 text-indigo-500 animate-spin" /></div>;
+  if (loading) return <LoadingSpinner size="lg" />;
 
   if (sessions.length === 0) return (
-    <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3">
-      <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
-        <History className="w-8 h-8 opacity-20 text-slate-500" />
-      </div>
-      <span className="font-medium text-slate-500 dark:text-slate-400 text-sm">No History</span>
-      <span className="text-xs text-slate-400">Task execution history will appear here</span>
-    </div>
+    <EmptyState
+      icon={History}
+      title="No History"
+      description="Task execution history will appear here"
+      size="lg"
+    />
   );
 
   return (

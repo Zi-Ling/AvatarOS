@@ -34,10 +34,13 @@ Your Job:
 - **DO NOT Hallucinate Results**: You CANNOT know the result of a step before it is executed. Never write "Output: ...".
 - **Strict Sequential Logic**: Use the `Output` from previous steps in the history to fill parameters for the current step.
 - **Error Handling**: If the history shows the last step FAILED, your next step MUST be a fix/retry or an alternative approach. Do not repeat the exact same failed action.
+- **HTTP 4xx Strategy Switch (MANDATORY)**: If a `net.get` step failed with HTTP 403, 404, or any 4xx status, do NOT retry `net.get` with the same or similar URL. Instead, immediately switch to `browser.run` to fetch the page via a real browser — it handles anti-bot protection and dynamic content that `net.get` cannot access.
+- **browser.run Empty Output (MANDATORY)**: If a `browser.run` step succeeded but its output is empty (no stdout, no artifacts), the script did NOT extract any data. Do NOT call `browser.run` again with the same or similar script. Instead: (1) try a different URL or search engine, OR (2) use `llm.fallback` to inform the user that the data could not be retrieved.
 - **No "Success" Claims**: Do not say "I have finished" unless you see the evidence in the history.
 - **Goal Decomposition Check (MANDATORY before FINISH)**: Before outputting `FINISH`, mentally enumerate EVERY sub-goal in the original Goal. If ANY sub-goal has no corresponding successful step in the history, you MUST execute that step next instead of finishing. Example: Goal="write a poem AND save to file" → you must see BOTH a poem-generation step AND a file-write step succeed before finishing.
 - **Cross-Turn Data Rule (MANDATORY)**: If the user refers to content from a previous turn (e.g., "this poem", "that result", "the text above", "统计这首诗", "这个时间", "刚才的结果"), FIRST look in the `Conversation History` section — the Assistant messages contain the actual output values. Treat those values as in-memory data — embed them directly as string literals in `python.run` code or as parameter values. Do NOT call `llm.fallback` to ask the user what they mean. Do NOT search the file system for content that already exists in the conversation history.
 - **Session Artifacts Rule (MANDATORY)**: If the user refers to a file or output from a previous task (e.g., "that file", "the result I saved", "上次生成的文件"), FIRST check the `Conversation History` section for assistant messages with `task result` label — they contain the exact file path and content value. Use those values directly — do NOT guess or search the workspace.
+- **net.download → python.run File Access (MANDATORY)**: When a previous `net.download` step saved a file, the framework injects `step_N_output` as the container-mapped file path (e.g., `/workspace/file.json`). To read that file in `python.run`, you MUST use the `fs.read` skill with `{"path": step_N_output_value}` — do NOT use `open()` (blocked in sandbox) and do NOT hardcode Windows host paths like `D:\Temp\...`. The correct pattern is: use `fs.read` skill with the path from `step_N_output`.
 - **Unknown Skill Prohibition (MANDATORY)**: You MUST ONLY use skills listed in the `Available Skills` section. NEVER invent or guess a skill name that is not listed (e.g., `user.ask`, `user.input`, `ask_user` are NOT valid skills). If you need to ask the user a question or lack required information, use the `llm.fallback` skill instead.
 
 **PYTHON CODE RESTRICTIONS (RestrictedPython):**
@@ -130,7 +133,37 @@ Case 2: To finish the task
 ```
 """
 
-def _format_history(task: Task) -> str:
+def _sanitize_host_paths(text: str, workspace_root: Optional[str]) -> str:
+    """
+    把 history 里的宿主机绝对路径替换成容器内路径 /workspace/...
+    防止 Planner 从 history 里抠出 Windows 路径硬编码进脚本。
+    """
+    if not workspace_root or not text:
+        return text
+    # 统一用正斜杠比较，兼容 Windows 反斜杠
+    root_fwd = workspace_root.replace("\\", "/").rstrip("/")
+    root_back = workspace_root.replace("/", "\\").rstrip("\\")
+
+    import re as _re
+    # 匹配宿主机路径（正斜杠或反斜杠变体），替换为 /workspace/<rel>
+    def _replace(m: "_re.Match") -> str:
+        full = m.group(0)
+        # 统一转正斜杠
+        normalized = full.replace("\\", "/")
+        root_norm = root_fwd
+        if normalized.startswith(root_norm):
+            rel = normalized[len(root_norm):].lstrip("/")
+            return f"/workspace/{rel}" if rel else "/workspace"
+        return full
+
+    # 转义 root 用于正则
+    escaped_fwd = _re.escape(root_fwd)
+    escaped_back = _re.escape(root_back)
+    pattern = f"({escaped_fwd}|{escaped_back})[^\\s\"']*"
+    return _re.sub(pattern, _replace, text)
+
+
+def _format_history(task: Task, workspace_root: Optional[str] = None) -> str:
     if not task.steps:
         return "(No steps executed yet)"
     
@@ -145,6 +178,8 @@ def _format_history(task: Task) -> str:
                 if len(out_preview) > 600:
                     # 保留前 250 字符 + 后 300 字符
                     out_preview = out_preview[:250] + "\n... [中间省略] ...\n" + out_preview[-300:]
+                # 路径脱敏：把宿主机路径替换成容器路径，防止 Planner 硬编码 Windows 路径
+                out_preview = _sanitize_host_paths(out_preview, workspace_root)
                 result_str = f"Output: {out_preview}"
             else:
                 # 优化 1: 错误信息也使用首尾保留（针对 Traceback）
@@ -242,14 +277,15 @@ class InteractiveLLMPlanner(TaskPlanner):
         
         # 优化 2: 检测思维死循环（在 Prompt 中注入警告）
         loop_warning = ""
-        if self._repeat_count >= 2:
+        if self._repeat_count >= 1:
             loop_warning = """
-⚠️ WARNING: You seem to be repeating the same operation and it keeps failing.
+⚠️ WARNING: You seem to be repeating the same operation and it keeps failing or returning empty results.
 Please try a DIFFERENT approach:
+- If browser.run returned empty output, the script failed to extract data — try a different URL or search engine
 - Check if parameters are correct
 - List files to verify state
 - Use a different skill
-- Break down the problem into smaller steps
+- If all approaches failed, use llm.fallback to inform the user
 """
         
         # Framework-level goal tracker hint (injected when FINISH was rejected)
@@ -347,12 +383,31 @@ Please try a DIFFERENT approach:
                 f"typed_refs={typed_keys}"
             )
 
+        # 系统环境信息 section
+        system_env_section = ""
+        system_info = env_context.get("system")
+        if system_info:
+            default_paths = env_context.get("default_paths", {})
+            system_env_section = f"""## System Environment
+- Platform: {system_info.get('platform', 'unknown')}
+- Username: {system_info.get('username', 'unknown')}
+- Home Directory: {system_info.get('home_dir', '')}
+- Desktop: {system_info.get('desktop_dir', '')}
+- Downloads: {system_info.get('downloads_dir', '')}
+- Documents: {system_info.get('documents_dir', '')}
+- Path Separator: `{system_info.get('path_separator', '/')}`
+- Workspace: {default_paths.get('workspace', '')}
+
+> CRITICAL: Always use the exact paths above when the user refers to system directories (e.g. "桌面"→Desktop, "下载"→Downloads). Never guess Linux paths on Windows or vice versa.
+
+"""
+
         prompt = f"""{INTERACTIVE_SYSTEM_PROMPT}
 
 ## Goal
 {task.goal}
 
-## Available Skills
+{system_env_section}## Available Skills
 {_format_skills(available_skills)}
 
 ## Current Workspace State
@@ -360,7 +415,7 @@ Please try a DIFFERENT approach:
 
 {context_bindings_section}{conversation_history_section}
 ## Execution History (Truth)
-{_format_history(task)}
+{_format_history(task, workspace_root=env_context.get("workspace_path"))}
 
 {loop_warning}{goal_tracker_section}
 ## Your Next Move
@@ -480,6 +535,12 @@ Return ONLY the JSON object.
             
             if thought_similarity > 0.95 and action_match:
                 self._repeat_count += 1
+            elif skill_name == self._last_action[0]:
+                # 同一 skill 不同参数：宽松检测（相似度 > 0.7 也算重复）
+                if thought_similarity > 0.7:
+                    self._repeat_count += 1
+                else:
+                    self._repeat_count = 0
             else:
                 self._repeat_count = 0
         

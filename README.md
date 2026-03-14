@@ -5,16 +5,14 @@
 
 <h1 align="center">AvatarOS</h1>
 <p align="center">
-  Your AI Avatar on the Desktop — Plan, Act, Automate.
+  A local AI agent runtime that plans, executes, and automates — on your own machine.
 </p>
 
 ---
 
 **AvatarOS is not a chatbot.**
 
-It is an AI agent runtime that operates your computer like a digital employee —
-planning multi-step tasks, executing skills, managing files, running code,
-and recovering from failures automatically.
+It is a local-first AI agent runtime. You describe a goal in natural language, and it plans and executes multi-step tasks using a skill system — running code in sandboxes, browsing the web, managing files, and recovering from failures automatically.
 
 > Give AI the ability to *do things*, not just talk.
 
@@ -24,14 +22,15 @@ and recovering from failures automatically.
 
 ## ✨ What it can do (today)
 
-- **Natural language → task execution** — describe what you want, it plans and runs it
-- **Skill system** — file ops, Python execution, Excel, Word, HTTP, system commands, and more
-- **DAG task engine** — multi-step tasks with dependency resolution
-- **Auto re-planning** — when a step fails, it replans and retries automatically
-- **Memory** — remembers past tasks and learns from them
-- **Web UI** — chat interface, execution flow visualization, workspace file explorer
+- **Natural language → task execution** — describe what you want, it plans and runs it step by step
+- **Graph-based execution engine** — tasks run as a dynamic DAG, nodes added incrementally by the planner
+- **ReAct loop** — plan → execute → observe → replan, fully automatic
+- **Skill system** — `python.run`, `browser.run` (Playwright), `net.get/download`, `fs.*`, `state.*`, and more
+- **Sandboxed execution** — Python runs in Docker containers, browser runs in isolated Chromium contexts
+- **Web UI** — chat interface, real-time execution graph visualization, workspace file explorer
 - **Scheduler** — recurring and scheduled task automation
 - **Knowledge base** — store and retrieve domain knowledge
+- **Session workspace** — per-task isolated file system, artifacts tracked and accessible
 
 ---
 
@@ -42,8 +41,9 @@ and recovering from failures automatically.
 | Frontend | Next.js + Electron |
 | Backend | FastAPI + Python |
 | LLM | DeepSeek / OpenAI compatible |
+| Execution | Docker (Python sandbox) + Playwright (browser) |
 | DB | SQLite (SQLModel) |
-| Memory | ChromaDB (vector) + episodic log |
+| Vector store | ChromaDB |
 
 ---
 
@@ -60,7 +60,7 @@ pip install -r requirements.txt
 
 # 3. Configure
 cp .env.example .env
-# Edit .env and fill in your LLM_API_KEY
+# Edit .env — fill in LLM_API_KEY and LLM_BASE_URL
 
 # 4. Download embedding model (~1.1GB, required for semantic search)
 # If you're in China, set mirror first:
@@ -76,7 +76,7 @@ npm install
 npm run dev
 ```
 
-Requires: Python 3.10+, Node.js 18+, an OpenAI-compatible LLM API key.
+Requires: Python 3.10+, Node.js 18+, Docker (for Python sandbox), an OpenAI-compatible LLM API key.
 
 ---
 
@@ -85,33 +85,45 @@ Requires: Python 3.10+, Node.js 18+, an OpenAI-compatible LLM API key.
 ```
 User Input
     ↓
-Intent Router (classify → task / chat / question)
+Intent Router  (classify → task / chat / question)
     ↓
-Planner (LLM → JSON step plan)
+Planner  (LLM → next step as JSON, one at a time)
     ↓
-DAG Runner (execute steps in dependency order)
+PlannerGuard  (validate patch before applying)
     ↓
-Skill Engine (file / python / excel / http / gui / ...)
+Graph Runtime  (incremental DAG execution)
     ↓
-Re-planner (on failure → LLM replans remaining steps)
+Node Runner  (parallel execution + retry)
     ↓
-Memory (record outcome → improve future plans)
+Executor Factory
+    ├── SandboxExecutor  → Docker container  (python.run)
+    ├── BrowserSandboxExecutor  → Playwright  (browser.run)
+    └── ProcessExecutor  → subprocess  (net.*, fs.*, ...)
+    ↓
+Skill Engine  (typed input/output, side-effect declarations)
+    ↓
+Planner observes result → decides next step or FINISH
 ```
 
 ---
 
 ## 📌 Current Status
 
-- [x] End-to-end task execution pipeline
-- [x] DAG-based multi-step planner
-- [x] Auto re-planning on failure
-- [x] File, Python, Excel, Word, HTTP skills
-- [x] Web UI with chat + execution flow
-- [x] Memory & RAG-based plan retrieval
+- [x] End-to-end ReAct task execution pipeline
+- [x] Incremental graph-based planner (one step at a time)
+- [x] PlannerGuard — validates and rate-limits planner output
+- [x] Docker sandbox for Python execution
+- [x] Playwright browser automation (`browser.run`)
+- [x] File, HTTP, state skills
+- [x] Session workspace with per-task isolation
+- [x] Artifact tracking and file registry
+- [x] Web UI — chat, execution graph, workspace explorer
 - [x] Scheduler
-- [ ] GUI automation (screen reading / clicking) — in progress
+- [x] Knowledge base
+- [x] OS environment injection (platform-aware paths)
+- [x] 4xx error non-retry + semantic failure signals
+- [ ] GUI automation (screen reading / clicking) — planned
 - [ ] Multi-agent support — planned
-- [ ] Plugin/skill marketplace — planned
 
 ---
 

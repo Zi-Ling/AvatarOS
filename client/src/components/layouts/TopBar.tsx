@@ -56,14 +56,14 @@ export function TopBar({ isInspectorOpen = true, onToggleInspector, isRightPanel
          <div className="relative w-8 h-8 rounded-lg overflow-hidden shadow-lg shadow-indigo-500/20">
             <Image 
               src="/logo.png" 
-              alt="IntelliAvatar Logo" 
+              alt="Avatar OS Logo" 
               fill
               className="object-cover"
               priority
             />
          </div>
          <div className="flex flex-col">
-            <span className="font-bold text-base leading-tight tracking-tight">IntelliAvatar</span>
+            <span className="font-bold text-base leading-tight tracking-tight">Avatar OS</span>
             <span className="text-[10px] text-slate-500 dark:text-slate-400 font-medium uppercase tracking-wider">Workspace</span>
          </div>
       </div>
@@ -126,17 +126,7 @@ export function TopBar({ isInspectorOpen = true, onToggleInspector, isRightPanel
           )}
         </button>
 
-        {/* 系统设置 */}
-        <button
-          type="button"
-          onClick={handleSettingsClick}
-          className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-white/80 transition hover:border-slate-300 dark:hover:border-white/30 hover:bg-slate-100 dark:hover:bg-white/5"
-        >
-          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-        </button>
+        {/* 系统设置按钮已移至左侧栏底部 */}
 
         {/* Window Controls */}
         <div className="flex items-center gap-1 ml-2 pl-2 border-l border-slate-200 dark:border-white/10">

@@ -12,7 +12,8 @@ export function TaskEventListener() {
   const { updateMessage, addMessage } = useChatStore();
   const {
     setActiveTask, updateStep, updateTaskStatus, addLog, setIsCancelling,
-    setCurrentStepName, addPendingApproval, removePendingApproval, setAutoSwitchedForTask,
+    setControlStatus, setCurrentStepName, addPendingApproval, removePendingApproval,
+    setAutoSwitchedForTask,
   } = useTaskStore();
 
   useEffect(() => {
@@ -333,6 +334,7 @@ export function TaskEventListener() {
 
         updateTaskStatus("failed");
         setTaskCancelling(false);
+        setControlStatus("cancelled");
         setCanCancel(false);
 
         if (currentTaskMessageId) {
@@ -356,8 +358,39 @@ export function TaskEventListener() {
 
         setIsTyping(false);
       }
-    };
 
+      // 9. 统一任务状态变更事件（新格式，以后端推送为准）
+      if (type === "task_status_changed" && payload?.current_status) {
+        const newStatus = payload.current_status as import('@/types/task').TaskControlStatus;
+        setControlStatus(newStatus);
+
+        if (newStatus === "cancelled") {
+          const { setCanCancel } = useChatStore.getState();
+          const { setIsCancelling: setTaskCancelling } = useTaskStore.getState();
+          updateTaskStatus("failed");
+          setTaskCancelling(false);
+          setCanCancel(false);
+          if (currentTaskMessageId) {
+            updateMessage(currentTaskMessageId, {
+              taskStatus: "failed",
+              isStreaming: false,
+              content: "⏹️ 任务已取消",
+              messageType: "chat",
+            });
+            setCurrentTaskMessageId(null);
+          }
+          setIsTyping(false);
+        }
+      }
+
+      // 10. 旧格式兼容（task.paused / task.resumed）
+      if (type === "task.paused") {
+        setControlStatus("paused");
+      }
+      if (type === "task.resumed") {
+        setControlStatus("running");
+      }
+    };
     socket.on("server_event", handleServerEvent);
     return () => {
       socket.off("server_event", handleServerEvent);
@@ -371,6 +404,7 @@ export function TaskEventListener() {
     updateTaskStatus,
     addLog,
     setIsCancelling,
+    setControlStatus,
     setCurrentStepName,
     addPendingApproval,
     removePendingApproval,

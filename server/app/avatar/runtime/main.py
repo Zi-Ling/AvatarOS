@@ -315,7 +315,7 @@ class AvatarMain:
             self._graph_controller.execute(user_request, mode="react")
         )
 
-    async def run_intent(self, intent: IntentSpec, task_mode: str = "one_shot", cancel_event = None, on_graph_created = None) -> RunRecord:
+    async def run_intent(self, intent: IntentSpec, task_mode: str = "one_shot", control_handle=None, on_graph_created=None) -> RunRecord:
         # Backup metadata (TaskStore/DB serialization might strip non-standard fields)
         original_metadata = intent.metadata.copy()
         
@@ -338,8 +338,6 @@ class AvatarMain:
                 session_id = intent.metadata.get("session_id")
                 if session_id:
                     env_context["session_id"] = session_id
-                if cancel_event:
-                    env_context["cancel_event"] = cancel_event
                 if on_graph_created:
                     env_context["on_graph_created"] = on_graph_created
 
@@ -354,7 +352,8 @@ class AvatarMain:
                     env_context["resolved_inputs"] = resolved_inputs
 
                 graph_result = await self._graph_controller.execute(
-                    intent.goal, mode="react", env_context=env_context
+                    intent.goal, mode="react", env_context=env_context,
+                    control_handle=control_handle,
                 )
 
                 if graph_result.final_status == "failed":
@@ -421,12 +420,53 @@ class AvatarMain:
                 "params_schema": params_schema
             }
         
+        # 注入运行时环境信息，让 Planner 生成正确的平台路径
+        import os as _os
+        import getpass as _getpass
+        _platform = system().lower()  # 'windows' / 'linux' / 'darwin'
+        _home = _os.path.expanduser("~")
+        try:
+            _username = _getpass.getuser()
+        except Exception:
+            _username = _os.environ.get("USERNAME") or _os.environ.get("USER") or "user"
+
+        # 平台标准目录（确定性，不做猜测）
+        if _platform == "windows":
+            _desktop = _os.path.join(_home, "Desktop")
+            _downloads = _os.path.join(_home, "Downloads")
+            _documents = _os.path.join(_home, "Documents")
+        elif _platform == "darwin":
+            _desktop = _os.path.join(_home, "Desktop")
+            _downloads = _os.path.join(_home, "Downloads")
+            _documents = _os.path.join(_home, "Documents")
+        else:  # linux
+            _desktop = _os.path.join(_home, "Desktop")
+            _downloads = _os.path.join(_home, "Downloads")
+            _documents = _os.path.join(_home, "Documents")
+
+        _system_context = {
+            "platform": _platform,
+            "username": _username,
+            "home_dir": _home,
+            "desktop_dir": _desktop,
+            "downloads_dir": _downloads,
+            "documents_dir": _documents,
+            "path_separator": _os.sep,
+        }
+
         return {
             "skill_registry": skill_registry,  # 提供注册表引用，而非预过滤的技能列表
             "available_skills": available_skills,  # 为 ReAct 模式提供 skill 列表
             "workspace_path": str(current_workspace),  # 为文件系统扫描提供路径
             "os": system(),
-            "default_paths": {"workspace": str(current_workspace)},
+            "system": _system_context,  # 完整运行时环境，供 Planner 生成正确路径
+            "default_paths": {
+                "workspace": str(current_workspace),
+                "home": _home,
+                "desktop": _desktop,
+                "downloads": _downloads,
+                "documents": _documents,
+            },
         }
 
     def _serialize_result(self, result: Any) -> dict:

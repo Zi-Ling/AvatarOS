@@ -27,3 +27,19 @@ export type TaskState = {
   currentStepName?: string;
   completedCount?: number;
 };
+
+/** 任务控制层状态（独立于 TaskState.status，对应后端 TaskControlStatus） */
+export type TaskControlStatus = "running" | "paused" | "cancelled";
+
+/** 从控制状态派生的按钮可用性 */
+export function deriveTaskControls(
+  taskStatus: TaskState["status"] | undefined,
+  controlStatus: TaskControlStatus,
+): { canPause: boolean; canResume: boolean; canCancel: boolean } {
+  const isActive = taskStatus === "executing";
+  return {
+    canPause: isActive && controlStatus === "running",
+    canResume: isActive && controlStatus === "paused",
+    canCancel: isActive && controlStatus !== "cancelled",
+  };
+}

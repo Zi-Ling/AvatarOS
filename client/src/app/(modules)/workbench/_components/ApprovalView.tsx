@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ShieldCheck,
@@ -11,10 +11,15 @@ import {
   Loader2,
   AlertTriangle,
   RefreshCw,
+  FileText,
+  Folder,
+  Globe,
+  Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTaskStore } from "@/stores/taskStore";
 import { approvalApi, ApprovalHistoryRecord } from "@/lib/api/history";
+import type { ApprovalRequest } from "@/types/chat";
 
 type HistoryFilter = "all" | "pending" | "approved" | "rejected" | "expired";
 
@@ -25,24 +30,207 @@ const STATUS_CONFIG: Record<string, { icon: React.ElementType; color: string; la
   expired:  { icon: AlertTriangle,color: "text-slate-400",  label: "Expired"  },
 };
 
+// ── 倒计时 hook ───────────────────────────────────────────────────────────────
+
+function useCountdown(expiresAt?: string): number | null {
+  const [remaining, setRemaining] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!expiresAt) return;
+    const update = () => {
+      const diff = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
+      setRemaining(diff);
+    };
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [expiresAt]);
+
+  return remaining;
+}
+
+// ── Details 渲染 ──────────────────────────────────────────────────────────────
+
+function DetailsBlock({ operation, details }: { operation: string; details?: Record<string, any> }) {
+  if (!details || Object.keys(details).length === 0) return null;
+
+  // fs.delete / fs.remove
+  if (operation.startsWith("fs.delete") || operation.startsWith("fs.remove")) {
+    const paths: string[] = details.paths ?? (details.path ? [details.path] : []);
+    if (paths.length === 0) return null;
+    return (
+      <div className="mt-2 rounded-md bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 p-2">
+        <div className="text-[10px] font-bold text-red-500 uppercase tracking-wider mb-1">将要删除</div>
+        <div className="space-y-0.5 max-h-24 overflow-y-auto">
+          {paths.map((p, i) => (
+            <div key={i} className="flex items-center gap-1.5 text-[11px] text-red-700 dark:text-red-300 font-mono">
+              <FileText className="w-3 h-3 shrink-0" />
+              <span className="truncate">{p.split(/[/\\]/).pop()}</span>
+            </div>
+          ))}
+        </div>
+        {paths.length > 1 && (
+          <div className="text-[10px] text-red-400 mt-1">共 {paths.length} 个文件</div>
+        )}
+      </div>
+    );
+  }
+
+  // fs.move / fs.rename
+  if (operation.startsWith("fs.move") || operation.startsWith("fs.rename")) {
+    const moves: Array<{ src: string; dst: string }> = details.moves ?? (details.src ? [{ src: details.src, dst: details.dst }] : []);
+    if (moves.length === 0) return null;
+    return (
+      <div className="mt-2 rounded-md bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-900/30 p-2">
+        <div className="text-[10px] font-bold text-blue-500 uppercase tracking-wider mb-1">将要移动</div>
+        <div className="space-y-1 max-h-24 overflow-y-auto">
+          {moves.slice(0, 5).map((m, i) => (
+            <div key={i} className="flex items-center gap-1 text-[11px] font-mono text-blue-700 dark:text-blue-300">
+              <span className="truncate max-w-[80px]">{m.src?.split(/[/\\]/).pop()}</span>
+              <span className="text-blue-400 shrink-0">→</span>
+              <span className="truncate max-w-[80px]">{m.dst?.split(/[/\\]/).pop()}</span>
+            </div>
+          ))}
+          {moves.length > 5 && <div className="text-[10px] text-blue-400">...还有 {moves.length - 5} 项</div>}
+        </div>
+      </div>
+    );
+  }
+
+  // browser.run / web.*
+  if (operation.startsWith("browser") || operation.startsWith("web.")) {
+    const url = details.url ?? details.target;
+    if (!url) return null;
+    return (
+      <div className="mt-2 flex items-center gap-1.5 rounded-md bg-indigo-50 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-900/30 px-2 py-1.5">
+        <Globe className="w-3 h-3 text-indigo-500 shrink-0" />
+        <span className="text-[11px] text-indigo-700 dark:text-indigo-300 font-mono truncate">{url}</span>
+      </div>
+    );
+  }
+
+  // fs.write / 路径访问
+  if (details.path) {
+    return (
+      <div className="mt-2 flex items-center gap-1.5 rounded-md bg-slate-100 dark:bg-slate-800 px-2 py-1.5">
+        <Folder className="w-3 h-3 text-slate-400 shrink-0" />
+        <span className="text-[11px] text-slate-600 dark:text-slate-300 font-mono truncate">{details.path}</span>
+      </div>
+    );
+  }
+
+  // shell / python
+  if (details.code || details.command) {
+    const snippet = (details.code ?? details.command ?? "").slice(0, 120);
+    return (
+      <div className="mt-2 rounded-md bg-slate-900 px-2 py-1.5">
+        <div className="flex items-center gap-1 mb-1">
+          <Terminal className="w-3 h-3 text-slate-400" />
+          <span className="text-[10px] text-slate-400">命令预览</span>
+        </div>
+        <pre className="text-[11px] text-green-400 font-mono whitespace-pre-wrap break-all">{snippet}</pre>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// ── 单个 pending 卡片 ─────────────────────────────────────────────────────────
+
+function PendingCard({
+  req,
+  submitting,
+  onRespond,
+}: {
+  req: ApprovalRequest;
+  submitting: boolean;
+  onRespond: (id: string, approved: boolean) => void;
+}) {
+  const remaining = useCountdown(req.expires_at);
+  const isUrgent = remaining !== null && remaining <= 10;
+  const isExpired = remaining === 0;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, height: 0 }}
+      className={cn(
+        "rounded-lg border p-3",
+        isExpired
+          ? "border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 opacity-60"
+          : "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-900/10"
+      )}
+    >
+      <div className="flex items-start gap-2 mb-2">
+        <AlertTriangle className={cn("w-3.5 h-3.5 shrink-0 mt-0.5", isExpired ? "text-slate-400" : "text-amber-500")} />
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-medium text-slate-800 dark:text-slate-100 leading-snug">
+            {req.message}
+          </div>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-[10px] font-mono text-slate-400 truncate">{req.operation}</span>
+            {remaining !== null && !isExpired && (
+              <span className={cn(
+                "text-[10px] font-mono shrink-0",
+                isUrgent ? "text-red-500 font-bold" : "text-slate-400"
+              )}>
+                {remaining}s
+              </span>
+            )}
+            {isExpired && (
+              <span className="text-[10px] text-slate-400 shrink-0">已超时</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <DetailsBlock operation={req.operation} details={req.details} />
+
+      {!isExpired && (
+        <div className="flex gap-2 mt-2">
+          <button
+            onClick={() => onRespond(req.request_id, true)}
+            disabled={submitting}
+            className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md bg-green-500 hover:bg-green-600 text-white text-xs font-medium transition-colors disabled:opacity-50"
+          >
+            {submitting ? <Loader2 className="w-3 h-3 animate-spin" /> : <ShieldCheck className="w-3 h-3" />}
+            批准
+          </button>
+          <button
+            onClick={() => onRespond(req.request_id, false)}
+            disabled={submitting}
+            className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md bg-red-500 hover:bg-red-600 text-white text-xs font-medium transition-colors disabled:opacity-50"
+          >
+            <ShieldX className="w-3 h-3" />
+            拒绝
+          </button>
+        </div>
+      )}
+    </motion.div>
+  );
+}
+
+// ── 主组件 ────────────────────────────────────────────────────────────────────
+
 export function ApprovalView() {
   const { pendingApprovals, removePendingApproval } = useTaskStore();
   const [submitting, setSubmitting] = useState<Record<string, boolean>>({});
-
   const [history, setHistory] = useState<ApprovalHistoryRecord[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [filter, setFilter] = useState<HistoryFilter>("all");
 
-  const fetchHistory = () => {
+  const fetchHistory = useCallback(() => {
     setHistoryLoading(true);
     approvalApi
       .getHistory(filter === "all" ? undefined : filter, 50)
       .then((r) => setHistory(r.records))
       .catch(console.error)
       .finally(() => setHistoryLoading(false));
-  };
+  }, [filter]);
 
-  useEffect(() => { fetchHistory(); }, [filter]);
+  useEffect(() => { fetchHistory(); }, [fetchHistory]);
 
   const handleRespond = async (requestId: string, approved: boolean) => {
     setSubmitting((s) => ({ ...s, [requestId]: true }));
@@ -61,7 +249,7 @@ export function ApprovalView() {
     <div className="h-full flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-950">
       {/* 待审批队列 */}
       <div className="shrink-0 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950">
-        <div className="px-4 py-2.5 flex items-center justify-between">
+        <div className="px-4 py-2.5">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
             Pending
             {pendingApprovals.length > 0 && (
@@ -76,49 +264,14 @@ export function ApprovalView() {
           {pendingApprovals.length === 0 ? (
             <div className="px-4 pb-3 text-xs text-slate-400">No pending approvals</div>
           ) : (
-            <div className="px-3 pb-3 space-y-2 max-h-52 overflow-y-auto custom-scrollbar">
+            <div className="px-3 pb-3 space-y-2 max-h-72 overflow-y-auto custom-scrollbar">
               {pendingApprovals.map((req) => (
-                <motion.div
+                <PendingCard
                   key={req.request_id}
-                  initial={{ opacity: 0, y: -6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-900/10 p-3"
-                >
-                  <div className="flex items-start gap-2 mb-2">
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-medium text-slate-800 dark:text-slate-100 leading-snug">
-                        {req.message}
-                      </div>
-                      <div className="text-[10px] font-mono text-slate-400 mt-0.5 truncate">
-                        {req.operation}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleRespond(req.request_id, true)}
-                      disabled={submitting[req.request_id]}
-                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md bg-green-500 hover:bg-green-600 text-white text-xs font-medium transition-colors disabled:opacity-50"
-                    >
-                      {submitting[req.request_id] ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <ShieldCheck className="w-3 h-3" />
-                      )}
-                      Approve
-                    </button>
-                    <button
-                      onClick={() => handleRespond(req.request_id, false)}
-                      disabled={submitting[req.request_id]}
-                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md bg-red-500 hover:bg-red-600 text-white text-xs font-medium transition-colors disabled:opacity-50"
-                    >
-                      <ShieldX className="w-3 h-3" />
-                      Reject
-                    </button>
-                  </div>
-                </motion.div>
+                  req={req}
+                  submitting={!!submitting[req.request_id]}
+                  onRespond={handleRespond}
+                />
               ))}
             </div>
           )}

@@ -33,6 +33,7 @@ interface AgentDockProps {
   onTabChange: (tab: any) => void;
   isLeftPanelOpen: boolean;
   onToggleLeftPanel: () => void;
+  onOpenSettings?: () => void;
 }
 
 // Sortable Item Component
@@ -83,7 +84,7 @@ function SortableDockItem({
   );
 }
 
-export function AgentDock({ activeTab, onTabChange, isLeftPanelOpen, onToggleLeftPanel }: AgentDockProps) {
+export function AgentDock({ activeTab, onTabChange, isLeftPanelOpen, onToggleLeftPanel, onOpenSettings }: AgentDockProps) {
   const { isConnected } = useSocket();
   const { pinnedAppIds, reorderApps } = useDockApps();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -213,7 +214,7 @@ export function AgentDock({ activeTab, onTabChange, isLeftPanelOpen, onToggleLef
       </nav>
 
       <div className="flex flex-col items-center gap-4 mb-4">
-        <SystemStatus status={agentStatus} isConnected={isConnected} />
+        <SystemStatus status={agentStatus} isConnected={isConnected} onOpenSettings={onOpenSettings} />
       </div>
     </aside>
   );

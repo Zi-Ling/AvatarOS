@@ -119,3 +119,39 @@ export async function getRunDetail(runId: string): Promise<RunResponse> {
   return await response.json();
 }
 
+/**
+ * 取消任务
+ */
+export async function cancelTask(taskId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_WITH_PREFIX}/tasks/${taskId}/cancel`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`取消任务失败: ${response.status}`);
+  }
+}
+
+/**
+ * 暂停任务
+ */
+export async function pauseTask(taskId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_WITH_PREFIX}/tasks/${taskId}/pause`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`暂停任务失败: ${response.status}`);
+  }
+}
+
+/**
+ * 恢复任务
+ */
+export async function resumeTask(taskId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_WITH_PREFIX}/tasks/${taskId}/resume`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`恢复任务失败: ${response.status}`);
+  }
+}
+

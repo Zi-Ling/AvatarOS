@@ -213,6 +213,7 @@ class FsDeleteOutput(SkillOutput):
     output: Optional[str] = Field(None, description="Deleted path (single)")
     path: Optional[str] = None
     results: Optional[List[Dict[str, Any]]] = Field(None, description="Batch delete results")
+    failed_paths: Optional[List[str]] = Field(None, description="Paths that failed to delete")
 
 
 @register_skill
@@ -249,6 +250,11 @@ class FsDeleteSkill(BaseSkill[FsDeleteInput, FsDeleteOutput]):
                     if params.recursive:
                         shutil.rmtree(target)
                     else:
+                        # 检查目录是否为空，给出友好提示
+                        if any(target.iterdir()):
+                            results.append({"path": p, "success": False, "message": f"Directory not empty: {target.name} — use recursive=True to delete"})
+                            all_ok = False
+                            continue
                         target.rmdir()
                 else:
                     target.unlink()
@@ -265,13 +271,16 @@ class FsDeleteSkill(BaseSkill[FsDeleteInput, FsDeleteOutput]):
                 path=r["path"],
                 output=r["path"] if r["success"] else None,
                 results=results,
+                failed_paths=[] if r["success"] else [r["path"]],
             )
 
         ok_count = sum(1 for r in results if r["success"])
+        failed = [r["path"] for r in results if not r["success"]]
         return FsDeleteOutput(
             success=all_ok,
             message=f"Deleted {ok_count}/{len(targets)} items" + ("" if all_ok else " (some failed)"),
             results=results,
+            failed_paths=failed if failed else None,
         )
 
 
@@ -280,6 +289,7 @@ class FsDeleteSkill(BaseSkill[FsDeleteInput, FsDeleteOutput]):
 class FsMoveInput(SkillInput):
     src: Optional[str] = Field(None, description="Source path (single move)")
     dst: Optional[str] = Field(None, description="Destination path (single move)")
+    overwrite: bool = Field(False, description="Overwrite destination if it exists")
     moves: Optional[List[Dict[str, str]]] = Field(
         None,
         description='Batch move list: [{"src": "old.txt", "dst": "new.txt"}, ...]',
@@ -299,6 +309,7 @@ class FsMoveOutput(SkillOutput):
     src: Optional[str] = None
     dst: Optional[str] = None
     results: Optional[List[Dict[str, Any]]] = Field(None, description="Batch move results")
+    failed_paths: Optional[List[str]] = Field(None, description="Source paths that failed to move")
 
 
 @register_skill
@@ -339,9 +350,17 @@ class FsMoveSkill(BaseSkill[FsMoveInput, FsMoveOutput]):
                 all_ok = False
                 continue
             if dst.exists():
-                results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": f"Destination exists: {dst}"})
-                all_ok = False
-                continue
+                if not params.overwrite:
+                    results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": f"Destination exists: {dst.name} — use overwrite=True to replace"})
+                    all_ok = False
+                    continue
+                # overwrite=True：先删除目标
+                try:
+                    shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+                except Exception as e:
+                    results.append({"src": p["src"], "dst": p["dst"], "success": False, "message": f"Failed to remove existing destination: {e}"})
+                    all_ok = False
+                    continue
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(src), str(dst))
@@ -359,13 +378,16 @@ class FsMoveSkill(BaseSkill[FsMoveInput, FsMoveOutput]):
                 dst=r["dst"],
                 output=r["dst"] if r["success"] else None,
                 results=results,
+                failed_paths=[] if r["success"] else [r["src"]],
             )
 
         ok_count = sum(1 for r in results if r["success"])
+        failed = [r["src"] for r in results if not r["success"]]
         return FsMoveOutput(
             success=all_ok,
             message=f"Moved {ok_count}/{len(pairs)} items" + ("" if all_ok else " (some failed)"),
             results=results,
+            failed_paths=failed if failed else None,
         )
 
 

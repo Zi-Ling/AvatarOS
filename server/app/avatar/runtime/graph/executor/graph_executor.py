@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 class ExecutionError(Exception):
-    pass
+    """Skill execution failure. retryable=False means no retry should be attempted."""
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 class ParameterResolutionError(ExecutionError):
     pass
@@ -108,9 +111,16 @@ class GraphExecutor:
                 context.variables.set("accumulated_cost", current_cost)
 
             if outputs.get("success") is False:
-                raise ExecutionError(
-                    outputs.get("message") or outputs.get("error") or "Skill returned success=false"
-                )
+                msg = outputs.get("message") or outputs.get("error") or "Skill returned success=false"
+                # 优先使用 skill 自己声明的 retryable（语义失败不应重试）
+                skill_retryable = outputs.get("retryable")
+                if skill_retryable is not None:
+                    retryable = bool(skill_retryable)
+                else:
+                    # 4xx HTTP 错误：客户端问题，重试无意义
+                    status_code = outputs.get("status_code")
+                    retryable = not (isinstance(status_code, int) and 400 <= status_code < 500)
+                raise ExecutionError(msg, retryable=retryable)
 
             if self.artifact_store:
                 outputs = await self._offload_large_outputs(outputs, node.id, context)

@@ -276,6 +276,11 @@ class NodeRunner:
 
                 should_retry = node.retry_count < node.retry_policy.max_retries
 
+                # 不可重试错误（如 4xx HTTP）直接跳过重试
+                from app.avatar.runtime.graph.executor.graph_executor import ExecutionError
+                if isinstance(e, ExecutionError) and not e.retryable:
+                    should_retry = False
+
                 if should_retry:
                     node.retry_count += 1
                     delay = node.get_retry_delay()

@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { FileText, Plus, Trash2, AlertCircle } from "lucide-react";
+import { FileText, Plus, Trash2 } from "lucide-react";
 import { knowledgeApi, KnowledgeDocument } from "@/lib/api/knowledge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { LoadingSpinner, ErrorState, EmptyState } from "@/components/ui/StateViews";
 
 type LoadState = "loading" | "error" | "empty" | "ok";
 
@@ -65,30 +66,18 @@ export function DocumentsView({ searchQuery = "" }: { searchQuery?: string }) {
       </div>
 
       <div className="flex-1 overflow-y-auto bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700/50 shadow-sm">
-        {loadState === "loading" && (
-          <div className="p-8 text-center text-slate-400">加载中...</div>
-        )}
+        {loadState === "loading" && <LoadingSpinner />}
 
         {loadState === "error" && (
-          <div className="p-8 text-center">
-            <AlertCircle className="w-12 h-12 mx-auto mb-3 text-red-400 opacity-70" />
-            <p className="text-slate-600 dark:text-slate-300 font-medium">加载失败</p>
-            <p className="text-xs text-slate-400 mt-1">{errorMsg}</p>
-            <button
-              onClick={loadDocs}
-              className="mt-4 px-4 py-1.5 text-sm bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
-            >
-              重试
-            </button>
-          </div>
+          <ErrorState message={errorMsg} onRetry={loadDocs} />
         )}
 
         {loadState === "empty" && (
-          <div className="p-8 text-center text-slate-400">
-            <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
-            <p>暂无文档</p>
-            <p className="text-xs mt-1">点击"上传文档"开始添加知识库内容</p>
-          </div>
+          <EmptyState
+            icon={FileText}
+            title="暂无文档"
+            description='点击"上传文档"开始添加知识库内容'
+          />
         )}
 
         {loadState === "ok" && (

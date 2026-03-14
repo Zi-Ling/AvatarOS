@@ -31,6 +31,8 @@ export type ApprovalRequest = {
   details?: Record<string, any>;
   created_at: string;
   expires_at: string;
+  task_id?: string;
+  step_id?: string;
 };
 
 export type ApprovalStatus = "pending" | "submitting" | "approved" | "rejected" | "expired";

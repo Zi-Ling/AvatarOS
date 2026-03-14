@@ -1,244 +1,160 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from 'react';
-import { Trash2, Archive, RefreshCw, HardDrive, Database, AlertTriangle } from 'lucide-react';
-import { maintenanceApi, type MaintenanceStatus } from '@/lib/api/maintenance';
-import { cn } from '@/lib/utils';
+import { useState, useCallback } from "react";
+import { Trash2, RefreshCw, HardDrive, Database, AlertTriangle } from "lucide-react";
+import { maintenanceApi } from "@/lib/api/maintenance";
 
-function StatusCard({ label, value, icon: Icon, sub }: { label: string; value: string; icon: React.ElementType; sub?: string }) {
+function SectionCard({ icon: Icon, title, children }: { icon: React.ElementType; title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 flex items-start gap-3">
-      <div className="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center shrink-0">
-        <Icon className="w-4 h-4 text-slate-500" />
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100 dark:border-slate-800">
+        <Icon className="w-3.5 h-3.5 text-indigo-500" />
+        <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider">{title}</span>
       </div>
+      <div className="p-4">{children}</div>
+    </div>
+  );
+}
+
+function ActionRow({
+  label, description, buttonLabel, buttonVariant = "default", loading, onClick,
+}: {
+  label: string; description?: string; buttonLabel: string;
+  buttonVariant?: "default" | "danger"; loading?: boolean; onClick: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2">
       <div>
-        <div className="text-[10px] text-slate-400 uppercase tracking-wider">{label}</div>
-        <div className="text-sm font-bold text-slate-800 dark:text-slate-100">{value}</div>
-        {sub && <div className="text-[10px] text-slate-400">{sub}</div>}
+        <div className="text-sm text-slate-700 dark:text-slate-200">{label}</div>
+        {description && <div className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">{description}</div>}
       </div>
+      <button
+        onClick={onClick}
+        disabled={loading}
+        className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 ${
+          buttonVariant === "danger"
+            ? "border border-red-200 dark:border-red-500/30 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10"
+            : "border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
+        }`}
+      >
+        {loading && <RefreshCw className="w-3 h-3 animate-spin" />}
+        {buttonLabel}
+      </button>
     </div>
   );
 }
 
-function ResultBlock({ title, result, color }: { title: string; result: any; color: string }) {
-  return (
-    <div className={cn('rounded-lg border p-3 text-xs space-y-1', color)}>
-      <div className="font-semibold">{title}</div>
-      {Object.entries(result).filter(([k]) => k !== 'success').map(([k, v]) => (
-        <div key={k} className="flex gap-2">
-          <span className="text-slate-400 shrink-0">{k}:</span>
-          <span className="text-slate-600 dark:text-slate-400 break-all">
-            {Array.isArray(v) ? (v.length === 0 ? '[]' : v.join(', ')) : String(v)}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 export function MaintenanceView() {
-  const [status, setStatus] = useState<MaintenanceStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [gcDays, setGcDays] = useState(7);
-  const [archiveDays, setArchiveDays] = useState(30);
-  const [running, setRunning] = useState<string | null>(null);
-  const [lastResult, setLastResult] = useState<{ type: string; data: any } | null>(null);
+  const [gcLoading, setGcLoading] = useState(false);
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [clearLoading, setClearLoading] = useState(false);
+  const [result, setResult] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
-  const loadStatus = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const showResult = (type: "success" | "error", message: string) => {
+    setResult({ type, message });
+    setTimeout(() => setResult(null), 4000);
+  };
+
+  const runGC = useCallback(async () => {
+    setGcLoading(true);
     try {
-      const s = await maintenanceApi.getStatus();
-      setStatus(s);
+      const res = await maintenanceApi.runGC();
+      showResult("success", `GC 完成，清理 ${res.deleted_dirs} 个目录`);
     } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
+      showResult("error", e.message ?? "GC 失败");
+    } finally { setGcLoading(false); }
   }, []);
 
-  useEffect(() => { loadStatus(); }, [loadStatus]);
-
-  const runGC = async () => {
-    setRunning('gc');
+  const runArchive = useCallback(async () => {
+    setArchiveLoading(true);
     try {
-      const r = await maintenanceApi.runGC(gcDays);
-      setLastResult({ type: 'GC', data: r });
-      await loadStatus();
+      const res = await maintenanceApi.runArchive();
+      showResult("success", `归档完成，共归档 ${res.archived_count} 条记录`);
     } catch (e: any) {
-      setLastResult({ type: 'GC Error', data: { error: e.message } });
-    } finally {
-      setRunning(null);
-    }
-  };
+      showResult("error", e.message ?? "归档失败");
+    } finally { setArchiveLoading(false); }
+  }, []);
 
-  const runArchive = async () => {
-    setRunning('archive');
+  const clearCache = useCallback(async () => {
+    if (!confirm("确认清除所有缓存？此操作不可撤销。")) return;
+    setClearLoading(true);
     try {
-      const r = await maintenanceApi.runArchive(archiveDays);
-      setLastResult({ type: 'Archive', data: r });
-      await loadStatus();
-    } catch (e: any) {
-      setLastResult({ type: 'Archive Error', data: { error: e.message } });
-    } finally {
-      setRunning(null);
-    }
-  };
-
-  const runAll = async () => {
-    setRunning('all');
-    try {
-      const r = await maintenanceApi.runAll(gcDays, archiveDays);
-      setLastResult({ type: 'GC + Archive', data: { gc: r.gc, archive: r.archive } });
-      await loadStatus();
-    } catch (e: any) {
-      setLastResult({ type: 'Error', data: { error: e.message } });
-    } finally {
-      setRunning(null);
-    }
-  };
-
-  const totalSessions = status
-    ? Object.values(status.db_sessions_by_status).reduce((a, b) => a + b, 0)
-    : 0;
-
-  const archivableSessions = status
-    ? (status.db_sessions_by_status['completed'] || 0) + (status.db_sessions_by_status['failed'] || 0)
-    : 0;
+      await fetch("/api/v1/maintenance/clear-cache", { method: "POST" });
+      showResult("success", "缓存已清除");
+    } catch {
+      showResult("error", "清除失败");
+    } finally { setClearLoading(false); }
+  }, []);
 
   return (
-    <div className="h-full overflow-y-auto p-4 space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Trash2 className="w-4 h-4 text-indigo-500" />
-          <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">系统维护</span>
+    <div className="space-y-3">
+      <div className="flex items-start gap-3 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-4 py-3">
+        <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+        <div>
+          <p className="text-xs font-semibold text-amber-700 dark:text-amber-400">系统维护</p>
+          <p className="text-[11px] text-amber-600 dark:text-amber-400/80 mt-0.5">以下操作会影响系统数据，请在了解后果后执行</p>
         </div>
-        <button onClick={loadStatus} disabled={loading} className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 transition-colors">
-          <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
-        </button>
       </div>
 
-      {error && (
-        <div className="flex items-center gap-2 text-xs text-red-500 bg-red-50 dark:bg-red-900/10 rounded-lg p-3">
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-          {error}
-        </div>
-      )}
-
-      {/* Status Cards */}
-      {status && (
-        <div className="grid grid-cols-2 gap-2">
-          <StatusCard
-            label="磁盘占用"
-            value={`${status.disk.total_size_mb} MB`}
-            icon={HardDrive}
-            sub={`${status.disk.workspace_count} 个 session workspace`}
+      <SectionCard icon={Database} title="数据管理">
+        <div className="divide-y divide-slate-100 dark:divide-slate-800">
+          <ActionRow
+            label="垃圾回收"
+            description="清理孤立节点、过期缓存和临时文件"
+            buttonLabel="运行 GC"
+            loading={gcLoading}
+            onClick={runGC}
           />
-          <StatusCard
-            label="DB Sessions"
-            value={String(totalSessions)}
-            icon={Database}
-            sub={`${archivableSessions} 可归档`}
+          <ActionRow
+            label="归档旧任务"
+            description="将 30 天前已完成的任务移入归档存储"
+            buttonLabel="开始归档"
+            loading={archiveLoading}
+            onClick={runArchive}
           />
         </div>
-      )}
+      </SectionCard>
 
-      {/* DB Status Breakdown */}
-      {status && (
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
-          <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-            Session 状态分布
-          </div>
-          <div className="p-3 flex flex-wrap gap-2">
-            {Object.entries(status.db_sessions_by_status).map(([status_key, count]) => (
-              <div key={status_key} className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-50 dark:bg-slate-800">
-                <span className="text-[10px] text-slate-500">{status_key}</span>
-                <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{count}</span>
-              </div>
-            ))}
-          </div>
+      <SectionCard icon={HardDrive} title="缓存管理">
+        <div className="divide-y divide-slate-100 dark:divide-slate-800">
+          <ActionRow
+            label="清除计划缓存"
+            description="删除所有已缓存的执行计划，下次执行将重新规划"
+            buttonLabel="清除缓存"
+            buttonVariant="danger"
+            loading={clearLoading}
+            onClick={clearCache}
+          />
         </div>
-      )}
+      </SectionCard>
 
-      {/* GC Panel */}
-      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
-        <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-          <Trash2 className="w-3 h-3" /> Artifact GC
+      <SectionCard icon={Trash2} title="危险操作">
+        <div className="divide-y divide-slate-100 dark:divide-slate-800">
+          <ActionRow
+            label="重置所有设置"
+            description="将所有配置恢复为默认值，不影响任务数据"
+            buttonLabel="重置设置"
+            buttonVariant="danger"
+            onClick={async () => {
+              if (!confirm("确认重置所有设置？")) return;
+              try {
+                await fetch("/api/v1/settings/reset", { method: "POST" });
+                showResult("success", "设置已重置，请刷新页面");
+              } catch { showResult("error", "重置失败"); }
+            }}
+          />
         </div>
-        <div className="p-3 space-y-3">
-          <div className="text-xs text-slate-500 dark:text-slate-400">
-            清理 completed/failed/cancelled session 的磁盘 workspace 目录，保留最近 N 天。
-          </div>
-          <div className="flex items-center gap-3">
-            <label className="text-xs text-slate-500 shrink-0">保留天数</label>
-            <input
-              type="number"
-              min={1}
-              value={gcDays}
-              onChange={e => setGcDays(Number(e.target.value))}
-              className="w-20 text-xs rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2 py-1.5"
-            />
-            <button
-              onClick={runGC}
-              disabled={!!running}
-              className="flex-1 py-1.5 text-xs rounded bg-red-500 text-white hover:bg-red-600 disabled:opacity-40 transition-colors flex items-center justify-center gap-1"
-            >
-              {running === 'gc' ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-              运行 GC
-            </button>
-          </div>
-        </div>
-      </div>
+      </SectionCard>
 
-      {/* Archive Panel */}
-      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
-        <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-800 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-          <Archive className="w-3 h-3" /> Session Archiver
+      {result && (
+        <div className={`rounded-xl border px-4 py-3 text-xs font-medium ${
+          result.type === "success"
+            ? "border-emerald-200 dark:border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+            : "border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-400"
+        }`}>
+          {result.message}
         </div>
-        <div className="p-3 space-y-3">
-          <div className="text-xs text-slate-500 dark:text-slate-400">
-            把 completed/failed 且超过 N 天的 session 状态改为 archived，不删除 DB 记录。
-          </div>
-          <div className="flex items-center gap-3">
-            <label className="text-xs text-slate-500 shrink-0">归档阈值（天）</label>
-            <input
-              type="number"
-              min={1}
-              value={archiveDays}
-              onChange={e => setArchiveDays(Number(e.target.value))}
-              className="w-20 text-xs rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2 py-1.5"
-            />
-            <button
-              onClick={runArchive}
-              disabled={!!running}
-              className="flex-1 py-1.5 text-xs rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-40 transition-colors flex items-center justify-center gap-1"
-            >
-              {running === 'archive' ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Archive className="w-3 h-3" />}
-              运行归档
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Run All */}
-      <button
-        onClick={runAll}
-        disabled={!!running}
-        className="w-full py-2 text-xs rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-40 transition-colors flex items-center justify-center gap-2"
-      >
-        {running === 'all' ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
-        一键 GC + 归档
-      </button>
-
-      {/* Last Result */}
-      {lastResult && (
-        <ResultBlock
-          title={`上次操作：${lastResult.type}`}
-          result={lastResult.data}
-          color="border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50"
-        />
       )}
     </div>
   );
