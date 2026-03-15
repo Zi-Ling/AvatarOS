@@ -26,3 +26,8 @@ class SkillOutput(BaseModel):
     fs_operation: Optional[str] = None  # 'created', 'modified', 'deleted'
     fs_path: Optional[str] = None  # 相对路径
     fs_type: Optional[str] = None  # 'file', 'dir'
+
+    # skill 内部 LLM 调用的 token usage（供 cost 统计收集）
+    # 格式与 LLMResponse.usage 一致：{prompt_tokens, completion_tokens, total_tokens}
+    llm_usage: Optional[dict] = None
+    llm_model: Optional[str] = None  # 实际使用的 model name

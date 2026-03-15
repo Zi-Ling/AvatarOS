@@ -8,10 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libatspi2.0-0 libwayland-client0 fonts-noto-cjk fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 依赖（数据处理 + 网络 + 浏览器自动化）
+# Python 依赖（数据处理 + 网络 + 浏览器自动化 + Office 文档处理）
 RUN pip install --no-cache-dir \
     numpy pandas openpyxl scipy matplotlib pillow \
-    requests httpx beautifulsoup4 lxml pydantic playwright
+    requests httpx beautifulsoup4 lxml pydantic playwright \
+    python-docx python-pptx
 
 # 安装 Chromium（仅 chromium，节省空间）
 RUN playwright install chromium

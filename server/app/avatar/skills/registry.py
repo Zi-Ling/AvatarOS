@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, Type, List, Optional, Any, Iterator
 import logging
-import numpy as np
 
 from .base import BaseSkill, SkillSpec
-from ..infra.semantic import get_embedding_service, SemanticSimilarity
 
 logger = logging.getLogger(__name__)
 
@@ -18,17 +16,11 @@ class SkillRegistry:
 
     存储 Type[BaseSkill]（类，不是实例）。
     支持按 name 或 alias 查找。
-    支持语义搜索（向量索引懒初始化）。
     """
 
     def __init__(self):
         self._skills: Dict[str, Type[BaseSkill]] = {}       # name -> class
         self._by_alias: Dict[str, str] = {}                  # alias -> name
-        self._embeddings: Optional[np.ndarray] = None
-        self._skill_names: List[str] = []
-        self._skill_texts: List[str] = []
-        self._index_ready: bool = False
-        self._embedding_service = get_embedding_service()
 
     # ── Registration ──────────────────────────────────────────────────────────
 
@@ -113,95 +105,34 @@ class SkillRegistry:
             lines.append(f"- {name}: {desc}")
         return "\n".join(lines)
 
-    # ── Semantic Search ───────────────────────────────────────────────────────
-
-    def _ensure_vector_index(self):
-        if self._index_ready:
-            return
-
-        if not self._embedding_service.is_available():
-            logger.warning("SkillRegistry: EmbeddingService not available, semantic search disabled")
-            self._index_ready = True
-            return
-
-        try:
-            names, texts = [], []
-            for name, cls in self._skills.items():
-                spec = cls.spec
-                parts = [
-                    f"Skill: {name}",
-                    f"Description: {spec.description}",
-                    f"Aliases: {', '.join(spec.aliases)}",
-                ]
-                try:
-                    param_keys = list(spec.input_model.model_fields.keys())
-                    parts.append(f"Parameters: {', '.join(param_keys)}")
-                except Exception:
-                    pass
-                names.append(name)
-                texts.append("\n".join(parts))
-
-            if not names:
-                self._index_ready = True
-                return
-
-            self._embeddings = self._embedding_service.embed_batch(texts)
-            self._skill_names = names
-            self._skill_texts = texts
-            logger.info(f"SkillRegistry: Built vector index for {len(names)} skills")
-        except Exception as e:
-            logger.error(f"SkillRegistry: Failed to build vector index: {e}")
-        finally:
-            self._index_ready = True
+    # ── Skill Search (keyword-based, no embedding) ───────────────────────────
 
     def search_skills(self, query: str, limit: int = 15) -> Dict[str, Any]:
+        """关键词匹配技能，返回描述字典。"""
         if not query or len(query.strip()) < 2:
             return self.describe_skills()
-
-        self._ensure_vector_index()
-
-        if self._embeddings is None:
-            return self.describe_skills()
-
-        try:
-            query_vec = self._embedding_service.embed_single(query)
-            scores = [
-                SemanticSimilarity.cosine_similarity(query_vec, v)
-                for v in self._embeddings
-            ]
-            top_k = min(limit, len(self._skill_names))
-            top_indices = np.argsort(scores)[::-1][:top_k]
-            top_names = {self._skill_names[i] for i in top_indices}
-            return {k: v for k, v in self.describe_skills().items() if k in top_names}
-        except Exception as e:
-            logger.error(f"SkillRegistry: Semantic search failed: {e}")
-            return self.describe_skills()
+        query_lower = query.lower()
+        matched = {
+            name: desc
+            for name, desc in self.describe_skills().items()
+            if query_lower in name.lower() or query_lower in desc.get("description", "").lower()
+        }
+        return matched or self.describe_skills()
 
     def search_skills_with_scores(self, query: str, limit: int = 15) -> List[Dict[str, Any]]:
-        """返回带分数的技能列表，格式: [{'name': ..., 'score': ...}, ...]"""
+        """关键词匹配技能，返回带固定分数的列表（供 router 兼容使用）。"""
+        all_names = list(self._skills.keys())
         if not query or len(query.strip()) < 2:
-            return [{"name": n, "score": 0.5} for n in list(self._skills.keys())[:limit]]
-
-        self._ensure_vector_index()
-
-        if self._embeddings is None:
-            return [{"name": n, "score": 0.5} for n in list(self._skills.keys())[:limit]]
-
-        try:
-            query_vec = self._embedding_service.embed_single(query)
-            scores = [
-                SemanticSimilarity.cosine_similarity(query_vec, v)
-                for v in self._embeddings
-            ]
-            top_k = min(limit, len(self._skill_names))
-            top_indices = np.argsort(scores)[::-1][:top_k]
-            return [
-                {"name": self._skill_names[i], "score": float(scores[i])}
-                for i in top_indices
-            ]
-        except Exception as e:
-            logger.error(f"SkillRegistry: search_skills_with_scores failed: {e}")
-            return [{"name": n, "score": 0.5} for n in list(self._skills.keys())[:limit]]
+            return [{"name": n, "score": 0.8} for n in all_names[:limit]]
+        query_lower = query.lower()
+        results = []
+        for name, cls in self._skills.items():
+            spec = cls.spec
+            if query_lower in name.lower() or query_lower in spec.description.lower():
+                results.append({"name": name, "score": 0.9})
+            else:
+                results.append({"name": name, "score": 0.8})
+        return results[:limit]
 
 
 # ── Global singleton ──────────────────────────────────────────────────────────

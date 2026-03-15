@@ -169,13 +169,17 @@ export function TaskEventListener() {
         (event.step_id || payload.subtask_id)
       ) {
         const stepId = payload.subtask_id || event.step_id;
-        updateStep(stepId, { status: "running", params: payload.params });
+        updateStep(stepId, {
+          status: "running",
+          params: payload.params,
+          ...(payload.description ? { description: payload.description } : {}),
+        });
 
         const { activeTask } = useTaskStore.getState();
         if (activeTask && currentTaskMessageId) {
           const step = activeTask.steps.find((s) => s.id === stepId);
           const stepName =
-            step?.step_name || step?.skill_name?.split(".").pop() || "执行中...";
+            payload.description || step?.description || step?.step_name || step?.skill_name?.split(".").pop() || "执行中...";
           const completedCount = activeTask.steps.filter((s) => s.status === "completed").length;
           setCurrentStepName(stepName, completedCount);
           updateMessage(currentTaskMessageId, {

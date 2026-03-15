@@ -103,15 +103,18 @@ internal_reason (DO NOT EXPOSE): {internal_reason}
 """.strip()
 
         try:
-            raw = llm_client.call(prompt)
+            raw, usage = llm_client.call_with_usage(prompt)
             text = raw.strip() if isinstance(raw, str) else str(getattr(raw, "content", raw)).strip()
             data = FallbackOutput.model_validate_json(text)
-            data.success = False
+            data.success = True   # skill 执行成功（生成了兜底回复）
             data.message = f"Fallback used: {_shorten(params.reason, 100)}"
+            data.llm_usage = usage or {}
+            data.llm_model = getattr(llm_client.config, 'model', None)
             return data
         except ValidationError:
             return FallbackOutput(
-                success=False,
+                success=True,
+                retryable=False,
                 message="Fallback used: LLM JSON parse failure",
                 response_zh="我暂时无法直接完成这个请求。你可以补充目标格式/约束条件，或把任务拆成1-2步，我会按步骤帮你完成。",
                 response_en="I can't complete this request directly right now. Share the desired format/constraints or split it into 1-2 steps.",
@@ -121,7 +124,8 @@ internal_reason (DO NOT EXPOSE): {internal_reason}
             )
         except Exception as e:
             return FallbackOutput(
-                success=False,
+                success=True,
+                retryable=False,
                 message=f"Fallback used: {str(e)[:100]}",
                 response_zh="我暂时无法直接完成这个请求。你可以补充目标和约束条件，我会尽力给出可执行的下一步。",
                 response_en="I can't complete this request directly right now. Share your goal and constraints.",

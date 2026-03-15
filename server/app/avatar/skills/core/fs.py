@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 from typing import Optional, List, Dict, Any
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
@@ -20,22 +20,38 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # ── fs.read ───────────────────────────────────────────────────────────────────
 
-class FsReadInput(SkillInput):
+class FsReadItem(BaseModel):
     path: str = Field(..., description="File path to read")
     encoding: str = Field("utf-8", description="Text encoding")
     mode: str = Field("text", description="'text' or 'binary'")
 
+class FsReadInput(SkillInput):
+    # 单文件模式
+    path: Optional[str] = Field(None, description="File path to read (single-file mode)")
+    encoding: str = Field("utf-8", description="Text encoding")
+    mode: str = Field("text", description="'text' or 'binary'")
+    # batch 模式：reads=[{"path": "a.txt"}, {"path": "b.txt", "encoding": "gbk"}]
+    reads: Optional[List[FsReadItem]] = Field(None, description="Batch read: list of {path, encoding?, mode?}")
+
 class FsReadOutput(SkillOutput):
-    output: Optional[str] = Field(None, description="File content")
-    path: str
+    output: Optional[Any] = Field(None, description="File content (single) or dict {path: content} (batch)")
+    path: str = ""
     content: Optional[str] = None
     size_bytes: Optional[int] = None
+    # batch 模式结果
+    contents: Optional[Dict[str, Any]] = Field(None, description="Batch result: {path: content} mapping")
 
 @register_skill
 class FsReadSkill(BaseSkill[FsReadInput, FsReadOutput]):
     spec = SkillSpec(
         name="fs.read",
-        description=f"Read file content (text mode, max {MAX_FILE_SIZE_MB}MB). 读取文件内容。",
+        description=(
+            f"Read file content (text mode, max {MAX_FILE_SIZE_MB}MB). 读取文件内容。\n"
+            "Single-file mode: {\"path\": \"file.txt\"}\n"
+            "Batch mode (read multiple files in ONE step): {\"reads\": [{\"path\": \"a.txt\"}, {\"path\": \"b.txt\"}]}\n"
+            "Batch output: {\"contents\": {\"a.txt\": \"...\", \"b.txt\": \"...\"}}\n"
+            "Use batch mode whenever reading more than one file."
+        ),
         input_model=FsReadInput,
         output_model=FsReadOutput,
         side_effects={SideEffect.FS},
@@ -43,53 +59,122 @@ class FsReadSkill(BaseSkill[FsReadInput, FsReadOutput]):
         aliases=["read_file", "file.read", "open_file", "fs.read_file"],
     )
 
-    async def run(self, ctx: SkillContext, params: FsReadInput) -> FsReadOutput:
-        target = ctx.resolve_path(params.path)
-
-        if ctx.dry_run:
-            return FsReadOutput(success=True, message=f"[dry_run] Would read: {target}", path=str(target))
-
+    async def _read_one(self, ctx: SkillContext, item: FsReadItem) -> tuple[bool, str, Any, int]:
+        """读单个文件，返回 (success, message, content, size)"""
+        target = ctx.resolve_path(item.path)
         if not target.exists():
-            return FsReadOutput(success=False, message=f"File not found: {target}", path=str(target))
+            return False, f"File not found: {item.path}", None, 0
         if not target.is_file():
-            return FsReadOutput(success=False, message=f"Not a file: {target}", path=str(target))
-
+            return False, f"Not a file: {item.path}", None, 0
         size = target.stat().st_size
         if size > MAX_FILE_SIZE_BYTES:
-            return FsReadOutput(success=False, message=f"File too large: {size / 1024 / 1024:.1f}MB", path=str(target))
-
+            return False, f"File too large: {size / 1024 / 1024:.1f}MB", None, 0
         try:
-            if params.mode == "binary":
+            if item.mode == "binary":
                 content = target.read_bytes().hex()
             else:
-                content = target.read_text(encoding=params.encoding)
-            return FsReadOutput(success=True, message=f"Read {size} bytes", path=str(target),
-                                content=content, size_bytes=size, output=content)
+                content = target.read_text(encoding=item.encoding)
+            return True, f"Read {size} bytes", content, size
         except UnicodeDecodeError as e:
-            return FsReadOutput(success=False, message=f"Encoding error: {e}", path=str(target))
+            return False, f"Encoding error: {e}", None, 0
         except Exception as e:
-            return FsReadOutput(success=False, message=str(e), path=str(target))
+            return False, str(e), None, 0
+
+    async def run(self, ctx: SkillContext, params: FsReadInput) -> FsReadOutput:
+        # ── batch 模式 ──────────────────────────────────────────────────────
+        if params.reads:
+            if ctx.dry_run:
+                paths = [r.path for r in params.reads]
+                return FsReadOutput(
+                    success=True,
+                    message=f"[dry_run] Would read {len(paths)} files",
+                    path=", ".join(paths),
+                    output={p: "[dry_run]" for p in paths},
+                    contents={p: "[dry_run]" for p in paths},
+                )
+            contents: Dict[str, Any] = {}
+            failed = []
+            for item in params.reads:
+                ok, msg, content, _ = await self._read_one(ctx, item)
+                if ok:
+                    contents[item.path] = content
+                else:
+                    failed.append(f"{item.path}: {msg}")
+            if failed:
+                return FsReadOutput(
+                    success=False,
+                    message=f"Batch read partial failure: {'; '.join(failed)}",
+                    path="",
+                    output=contents if contents else None,
+                    contents=contents if contents else None,
+                )
+            return FsReadOutput(
+                success=True,
+                message=f"Read {len(contents)} files",
+                path=", ".join(contents.keys()),
+                output=contents,
+                contents=contents,
+            )
+
+        # ── 单文件模式 ──────────────────────────────────────────────────────
+        if not params.path:
+            return FsReadOutput(
+                success=False,
+                message="Either 'path' (single) or 'reads' (batch) must be provided",
+                path="",
+            )
+
+        item = FsReadItem(path=params.path, encoding=params.encoding, mode=params.mode)
+
+        if ctx.dry_run:
+            return FsReadOutput(success=True, message=f"[dry_run] Would read: {params.path}", path=params.path)
+
+        ok, msg, content, size = await self._read_one(ctx, item)
+        target_str = str(ctx.resolve_path(params.path))
+        if ok:
+            return FsReadOutput(
+                success=True, message=msg, path=target_str,
+                content=content, size_bytes=size, output=content,
+            )
+        retryable = "not found" not in msg.lower() and "not a file" not in msg.lower() and "too large" not in msg.lower() and "encoding" not in msg.lower()
+        return FsReadOutput(success=False, retryable=retryable, message=msg, path=target_str)
 
 
 # ── fs.write ──────────────────────────────────────────────────────────────────
 
-class FsWriteInput(SkillInput):
+class FsWriteItem(BaseModel):
     path: str = Field(..., description="File path to write")
     content: str = Field(..., description="Content to write")
     encoding: str = Field("utf-8", description="Text encoding")
     mode: str = Field("text", description="'text' or 'binary'")
     append: bool = Field(False, description="Append instead of overwrite")
 
+class FsWriteInput(SkillInput):
+    # 单文件模式
+    path: Optional[str] = Field(None, description="File path to write (single-file mode)")
+    content: Optional[str] = Field(None, description="Content to write (single-file mode)")
+    encoding: str = Field("utf-8", description="Text encoding")
+    mode: str = Field("text", description="'text' or 'binary'")
+    append: bool = Field(False, description="Append instead of overwrite")
+    # batch 模式：writes=[{"path":..., "content":..., "encoding":..., "mode":..., "append":...}, ...]
+    writes: Optional[List[FsWriteItem]] = Field(None, description="Batch write: list of {path, content, encoding?, mode?, append?}")
+
 class FsWriteOutput(SkillOutput):
-    output: Optional[str] = Field(None, description="Written file path")
-    path: str
+    output: Optional[str] = Field(None, description="Written file path (single) or comma-separated paths (batch)")
+    path: str = Field("", description="Written file path")
     bytes_written: Optional[int] = None
+    written_count: Optional[int] = None  # batch 模式写入文件数
 
 @register_skill
 class FsWriteSkill(BaseSkill[FsWriteInput, FsWriteOutput]):
     spec = SkillSpec(
         name="fs.write",
-        description=f"Write content to file (max {MAX_FILE_SIZE_MB}MB). 写入文件内容。",
+        description=(
+            f"Write content to file(s) (max {MAX_FILE_SIZE_MB}MB each). 写入文件内容。\n"
+            "Single-file mode: {\"path\": \"file.txt\", \"content\": \"hello\"}\n"
+            "Batch mode (write multiple files in ONE step): {\"writes\": [{\"path\": \"a.txt\", \"content\": \"...\"}, {\"path\": \"b.txt\", \"content\": \"...\"}]}\n"
+            "Use batch mode whenever writing more than one file — do NOT call fs.write N times in a loop."
+        ),
         input_model=FsWriteInput,
         output_model=FsWriteOutput,
         side_effects={SideEffect.FS},
@@ -97,40 +182,113 @@ class FsWriteSkill(BaseSkill[FsWriteInput, FsWriteOutput]):
         aliases=["write_file", "file.write", "save_file", "fs.write_file"],
     )
 
-    async def run(self, ctx: SkillContext, params: FsWriteInput) -> FsWriteOutput:
-        target = ctx.resolve_path(params.path)
-
-        if ctx.dry_run:
-            return FsWriteOutput(success=True, message=f"[dry_run] Would write: {target}", path=str(target), output=str(target))
-
+    async def _write_one(self, ctx: SkillContext, item: FsWriteItem) -> tuple[bool, str, int]:
+        """写单个文件，返回 (success, message, bytes_written)"""
+        target = ctx.resolve_path(item.path)
         try:
-            if params.mode == "binary":
-                content_bytes = bytes.fromhex(params.content)
+            if item.mode == "binary":
+                hex_str = "".join(item.content.split())
+                content_bytes = bytes.fromhex(hex_str)
             else:
-                content_bytes = params.content.encode(params.encoding)
+                content_bytes = item.content.encode(item.encoding)
 
             if len(content_bytes) > MAX_FILE_SIZE_BYTES:
-                return FsWriteOutput(success=False, message=f"Content too large", path=str(target))
+                return False, f"Content too large for {item.path}", 0
 
             target.parent.mkdir(parents=True, exist_ok=True)
 
-            if params.append:
-                if params.mode == "binary":
+            if item.append:
+                if item.mode == "binary":
                     with open(target, "ab") as f:
                         f.write(content_bytes)
                 else:
-                    with open(target, "a", encoding=params.encoding) as f:
-                        f.write(params.content)
+                    with open(target, "a", encoding=item.encoding) as f:
+                        f.write(item.content)
             else:
-                if params.mode == "binary":
+                if item.mode == "binary":
                     target.write_bytes(content_bytes)
                 else:
-                    target.write_text(params.content, encoding=params.encoding)
+                    target.write_text(item.content, encoding=item.encoding)
 
-            return FsWriteOutput(success=True, message=f"Written {len(content_bytes)} bytes",
-                                 path=str(target), bytes_written=len(content_bytes), output=str(target))
+            return True, str(target), len(content_bytes)
         except Exception as e:
-            return FsWriteOutput(success=False, message=str(e), path=str(target))
+            return False, str(e), 0
+
+    async def run(self, ctx: SkillContext, params: FsWriteInput) -> FsWriteOutput:
+        # ── batch 模式 ──────────────────────────────────────────────────────
+        if params.writes:
+            if ctx.dry_run:
+                paths = [w.path for w in params.writes]
+                return FsWriteOutput(
+                    success=True,
+                    message=f"[dry_run] Would write {len(paths)} files",
+                    path=", ".join(paths),
+                    output=", ".join(paths),
+                    written_count=len(paths),
+                )
+            results = []
+            total_bytes = 0
+            failed = []
+            for item in params.writes:
+                ok, msg, nbytes = await self._write_one(ctx, item)
+                if ok:
+                    results.append(item.path)
+                    total_bytes += nbytes
+                else:
+                    failed.append(f"{item.path}: {msg}")
+
+            if failed:
+                return FsWriteOutput(
+                    success=False,
+                    message=f"Batch write partial failure: {'; '.join(failed)}",
+                    path=", ".join(results),
+                    output=", ".join(results) if results else None,
+                    written_count=len(results),
+                )
+            paths_str = ", ".join(results)
+            return FsWriteOutput(
+                success=True,
+                message=f"Written {len(results)} files ({total_bytes} bytes total)",
+                path=paths_str,
+                output=paths_str,
+                written_count=len(results),
+                bytes_written=total_bytes,
+            )
+
+        # ── 单文件模式 ──────────────────────────────────────────────────────
+        if not params.path or params.content is None:
+            return FsWriteOutput(
+                success=False,
+                message="Either 'path'+'content' (single) or 'writes' (batch) must be provided",
+                path="",
+            )
+
+        item = FsWriteItem(
+            path=params.path,
+            content=params.content,
+            encoding=params.encoding,
+            mode=params.mode,
+            append=params.append,
+        )
+
+        if ctx.dry_run:
+            return FsWriteOutput(
+                success=True,
+                message=f"[dry_run] Would write: {params.path}",
+                path=params.path,
+                output=params.path,
+            )
+
+        ok, msg, nbytes = await self._write_one(ctx, item)
+        if ok:
+            return FsWriteOutput(
+                success=True,
+                message=f"Written {nbytes} bytes",
+                path=msg,
+                bytes_written=nbytes,
+                output=msg,
+            )
+        return FsWriteOutput(success=False, message=msg, path=params.path or "")
 
 
 # ── fs.list ───────────────────────────────────────────────────────────────────
@@ -171,9 +329,9 @@ class FsListSkill(BaseSkill[FsListInput, FsListOutput]):
             return FsListOutput(success=True, message=f"[dry_run] Would list: {target}", path=str(target), output=[])
 
         if not target.exists():
-            return FsListOutput(success=False, message=f"Not found: {target}", path=str(target))
+            return FsListOutput(success=False, retryable=False, message=f"Not found: {target}", path=str(target))
         if not target.is_dir():
-            return FsListOutput(success=False, message=f"Not a directory: {target}", path=str(target))
+            return FsListOutput(success=False, retryable=False, message=f"Not a directory: {target}", path=str(target))
 
         try:
             items, total_files, total_dirs = [], 0, 0

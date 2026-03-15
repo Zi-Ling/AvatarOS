@@ -48,10 +48,8 @@ class AppBootstrap:
         self._init_learning()
         llm_logger = self._init_llm_logger()
         llm_client = self._init_llm_client(llm_logger)
-        self._init_embedding()
         self._warmup_skills()
-        self._warmup_executors()  # 新增：预热执行器
-        self._warmup_classifier()
+        self._warmup_executors()
         self._init_runtime(llm_client)
         self._init_router(llm_client, llm_logger)
         self._init_log_aggregator(llm_logger)
@@ -151,38 +149,11 @@ class AppBootstrap:
         llm_config = load_llm_config()
         return create_llm_client(config=llm_config, logger=llm_logger)
 
-    def _init_embedding(self):
-        logger.info("🧬 初始化语义服务...")
-        from app.avatar.infra.semantic import get_embedding_service
-        try:
-            svc = get_embedding_service()
-            svc.initialize()
-            logger.info("  ✅ 语义服务已启用")
-        except Exception as e:
-            logger.warning(f"  ⚠️ 语义服务初始化失败（将使用降级方案）: {e}")
-
     def _warmup_skills(self):
-        logger.info("🔥 预热技能索引...")
+        logger.info("🔥 预热技能注册表...")
         from app.avatar.skills.registry import skill_registry
-        from app.avatar.planner.selector import skill_selector
-
-        start_time = time.time()
-        try:
-            skill_registry._ensure_vector_index()
-            elapsed = (time.time() - start_time) * 1000
-            count = len(skill_registry._skill_names) if skill_registry._index_ready else 0
-            if skill_registry._index_ready:
-                logger.info(f"  ✅ 技能索引预热完成：{count} 个技能，耗时 {elapsed:.0f}ms")
-            else:
-                logger.warning("  ⚠️ 技能索引未就绪（将使用降级方案）")
-        except Exception as e:
-            logger.warning(f"  ⚠️ 技能索引预热失败: {e}")
-
-        try:
-            skill_selector.initialize()
-            logger.info("  ✅ 技能选择器已就绪")
-        except Exception as e:
-            logger.warning(f"  ⚠️ 技能选择器初始化失败: {e}")
+        count = len(list(skill_registry.iter_skills()))
+        logger.info(f"  ✅ 技能注册表就绪：{count} 个技能")
     
     def _warmup_executors(self):
         """预热执行器（避免首次执行延迟）"""
@@ -196,22 +167,6 @@ class AppBootstrap:
             logger.info(f"  ✅ 执行器预热完成，耗时 {elapsed:.0f}ms")
         except Exception as e:
             logger.warning(f"  ⚠️ 执行器预热失败: {e}")
-
-    def _warmup_classifier(self):
-        logger.info("🔥 预热能力分类器...")
-        from app.avatar.infra.semantic.classifier import get_capability_classifier
-        start_time = time.time()
-        try:
-            classifier = get_capability_classifier()
-            classifier.warmup()
-            elapsed = (time.time() - start_time) * 1000
-            cap_count = len(classifier.vectors)
-            if cap_count > 0:
-                logger.info(f"  ✅ 能力分类器预热完成：{cap_count} 个能力，耗时 {elapsed:.0f}ms")
-            else:
-                logger.warning("  ⚠️ 能力分类器未就绪（将使用降级方案）")
-        except Exception as e:
-            logger.warning(f"  ⚠️ 能力分类器预热失败: {e}")
 
     def _init_runtime(self, llm_client):
         logger.info("🚀 初始化 Avatar 运行时...")

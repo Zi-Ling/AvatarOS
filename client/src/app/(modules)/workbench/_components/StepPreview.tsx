@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { ResultRenderer } from '@/components/ui/ResultRenderer';
 import { artifactApi, type ArtifactRecord } from '@/lib/api/history';
+import { VerificationResultBadge, type VerificationGateResult } from '@/components/ui/VerificationResultBadge';
 
 export interface StepLike {
   id: string;
@@ -26,6 +27,7 @@ export interface StepLike {
   output_result?: any;
   status: string;
   artifact_ids?: string[];
+  verification_gate?: VerificationGateResult | null;
 }
 
 export const SKILL_LABELS: Record<string, { label: string; icon: React.ElementType }> = {
@@ -292,6 +294,11 @@ export function StepPreview({ step }: { step: StepLike }) {
         hasArtifacts
           ? <CollapsibleOutputBlock parsed={parsed} skillName={step.skill_name} />
           : <OutputBlock parsed={parsed} skillName={step.skill_name} />
+      )}
+
+      {/* Verification gate result */}
+      {step.verification_gate && (
+        <VerificationResultBadge gate={step.verification_gate} />
       )}
     </div>
   );

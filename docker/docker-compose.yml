@@ -6,12 +6,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # 持久化用户数据
       - avatar_data:/root/.avatar
       - workspace:/app/workspace
-      # embedding 模型（首次启动后缓存，避免重复下载）
-      - models:/app/app/models
-      # 挂载 Docker socket，让 backend 能启动 sandbox 容器（python.run）
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env
@@ -53,4 +49,3 @@ services:
 volumes:
   avatar_data:
   workspace:
-  models:

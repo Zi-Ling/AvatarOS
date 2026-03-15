@@ -260,11 +260,32 @@ class AvatarMain:
                     _artifact_collector = None
                     _trace_store = None
 
+                # P0/P2: 初始化 ArtifactRegistry、PolicyEngine、BudgetAccount
+                _artifact_registry = None
+                _policy_engine = None
+                _budget_account = None
+                try:
+                    from app.avatar.runtime.artifact.registry import PersistentArtifactRegistry
+                    from app.avatar.runtime.policy.policy_engine import PolicyEngine
+                    from app.avatar.runtime.policy.budget_account import BudgetAccount
+                    # ArtifactRegistry 用 "global" session 作为共享注册表
+                    _artifact_registry = PersistentArtifactRegistry(session_id="global")
+                    # PolicyEngine 默认无规则（ALLOW all），规则可通过 /api/policy 热加载
+                    _policy_engine = PolicyEngine()
+                    _budget_account = BudgetAccount(trace_store=_trace_store)
+                    logger.info("[AvatarMain] PolicyEngine + BudgetAccount + ArtifactRegistry ready")
+                except Exception as pe_err:
+                    logger.warning(f"[AvatarMain] PolicyEngine/BudgetAccount init failed: {pe_err}")
+
                 self._graph_executor = GraphExecutor(
                     base_path=self.base_path,  # fallback（WorkspaceManager 未初始化时）
                     memory_manager=self.memory_manager,
                     learning_manager=self.learning_manager,
                     workspace=None,  # workspace 由 GraphController 按 session_id 动态注入
+                    artifact_registry=_artifact_registry,
+                    trace_store=_trace_store,
+                    policy_engine=_policy_engine,
+                    budget_account=_budget_account,
                 )
                 graph_executor = self._graph_executor
                 node_runner = NodeRunner(

@@ -189,14 +189,6 @@ def setup_logging(
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-    
-    # 禁用 tqdm 进度条（sentence_transformers 使用）
-    try:
-        import os
-        os.environ["TQDM_DISABLE"] = "1"
-    except Exception:
-        pass
     
     logging.info(f"Logging configured: level={log_level}, json={enable_json}, console={enable_console}, log_dir={log_dir}")
 

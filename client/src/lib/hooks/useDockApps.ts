@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { AppId } from '@/lib/apps';
 
 const STORAGE_KEY = 'ia-dock-pinned-apps';
-const DEFAULT_PINNED: AppId[] = ['chat']; // Only Chat is pinned by default. Home is hardcoded.
+const DEFAULT_PINNED: AppId[] = ['workspace', 'schedule', 'knowledge'];
 
 export function useDockApps() {
   const [pinnedAppIds, setPinnedAppIds] = useState<AppId[]>(DEFAULT_PINNED);

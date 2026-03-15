@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2, ShieldAlert, DollarSign } from "lucide-react";
+import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2, ShieldAlert, DollarSign, LayoutGrid, GitBranch } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/components/providers/SocketProvider";
@@ -10,10 +10,13 @@ import { LogsView } from "./_components/LogsView";
 import { HistoryView } from "./_components/HistoryView";
 import { ApprovalView } from "./_components/ApprovalView";
 import { CostView } from "./_components/CostView";
+import { TraceViewer } from "./_components/TraceViewer";
 import { useTaskExecution } from "@/lib/hooks/useTaskExecution";
 import { useWorkbenchStore, type WorkbenchTab } from "@/stores/workbenchStore";
 import { useTaskStore } from "@/stores/taskStore";
+import { useChatStore } from "@/stores/chatStore";
 import { WorkbenchEditor } from "./_components/WorkbenchEditor";
+import { OverviewTab } from "./_components/OverviewTab";
 
 interface TabConfig {
   id: WorkbenchTab;
@@ -28,8 +31,15 @@ export default function Workbench() {
   const { activeTab, setActiveTab, openFiles } = useWorkbenchStore();
   const { task, logs } = useTaskExecution();
   const { pendingApprovals } = useTaskStore();
+  const { sessionId } = useChatStore();
 
   const tabs: TabConfig[] = [
+    {
+      id: "overview",
+      label: "Overview",
+      icon: LayoutGrid,
+      color: "text-slate-500",
+    },
     {
       id: "active",
       label: "Active Task",
@@ -50,6 +60,7 @@ export default function Workbench() {
       color: "text-amber-500",
     },
     { id: "cost", label: "Cost", icon: DollarSign, color: "text-yellow-500" },
+    { id: "trace", label: "Trace", icon: GitBranch, color: "text-cyan-500" },
   ];
 
   return (
@@ -123,6 +134,7 @@ export default function Workbench() {
               transition={{ duration: 0.2 }}
               className="absolute inset-0"
             >
+              {activeTab === "overview" && <OverviewTab />}
               {activeTab === "active" && (
                 <div className="absolute inset-0 p-0">
                   {task ? (
@@ -144,6 +156,9 @@ export default function Workbench() {
               {activeTab === "history" && <HistoryView />}
               {activeTab === "approval" && <ApprovalView />}
               {activeTab === "cost" && <CostView />}
+              {activeTab === "trace" && (
+                <TraceViewer sessionId={sessionId ?? ""} />
+              )}
             </motion.div>
           )}
         </AnimatePresence>

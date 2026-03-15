@@ -29,6 +29,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _estimate_cost(model: str, usage: Dict[str, Any]) -> float:
+    """
+    用 litellm.cost_per_token() 精确计算 cost（USD）。
+    litellm 内置所有主流模型的 input/output 分开定价，精度远高于手动价格表。
+    fallback：litellm 不认识的模型用 gpt-4o-mini 价格兜底。
+    """
+    prompt_tokens = usage.get('prompt_tokens', 0)
+    completion_tokens = usage.get('completion_tokens', 0)
+    if not prompt_tokens and not completion_tokens:
+        return 0.0
+    try:
+        import litellm
+        # litellm 对部分 provider 需要 "provider/model" 格式才能正确 lookup
+        # openai 模型（gpt-*）直接用 model name 即可，deepseek/ollama 需要加前缀
+        normalized = _normalize_model_name(model)
+        input_cost, output_cost = litellm.cost_per_token(
+            model=normalized,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        return round(input_cost + output_cost, 8)
+    except Exception:
+        # fallback：gpt-4o-mini 均价兜底
+        total = prompt_tokens + completion_tokens
+        return round(total * 0.000375 / 1000, 8)
+
+
+def _normalize_model_name(model: str) -> str:
+    """
+    把内部 model name 规范化为 litellm 能识别的格式。
+    规则：
+    - gpt-* / o1-* / o3-* / text-* → 直接用（openai 不需要前缀）
+    - deepseek-* → deepseek/deepseek-*
+    - 已有 provider/ 前缀 → 直接用
+    - 其他 → 原样（litellm fallback 会处理）
+    """
+    if not model:
+        return "gpt-4o-mini"
+    if "/" in model:
+        return model  # 已有前缀
+    m = model.lower()
+    if m.startswith("gpt-") or m.startswith("o1-") or m.startswith("o3-") or m.startswith("text-"):
+        return model  # openai 原生格式
+    if m.startswith("deepseek-"):
+        return f"deepseek/{model}"
+    if m.startswith("llama") or m.startswith("mistral") or m.startswith("qwen"):
+        return f"ollama/{model}"
+    return model
+
+
 class GraphPlanner:
     """
     Adapter for InteractiveLLMPlanner to work with Graph Runtime.
@@ -88,7 +138,15 @@ class GraphPlanner:
         
         # Call InteractiveLLMPlanner (preserves all optimizations)
         step = await self.interactive_planner.next_step(task, env_context)
-        
+
+        # 读取本次 LLM 调用的 usage（由 _call_llm 缓存）
+        usage = getattr(self.interactive_planner, '_last_usage', {}) or {}
+        tokens_used = usage.get('total_tokens', 0)
+        cost_usd = _estimate_cost(
+            model=getattr(self.interactive_planner._llm.config, 'model', ''),
+            usage=usage,
+        )
+
         # Convert Step to GraphPatch
         if step is None:
             # Task is finished
@@ -99,10 +157,13 @@ class GraphPlanner:
                     )
                 ],
                 reasoning="Task completed successfully",
+                metadata={"tokens_used": tokens_used, "cost": cost_usd},
             )
         
         # Create ADD_NODE action
         patch = self._step_to_patch(step, graph)
+        patch.metadata["tokens_used"] = tokens_used
+        patch.metadata["cost"] = cost_usd
         return patch
     
     def _graph_to_task(self, graph: 'ExecutionGraph') -> Task:

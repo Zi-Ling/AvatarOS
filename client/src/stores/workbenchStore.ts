@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type WorkbenchTab = 'active' | 'logs' | 'history' | 'editor' | 'approval' | 'cost';
+export type WorkbenchTab = 'overview' | 'active' | 'logs' | 'history' | 'editor' | 'approval' | 'cost' | 'trace';
 
 interface WorkbenchState {
   activeTab: WorkbenchTab;
@@ -22,7 +22,7 @@ interface WorkbenchState {
 }
 
 export const useWorkbenchStore = create<WorkbenchState>((set) => ({
-  activeTab: 'active',
+  activeTab: 'overview',
   openFiles: [],
   activeFile: null,
   unsavedFiles: new Set(),

@@ -377,7 +377,12 @@ class GraphRuntime:
         for node in nodes:
             self._emit_event(
                 "node_started",
-                {"graph_id": graph.id, "node_id": node.id, "capability": node.capability_name}
+                {
+                    "graph_id": graph.id,
+                    "node_id": node.id,
+                    "capability": node.capability_name,
+                    "description": (node.metadata or {}).get("description", ""),
+                }
             )
         
         # Execute nodes in parallel using NodeRunner
@@ -622,6 +627,7 @@ class GraphRuntime:
                     step_payload = {
                         "session_id":  data.get("session_id", ""),
                         "skill_name":  data.get("capability", ""),
+                        "description": data.get("description", ""),
                         "status":      "running" if event_type == "node_started" else (
                                        "failed"    if event_type == "node_failed" else "completed"),
                         "raw_output":  data.get("outputs"),

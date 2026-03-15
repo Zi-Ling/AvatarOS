@@ -1,12 +1,11 @@
 import { 
-  MessageSquare, 
   FolderOpen, 
   CalendarClock, 
   BookOpen, 
   Ghost
 } from "lucide-react";
 
-export type AppId = 'chat' | 'workspace' | 'schedule' | 'knowledge' | 'avatar';
+export type AppId = 'workspace' | 'schedule' | 'knowledge' | 'avatar';
 
 export interface AppDefinition {
   id: AppId;
@@ -28,19 +27,11 @@ export const APP_REGISTRY: AppDefinition[] = [
     description: 'Desktop companion mode.'
   },
   { 
-    id: 'chat', 
-    label: 'Chat', 
-    icon: MessageSquare, 
-    color: 'text-indigo-500', 
-    path: '/chat',
-    description: 'Natural language interface for task execution.'
-  },
-  { 
     id: 'workspace', 
     label: 'Workspace', 
     icon: FolderOpen, 
     color: 'text-blue-500', 
-    path: '/chat', // Keeps user in chat context
+    path: '/chat',
     description: 'File system and resource management.'
   },
   { 
@@ -51,7 +42,6 @@ export const APP_REGISTRY: AppDefinition[] = [
     path: '/schedule',
     description: 'Automated tasks and cron jobs.'
   },
-
   { 
     id: 'knowledge', 
     label: 'Knowledge', 

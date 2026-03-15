@@ -32,6 +32,7 @@ class PythonRunOutput(SkillOutput):
     variables: Dict[str, Any] = {}
     base64_image: Optional[str] = Field(None, description="Base64 encoded image if plot generated")
     dataframe_csv: Optional[str] = Field(None, description="CSV string if pandas dataframe detected")
+    file_path: Optional[str] = Field(None, description="File path if _save_binary wrote a file (container path)")
 
 @register_skill
 class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
@@ -152,6 +153,12 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
             elif base64_img:
                 result_val = f"[Image: {len(base64_img)} bytes]"
 
+        # 如果 structured_output 是 _save_binary 输出的结构化对象 {"__file__": path}，
+        # 填充 file_path 字段，让 GraphExecutor._inject_node_outputs_into_code 走 file_ref 分支
+        output_file_path: Optional[str] = None
+        if success and isinstance(structured_output, dict) and "__file__" in structured_output:
+            output_file_path = structured_output["__file__"]
+
         return PythonRunOutput(
             success=success,
             message="Execution completed" if success else f"Execution failed: {error_msg}",
@@ -162,4 +169,5 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
             result=result_val,
             base64_image=base64_img,
             dataframe_csv=dataframe_csv,
+            file_path=output_file_path,
         )

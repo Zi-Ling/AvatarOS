@@ -265,6 +265,22 @@ class GraphController:
         sub_goals = self._decompose_goal(intent)
         logger.info(f"[GoalTracker] Decomposed '{intent}' into {len(sub_goals)} sub-goals: {sub_goals}")
 
+        # P3: NarrativeManager — real-time execution narrative via WebSocket
+        _narrative_manager = None
+        try:
+            from app.avatar.runtime.narrative.execution_narrative import NarrativeManager
+            from app.io.manager import SocketManager
+            _socket_mgr = SocketManager.get_instance()
+            _narrative_manager = NarrativeManager(
+                session_id=_session_id or _exec_session_id,
+                task_id=str(graph.id),
+                goal=intent,
+                sub_goals=sub_goals,
+                socket_manager=_socket_mgr,
+            )
+        except Exception as _nm_err:
+            logger.debug(f"[GraphController] NarrativeManager init skipped: {_nm_err}")
+
         planner_invocations = 0
         # control_handle 提供 cancel/pause/resume 控制原语
         # 不从 env_context 读取，保持 env_context 语义纯净
@@ -338,6 +354,15 @@ class GraphController:
                     _final_result = self._make_error_result(graph, error_message=_error_message)
                     return _final_result
 
+                # Inject coverage hint before planner call (FinishBiasCheck)
+                _coverage_summary = env_context.get("goal_coverage_summary")
+                if _coverage_summary is not None:
+                    try:
+                        from app.avatar.runtime.verification.finish_bias_check import FinishBiasCheck
+                        env_context = FinishBiasCheck().inject(env_context, _coverage_summary)
+                    except Exception:
+                        pass
+
                 # 4. Plan
                 planner_invocations += 1
                 logger.info(f"Planner invocation {planner_invocations}/{self.max_planner_invocations_per_graph}")
@@ -377,6 +402,62 @@ class GraphController:
                             f"You MUST complete them before finishing."
                         )
                         continue
+
+                    # --- Verification Gate ---
+                    _gate_result = await self._run_verification_gate(
+                        intent=intent,
+                        graph=graph,
+                        workspace=_workspace,
+                        env_context=env_context,
+                        session_id=_session_id or _exec_session_id,
+                        task_context=None,
+                    )
+
+                    # P3: NarrativeManager — update verdict after gate
+                    if _narrative_manager is not None:
+                        try:
+                            if _gate_result == "break_pass":
+                                await _narrative_manager.on_verdict("PASS")
+                            elif _gate_result == "break_partial":
+                                await _narrative_manager.on_verdict("partial_success")
+                            elif _gate_result in ("break_failed", "break_uncertain"):
+                                await _narrative_manager.on_verdict("FAIL")
+                            elif _gate_result == "continue":
+                                _repair_hint = env_context.get("verification_failed_hints", ["正在重新分析失败原因"])[0] if env_context.get("verification_failed_hints") else "正在重新分析失败原因"
+                                await _narrative_manager.on_repair_triggered(_repair_hint)
+                        except Exception as _ne:
+                            logger.debug(f"[GraphController] NarrativeManager verdict update failed: {_ne}")
+
+                    if _gate_result == "continue":
+                        # FAIL with repair feedback injected — continue ReAct loop
+                        env_context = dict(env_context)
+                        continue
+                    elif _gate_result == "break_partial":
+                        _lifecycle_status = "completed"
+                        _result_status = "partial_success"
+                        from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
+                        from app.avatar.runtime.graph.models.step_node import NodeStatus as _NS2
+                        _final_result = ExecutionResult(
+                            success=False,
+                            final_status="partial_success",
+                            completed_nodes=sum(1 for n in graph.nodes.values() if n.status == _NS2.SUCCESS),
+                            failed_nodes=sum(1 for n in graph.nodes.values() if n.status == _NS2.FAILED),
+                            skipped_nodes=sum(1 for n in graph.nodes.values() if n.status == _NS2.SKIPPED),
+                            graph=graph,
+                        )
+                        return _final_result
+                    elif _gate_result == "break_failed":
+                        _lifecycle_status = "failed"
+                        _result_status = "failed"
+                        _final_result = self._make_error_result(graph, "Verification failed: repair exhausted")
+                        return _final_result
+                    elif _gate_result == "break_uncertain":
+                        _lifecycle_status = "failed"
+                        _result_status = "uncertain_terminal"
+                        _final_result = self._make_error_result(graph, "Verification uncertain: high-risk task requires human review")
+                        return _final_result
+                    # else "break_pass" → fall through to normal FINISH
+
                     logger.info("Planner returned FINISH -- all sub-goals covered")
                     break
 
@@ -397,7 +478,15 @@ class GraphController:
                         _final_result = self._make_error_result(graph, error_message=_error_message)
                         return _final_result
 
-                # 6. Apply patch
+                # 6. Apply patch — 先做重复节点检测，防止 Planner 对同一 skill 反复执行
+                patch = self._deduplicate_patch(patch, graph)
+                if patch is None or (
+                    len(patch.actions) == 1 and
+                    patch.actions[0].operation == PatchOperation.FINISH
+                ):
+                    logger.info("[DedupGuard] All new nodes are duplicates of succeeded nodes → forcing FINISH")
+                    break
+
                 self._apply_patch(patch, graph)
                 self._emit_plan_generated(graph, env_context)
 
@@ -425,6 +514,29 @@ class GraphController:
 
                 # 8. Execute ready nodes
                 result = await self.runtime.execute_ready_nodes(graph, context=_shared_context)
+
+                # P3: NarrativeManager — update after each round of node execution
+                if _narrative_manager is not None:
+                    try:
+                        _newly_done = [
+                            n for n in graph.nodes.values()
+                            if n.status == NodeStatus.SUCCESS
+                        ]
+                        for _n in _newly_done:
+                            _desc = _n.capability_name
+                            _oc = _n.metadata.get("output_contract") if _n.metadata else None
+                            if _oc is not None:
+                                # output_contract may be a dataclass or dict
+                                _label = (
+                                    getattr(_oc, "semantic_label", None)
+                                    if not isinstance(_oc, dict)
+                                    else _oc.get("semantic_label")
+                                )
+                                if _label:
+                                    _desc = _label
+                            await _narrative_manager.on_step_completed(_desc)
+                    except Exception as _ne:
+                        logger.debug(f"[GraphController] NarrativeManager step update failed: {_ne}")
 
                 # llm.fallback terminal
                 last_nodes = [n for n in graph.nodes.values() if n.capability_name == "llm.fallback"]
@@ -596,6 +708,154 @@ class GraphController:
             error_message=f"Failed to plan valid DAG after {max_planning_attempts} attempts"
         )
     
+    # ------------------------------------------------------------------
+    # Intent-equivalent call dedup helpers
+    # ------------------------------------------------------------------
+
+    # 这些 skill 的"关键参数"用于摘要比较
+    # 注意：fs.write/copy/move/delete 不在此列——文件操作天然需要对不同目标重复调用，
+    # 不存在"意图等价"的概念，强行去重会误杀合法的批量写文件操作。
+    _DEDUP_KEY_PARAMS: Dict[str, List[str]] = {
+        "fs.read":      ["path"],
+        "fs.list":      ["path"],
+        "net.get":      ["url"],
+        "net.post":     ["url", "body", "data", "json"],
+        "net.download": ["url"],
+        "browser.open": ["url"],
+        "browser.run":  ["url", "script"],
+        "python.run":   ["code"],
+        "python.eval":  ["code"],
+        "shell.run":    ["command"],
+        "llm.call":     ["prompt"],
+        "llm.fallback": ["message"],
+    }
+
+    # 这些 skill 完全跳过去重检测（每次调用目标不同，不会产生无限循环）
+    _DEDUP_SKIP_SKILLS: frozenset = frozenset({
+        "fs.write", "fs.copy", "fs.move", "fs.delete",
+    })
+
+    @staticmethod
+    def _normalize_param_value(v: Any) -> str:
+        """把参数值归一化为可比较的字符串摘要（去空白、截断）"""
+        if v is None:
+            return ""
+        s = str(v).strip()
+        # 去掉多余空白行，统一换行
+        s = re.sub(r'\s+', ' ', s)
+        # 只取前 200 字符作为摘要，避免长代码误判
+        return s[:200]
+
+    def _node_call_fingerprint(self, skill: str, params: Dict[str, Any]) -> str:
+        """
+        生成节点的"调用指纹"：skill + 关键参数摘要。
+        用于 intent-equivalent 比较，而非字符串完全相等。
+        """
+        key_params = self._DEDUP_KEY_PARAMS.get(skill, list(params.keys())[:2])
+        parts = [skill]
+        for k in key_params:
+            v = params.get(k)
+            if v is not None:
+                parts.append(f"{k}={self._normalize_param_value(v)}")
+        return "|".join(parts)
+
+    def _deduplicate_patch(
+        self,
+        patch: 'GraphPatch',
+        graph: 'ExecutionGraph',
+    ) -> 'GraphPatch':
+        """
+        过滤掉 patch 中与已成功节点"意图等价"的 ADD_NODE 动作。
+
+        升级后的判断逻辑（intent-equivalent dedup）：
+        - 不再只看 skill 名，而是看 skill + 关键参数摘要的指纹
+        - 必须同时满足：
+            1. 指纹与某个已成功节点高度相似（相似度 > 0.92）
+            2. 新节点没有入边（即不依赖上游新数据）
+            3. 最近一次成功执行该指纹的节点在本轮循环内（非跨任务重试）
+        - 以下情况不过滤（合法重复）：
+            - fs.read(path="a.txt") vs fs.read(path="b.txt") → 不同路径
+            - net.get(url="x") vs net.get(url="y") → 不同 URL
+            - python.run 代码摘要不同 → 不同计算
+            - 新节点有入边（依赖上游新数据）
+        """
+        from app.avatar.runtime.graph.models.graph_patch import PatchOperation, PatchAction
+        from difflib import SequenceMatcher
+
+        # 收集已成功节点的指纹
+        succeeded_fingerprints: Dict[str, str] = {}  # node_id → fingerprint
+        for node in graph.nodes.values():
+            if node.status.value == "success":
+                fp = self._node_call_fingerprint(
+                    node.capability_name, node.params or {}
+                )
+                succeeded_fingerprints[node.id] = fp
+
+        if not succeeded_fingerprints:
+            return patch
+
+        succeeded_fp_set = set(succeeded_fingerprints.values())
+
+        filtered_actions = []
+        skipped = 0
+        for action in patch.actions:
+            if action.operation == PatchOperation.ADD_NODE and action.node:
+                skill = action.node.capability_name
+                new_params = action.node.params or {}
+                new_fp = self._node_call_fingerprint(skill, new_params)
+
+                # 文件写/复制/移动/删除类 skill 跳过去重检测
+                if skill in self._DEDUP_SKIP_SKILLS:
+                    filtered_actions.append(action)
+                    continue
+
+                # 新节点有入边 → 依赖上游新数据，不过滤
+                new_node_id = action.node.id
+                has_incoming = any(
+                    a.operation == PatchOperation.ADD_EDGE and
+                    a.edge and a.edge.target_node == new_node_id
+                    for a in patch.actions
+                )
+                if has_incoming:
+                    filtered_actions.append(action)
+                    continue
+
+                # 检查与已成功节点的指纹相似度
+                is_duplicate = False
+                for existing_fp in succeeded_fp_set:
+                    similarity = SequenceMatcher(None, new_fp, existing_fp).ratio()
+                    if similarity >= 0.92:
+                        logger.info(
+                            f"[DedupGuard] Skipping intent-equivalent node: "
+                            f"skill={skill}, similarity={similarity:.2f}, "
+                            f"new_fp={new_fp!r}, matched_fp={existing_fp!r}"
+                        )
+                        is_duplicate = True
+                        break
+
+                if is_duplicate:
+                    skipped += 1
+                    continue
+
+            filtered_actions.append(action)
+
+        if skipped == 0:
+            return patch
+
+        # 所有 ADD_NODE 都被过滤掉 → 强制 FINISH
+        add_node_count = sum(
+            1 for a in patch.actions if a.operation == PatchOperation.ADD_NODE
+        )
+        if skipped >= add_node_count:
+            from app.avatar.runtime.graph.models.graph_patch import GraphPatch
+            return GraphPatch(
+                actions=[PatchAction(operation=PatchOperation.FINISH)],
+                reasoning="[DedupGuard] All proposed nodes are intent-equivalent to succeeded nodes",
+            )
+
+        patch.actions = filtered_actions
+        return patch
+
     def _apply_patch(
         self,
         patch: 'GraphPatch',
@@ -965,7 +1225,7 @@ class GraphController:
                     "id": str(n.id),
                     "skill": n.capability_name,
                     "skill_name": n.capability_name,
-                    "description": n.capability_name.replace(".", " → "),
+                    "description": (n.metadata or {}).get("description") or n.capability_name.replace(".", " → "),
                     "status": "pending",
                     "order": i,
                     "params": n.params or {},
@@ -988,6 +1248,151 @@ class GraphController:
             self.runtime.event_bus.publish(event)
         except Exception as e:
             logger.warning(f"[GraphController] Failed to emit plan.generated: {e}")
+
+    async def _run_verification_gate(
+        self,
+        intent: str,
+        graph: 'ExecutionGraph',
+        workspace: Optional[Any],
+        env_context: Dict[str, Any],
+        session_id: str,
+        task_context: Optional[Any],
+    ) -> str:
+        """
+        Run the CompletionGate at a FINISH decision point.
+
+        Returns one of:
+          "break_pass"     — gate PASS, allow FINISH
+          "continue"       — gate FAIL with repair feedback, continue ReAct loop
+          "break_partial"  — repair exhausted, some verifiers passed
+          "break_failed"   — repair exhausted, no verifiers passed
+          "break_uncertain"— UNCERTAIN + HIGH risk, needs human review
+        """
+        try:
+            from app.avatar.runtime.verification.goal_normalizer import GoalNormalizer
+            from app.avatar.runtime.verification.target_resolver import TargetResolver
+            from app.avatar.runtime.verification.goal_coverage_tracker import GoalCoverageTracker
+            from app.avatar.runtime.verification.completion_gate import CompletionGate
+            from app.avatar.runtime.verification.repair_loop import RepairLoop
+            from app.avatar.runtime.verification.verifier_registry import VerifierRegistry
+            from app.avatar.runtime.verification.models import GateVerdict, RiskLevel
+            from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
+        except ImportError as e:
+            logger.warning(f"[VerificationGate] Import failed, skipping gate: {e}")
+            return "break_pass"
+
+        if workspace is None:
+            logger.debug("[VerificationGate] No workspace available, skipping gate")
+            return "break_pass"
+
+        try:
+            # 1. Goal normalization (cache in env_context)
+            _normalizer = GoalNormalizer()
+            if "normalized_goal" not in env_context:
+                env_context["normalized_goal"] = _normalizer.normalize(intent)
+            normalized_goal = env_context["normalized_goal"]
+
+            # 2. Target resolution
+            _resolver = TargetResolver()
+            targets = _resolver.resolve_targets(normalized_goal, graph, workspace)
+            env_context["verification_targets"] = targets
+
+            # 3. Coverage tracking
+            _tracker = GoalCoverageTracker(_normalizer)
+            if "goal_coverage_summary" not in env_context:
+                env_context["goal_coverage_summary"] = _tracker.initialize(normalized_goal)
+            coverage_summary = _tracker.update_after_round(
+                env_context["goal_coverage_summary"], graph, workspace
+            )
+            env_context["goal_coverage_summary"] = coverage_summary
+            env_context["goal_coverage_hint"] = coverage_summary.to_planner_hint()
+
+            # 4. CompletionGate evaluation
+            _trace_store = StepTraceStore()
+            _registry = VerifierRegistry()
+            _gate = CompletionGate(_registry, _trace_store)
+            decision = await _gate.evaluate(
+                normalized_goal=normalized_goal,
+                targets=targets,
+                graph=graph,
+                workspace=workspace,
+                coverage_summary=coverage_summary,
+                session_id=session_id,
+            )
+
+            logger.info(
+                f"[VerificationGate] verdict={decision.verdict} "
+                f"passed={decision.passed_count} failed={decision.failed_count} "
+                f"trace_hole={decision.trace_hole}"
+            )
+
+            if decision.verdict == GateVerdict.PASS:
+                return "break_pass"
+
+            if decision.verdict == GateVerdict.FAIL:
+                # Check repair exhaustion
+                repair_state = None
+                if task_context and hasattr(task_context, "status"):
+                    repair_state = task_context.status.repair_state
+                if repair_state is None:
+                    from app.avatar.runtime.core.context import RepairState
+                    repair_state = RepairState(max_attempts=3)
+
+                _repair_loop = RepairLoop(
+                    _trace_store,
+                    artifact_registry=env_context.get("artifact_registry"),
+                )
+                repair_feedback = _repair_loop.trigger_repair(
+                    failed_results=decision.failed_results,
+                    graph=graph,
+                    repair_state=repair_state,
+                    session_id=session_id,
+                )
+
+                if repair_feedback.context_patch.get("repair_exhausted"):
+                    # Determine terminal state
+                    has_any_pass = decision.passed_count > 0
+                    terminal_state = "partial_success" if has_any_pass else "repair_exhausted"
+                    # P3: Write task_terminal event
+                    try:
+                        _trace_store.record_event(
+                            session_id=session_id,
+                            task_id=env_context.get("task_id", ""),
+                            step_id="",
+                            event_type="task_terminal",
+                            payload={
+                                "terminal_state": terminal_state,
+                                "reason": "repair_exhausted",
+                                "verification_summary": {
+                                    "passed": decision.passed_count,
+                                    "failed": decision.failed_count,
+                                },
+                                "repair_history_summary": repair_feedback.to_planner_summary(),
+                            },
+                        )
+                    except Exception:
+                        pass
+                    return "break_partial" if has_any_pass else "break_failed"
+
+                # Inject repair feedback and continue
+                env_context["repair_feedback"] = repair_feedback
+                env_context["repair_feedback_summary"] = repair_feedback.to_planner_summary()
+                env_context["verification_failed_hints"] = repair_feedback.repair_hints
+                return "continue"
+
+            if decision.verdict == GateVerdict.UNCERTAIN:
+                # Phase 3: LLM Judge would go here
+                # For now: HIGH risk → uncertain_terminal, LOW/MEDIUM → allow pass
+                if normalized_goal.risk_level == RiskLevel.HIGH:
+                    return "break_uncertain"
+                return "break_pass"
+
+        except Exception as exc:
+            logger.warning(
+                f"[VerificationGate] Unexpected error, allowing FINISH: {exc}",
+                exc_info=True,
+            )
+        return "break_pass"
 
     def _get_uncovered_sub_goals(
         self,

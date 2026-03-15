@@ -252,6 +252,10 @@ class DockerExecutor(SkillExecutor):
                 # 从 stdout 识别 __OUTPUT__: 标记行提取结构化输出
                 import json as _json
                 structured_output = _extract_output_from_stdout(stdout)
+                # _save_binary 写文件后 _output({"__file__": path}) 输出结构化对象，填充 file_path 字段
+                _file_path = None
+                if isinstance(structured_output, dict) and "__file__" in structured_output:
+                    _file_path = structured_output["__file__"]
                 return {
                     "success": True,
                     "message": "Execution completed",
@@ -260,6 +264,7 @@ class DockerExecutor(SkillExecutor):
                     "result": stdout.strip() if stdout.strip() else None,
                     "output": structured_output,
                     "variables": {},
+                    "file_path": _file_path,
                 }
             else:
                 return {
@@ -341,6 +346,10 @@ class DockerExecutor(SkillExecutor):
             
             # 尝试从 stdout 提取结构化输出（__OUTPUT__: 标记行协议）
             structured_output = _extract_output_from_stdout(stdout)
+            # _save_binary 写文件后 _output({"__file__": path}) 输出结构化对象，填充 file_path 字段
+            _file_path = None
+            if exit_code == 0 and isinstance(structured_output, dict) and "__file__" in structured_output:
+                _file_path = structured_output["__file__"]
 
             return {
                 "success": exit_code == 0,
@@ -350,6 +359,7 @@ class DockerExecutor(SkillExecutor):
                 "result": stdout.strip() if stdout.strip() and exit_code == 0 else None,
                 "output": structured_output if exit_code == 0 else stderr,
                 "variables": {},
+                "file_path": _file_path,
             }
         finally:
             try:

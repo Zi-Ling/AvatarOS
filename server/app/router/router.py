@@ -17,7 +17,6 @@ from .classifier import IntentClassifier
 
 # Use string imports if needed to avoid circular deps, but here we import classes for type hinting
 from app.avatar.runtime.main import AvatarMain
-from app.avatar.skills.registry import skill_registry
 from app.avatar.intent.models import IntentSpec, IntentDomain, SafetyLevel
 from app.avatar.planner.composite.analyzer.complexity import ComplexityAnalyzer
 
@@ -63,13 +62,6 @@ class AvatarRouter:
         
         # [P1] 初始化ComplexityAnalyzer（用于复杂度判断）
         self.complexity_analyzer = ComplexityAnalyzer()
-
-        # Initialize SkillSelector explicitly to avoid warnings and first-request lag
-        from app.avatar.planner.selector import skill_selector
-        try:
-            skill_selector.initialize()
-        except Exception as e:
-            logging.getLogger(__name__).warning(f"SkillSelector initialization failed: {e}")
 
     # ---- 新版核心 API（推荐） ----
 
@@ -131,150 +123,23 @@ class AvatarRouter:
         
         # === 新增：调用 IntentCompiler（智能决策） ===
         intent_spec = await self._extract_intent_if_needed(user_message, history)
-        
-        # === [方案A+B] 优化后的技能相关性检查 ===
-        can_execute = True
-        relevance_score = 0.0
-        top_skills = []
-        route_reason = ""
-        is_complex = False
-        boosted_skills = []
-        
-        if intent_spec and intent_spec.goal:
-            from app.core.config import config
-            
-            # [方案A] Step 1: 快速复杂度检测
-            complexity_result = self.complexity_analyzer.is_complex_task(user_message)
-            is_complex = complexity_result.is_complex
-            
-            if is_complex:
-                logger.info(
-                    f"[Router] 🔍 检测到复杂任务: {complexity_result.reason} "
-                    f"(connector_score={complexity_result.connector_score:.2f}, "
-                    f"verbs={complexity_result.verb_count}, segments={complexity_result.segment_count})"
-                )
-            
-            # 使用向量搜索获取最相关的技能及其分数（Top-10用于加权）
-            scored_skills = skill_registry.search_skills_with_scores(
-                query=intent_spec.goal,
-                limit=10
-            )
-            
-            if scored_skills:
-                # [P0] Domain-aware 加权：给同domain的技能提升分数
-                domain_boost = config.router_domain_boost
-                intent_domain = intent_spec.domain.value if hasattr(intent_spec.domain, 'value') else str(intent_spec.domain)
-                
-                # 获取所有技能的详细信息以检查category
-                all_skill_details = skill_registry.describe_skills()
-                
-                # 应用Domain加权
-                boosted_skills = []
-                for skill_item in scored_skills:
-                    skill_name = skill_item['name']
-                    original_score = skill_item['score']
-                    adjusted_score = original_score
-                    
-                    # 检查技能的category是否匹配intent的domain
-                    skill_detail = all_skill_details.get(skill_name, {})
-                    skill_category = skill_detail.get('category', '').lower()
-                    
-                    # Domain匹配判断
-                    if intent_domain.lower() in skill_category or skill_category in intent_domain.lower():
-                        adjusted_score = min(1.0, original_score + domain_boost)
-                        logger.debug(f"[Router] Domain加权: {skill_name} {original_score:.3f} -> {adjusted_score:.3f}")
-                    
-                    boosted_skills.append({
-                        'name': skill_name,
-                        'score': adjusted_score,
-                        'original_score': original_score
-                    })
-                
-                # 重新排序
-                boosted_skills.sort(key=lambda x: x['score'], reverse=True)
-                max_score = boosted_skills[0]['score']
-                top_skill_name = boosted_skills[0]['name']
-                
-                relevance_score = max_score
-                top_skills = [s['name'] for s in boosted_skills[:3]]
-                
-                # [方案A] Step 2: 复杂任务强制走Planner（即使相关性高）
-                if is_complex and config.router_enable_complex_detection:
-                    if config.router_complex_force_planner:
-                        # 复杂任务直接交给Planner分解
-                        logger.info(
-                            f"[Router] ✅ 复杂任务强制走Planner: top_skill={top_skill_name}, "
-                            f"score={max_score:.3f}, reason={complexity_result.reason}"
-                        )
-                        can_execute = True  # 标记为可执行，但由Runtime判断走Planner
-                        route_reason = "complex_task_force_planner"
-                    else:
-                        # 复杂任务但不强制Planner，继续阈值判断
-                        pass
-                
-                # [方案B] Step 3: 动态阈值判断（简单任务或复杂任务不强制Planner时）
-                if not (is_complex and config.router_complex_force_planner):
-                    # 根据复杂度选择阈值
-                    if is_complex:
-                        threshold = config.router_complex_threshold  # 0.35
-                        threshold_name = "complex"
-                    else:
-                        threshold = config.router_simple_threshold   # 0.5
-                        threshold_name = "simple"
-                    
-                    min_threshold = config.router_min_exec_threshold  # 0.3
-                    
-                    logger.info(
-                        f"[Router] 技能相关性: goal='{intent_spec.goal}', "
-                        f"top_skill={top_skill_name}, score={max_score:.3f}, "
-                        f"threshold={threshold}({threshold_name}), min={min_threshold}, "
-                        f"domain={intent_domain}, complex={is_complex}"
-                    )
-                    
-                    # Step 3.1: 高置信度 → 可执行（fast-path或Planner都可）
-                    if max_score >= threshold:
-                        can_execute = True
-                        route_reason = "high_confidence" if not is_complex else "complex_medium_confidence"
-                        logger.info(
-                            f"[Router] ✅ 相关性充足 ({max_score:.3f} >= {threshold}), "
-                            f"reason={route_reason}"
-                        )
-                    
-                    # Step 3.2: 中等置信度 → 交给Planner（仍视为Task）
-                    elif max_score >= min_threshold:
-                        can_execute = True
-                        route_reason = "low_confidence_planner"
-                        logger.info(
-                            f"[Router] ⚠️ 相关性中等 ({min_threshold} <= {max_score:.3f} < {threshold}), "
-                            f"交给Planner处理"
-                        )
-                    
-                    # Step 3.3: 极低置信度 → 可能是误判，返回Chat
-                    else:
-                        can_execute = False
-                        route_reason = "too_low_score"
-                        logger.info(
-                            f"[Router] ❌ 相关性过低 ({max_score:.3f} < {min_threshold}), "
-                            f"视为IntentClassifier误判，返回Chat"
-                        )
-            else:
-                # 无法获取技能分数（可能是 ChromaDB 未初始化）
-                logger.warning(f"[Router] ⚠️ 无法获取技能相关性分数，默认 can_execute=True")
-                route_reason = "no_scores_available"
-        
+
+        # 技能选择交给 Planner/LLM，router 层直接放行
+        is_complex = self.complexity_analyzer.is_complex_task(user_message).is_complex
+
         # 构造 RouteDecision
         decision = RouteDecision(
             intent_kind="task",
-            task_mode="one_shot",  # 默认单次
-            can_execute=can_execute,
-            intent_spec=intent_spec,  # 🆕 包含完整的 IntentSpec
+            task_mode="one_shot",
+            can_execute=True,
+            intent_spec=intent_spec,
             goal=intent_spec.goal,
-            llm_explanation="",  # Router 不再生成解释
-            relevance_score=relevance_score,
-            top_skills=top_skills,
-            route_reason=route_reason,  # [方案A+B] 路由原因
+            llm_explanation="",
+            relevance_score=1.0,
+            top_skills=[],
+            route_reason="llm_planner",
             is_complex=is_complex,
-            scored_skills=boosted_skills,
+            scored_skills=[],
         )
         
         # 记录路由决策到 Working State
@@ -297,8 +162,8 @@ class AvatarRouter:
             intent_spec=None,  # 不再记录详细 spec
             meta={
                 "can_execute": decision.can_execute,
-                "relevance_score": relevance_score,
-                "top_skills": top_skills,
+                "relevance_score": 1.0,
+                "top_skills": [],
             },
         )
         

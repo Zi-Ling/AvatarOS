@@ -132,7 +132,9 @@ class ExecutorFactory:
         这是动态代码的强制隔离执行器，内部会自动选择 Kata 或 Docker
         """
         if cls._sandbox_executor is None:
-            cls._sandbox_executor = SandboxExecutor()
+            # 先确保 DockerExecutor 单例存在，传入 SandboxExecutor 避免重复创建 ContainerPool
+            docker_executor = cls._get_docker_executor()
+            cls._sandbox_executor = SandboxExecutor(docker_executor=docker_executor)
             logger.info("[ExecutorFactory] Created SandboxExecutor instance")
         
         return cls._sandbox_executor
@@ -239,35 +241,19 @@ class ExecutorFactory:
         # 预加载 Process（最重要，避免 5.5s 延迟）
         try:
             process_executor = cls._get_process_executor()
-            process_executor.warmup()  # 预热进程池
+            process_executor.warmup()
             logger.info("[ExecutorFactory] ✅ ProcessExecutor preloaded and warmed up")
         except Exception as e:
             logger.warning(f"[ExecutorFactory] ⚠️  ProcessExecutor preload failed: {e}")
         
-        # 预加载 WASM（首次加载慢）
-        try:
-            cls._get_wasm_executor(preload=True)
-            logger.info("[ExecutorFactory] ✅ WASMExecutor preloaded")
-        except Exception as e:
-            logger.warning(f"[ExecutorFactory] ⚠️  WASMExecutor preload failed: {e}")
-        
-        # 预加载 Docker（检查可用性）
-        try:
-            cls._get_docker_executor()
-            logger.info("[ExecutorFactory] ✅ DockerExecutor preloaded")
-        except Exception as e:
-            logger.warning(f"[ExecutorFactory] ⚠️  DockerExecutor preload failed: {e}")
-        
-        # 预加载 SandboxExecutor（含 KataExecutor 容器池 warmup）
+        # 预加载 SandboxExecutor（内部自动选 Kata/Docker，含容器池 warmup）
         try:
             cls._get_sandbox_executor()
             logger.info("[ExecutorFactory] ✅ SandboxExecutor preloaded (container pool warming up)")
         except Exception as e:
             logger.warning(f"[ExecutorFactory] ⚠️  SandboxExecutor preload failed: {e}")
 
-        # Local 无需预加载
         logger.info("[ExecutorFactory] ✅ LocalExecutor ready (no preload needed)")
-        
         logger.info("[ExecutorFactory] Executor preloading completed")
     
     @classmethod

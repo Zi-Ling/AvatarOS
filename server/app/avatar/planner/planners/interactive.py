@@ -13,6 +13,7 @@ from ..base import TaskPlanner
 from ..models import Task, Step
 from ..registry import register_planner
 from app.avatar.skills.registry import skill_registry
+from app.avatar.runtime.context.reference_resolver import _is_binary_like_payload
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Prompts
 # ------------------------------------------------------------------------------
 
-INTERACTIVE_SYSTEM_PROMPT = """You are an AI task planner for a local autonomous agent.
+INTERACTIVE_SYSTEM_PROMPT = r"""You are an AI task planner for a local autonomous agent.
 
 Your Operation Mode: **Interactive Step-by-Step Execution**
 
@@ -37,10 +38,12 @@ Your Job:
 - **HTTP 4xx Strategy Switch (MANDATORY)**: If a `net.get` step failed with HTTP 403, 404, or any 4xx status, do NOT retry `net.get` with the same or similar URL. Instead, immediately switch to `browser.run` to fetch the page via a real browser — it handles anti-bot protection and dynamic content that `net.get` cannot access.
 - **browser.run Empty Output (MANDATORY)**: If a `browser.run` step succeeded but its output is empty (no stdout, no artifacts), the script did NOT extract any data. Do NOT call `browser.run` again with the same or similar script. Instead: (1) try a different URL or search engine, OR (2) use `llm.fallback` to inform the user that the data could not be retrieved.
 - **No "Success" Claims**: Do not say "I have finished" unless you see the evidence in the history.
-- **Goal Decomposition Check (MANDATORY before FINISH)**: Before outputting `FINISH`, mentally enumerate EVERY sub-goal in the original Goal. If ANY sub-goal has no corresponding successful step in the history, you MUST execute that step next instead of finishing. Example: Goal="write a poem AND save to file" → you must see BOTH a poem-generation step AND a file-write step succeed before finishing.
+- **No Redundant Steps (MANDATORY)**: If the execution history already contains a successful step whose output fully answers the goal, output `FINISH` immediately. Do NOT add another step to "verify", "double-check", or "reformat" the same result. Repeating a step that already succeeded is FORBIDDEN.
+- **Goal Decomposition Check (MANDATORY before FINISH)**: Before outputting `FINISH`, mentally enumerate EVERY sub-goal in the original Goal. If ANY sub-goal has no corresponding successful step in the history, you MUST execute that step next instead of finishing. Example: Goal="write a poem AND save to file" → you must see BOTH a poem-generation step AND a file-write step succeed before finishing. For simple single-goal tasks (e.g. "count lines", "list files", "read a file"), ONE successful step that produces the answer is sufficient — output `FINISH` immediately after.
 - **Cross-Turn Data Rule (MANDATORY)**: If the user refers to content from a previous turn (e.g., "this poem", "that result", "the text above", "统计这首诗", "这个时间", "刚才的结果"), FIRST look in the `Conversation History` section — the Assistant messages contain the actual output values. Treat those values as in-memory data — embed them directly as string literals in `python.run` code or as parameter values. Do NOT call `llm.fallback` to ask the user what they mean. Do NOT search the file system for content that already exists in the conversation history.
 - **Session Artifacts Rule (MANDATORY)**: If the user refers to a file or output from a previous task (e.g., "that file", "the result I saved", "上次生成的文件"), FIRST check the `Conversation History` section for assistant messages with `task result` label — they contain the exact file path and content value. Use those values directly — do NOT guess or search the workspace.
 - **net.download → python.run File Access (MANDATORY)**: When a previous `net.download` step saved a file, the framework injects `step_N_output` as the container-mapped file path (e.g., `/workspace/file.json`). To read that file in `python.run`, you MUST use the `fs.read` skill with `{"path": step_N_output_value}` — do NOT use `open()` (blocked in sandbox) and do NOT hardcode Windows host paths like `D:\Temp\...`. The correct pattern is: use `fs.read` skill with the path from `step_N_output`.
+- **fs.read binary mode → python.run Image Processing (MANDATORY)**: When `fs.read` is called with `mode="binary"`, the output is a **hex-encoded string** (e.g. `"89504e47..."`), NOT raw bytes. To use it in `python.run` with Pillow or any bytes-based API, you MUST convert it first: `img_bytes = bytes.fromhex(step_N_output)`, then `img = Image.open(io.BytesIO(img_bytes))`. NEVER pass the hex string directly to `BytesIO` — that causes `TypeError: a bytes-like object is required`. To save the processed image, call `_save_binary("output.png", buf.getvalue().hex())` inside `python.run` — this writes the file to `/workspace` and outputs `{"__file__": "/workspace/output.png"}` as structured output. Do NOT use `fs.write` with `mode="binary"` for image data — the hex string is megabytes long and cannot be passed as a JSON parameter literal.
 - **Unknown Skill Prohibition (MANDATORY)**: You MUST ONLY use skills listed in the `Available Skills` section. NEVER invent or guess a skill name that is not listed (e.g., `user.ask`, `user.input`, `ask_user` are NOT valid skills). If you need to ask the user a question or lack required information, use the `llm.fallback` skill instead.
 
 **PYTHON CODE RESTRICTIONS (RestrictedPython):**
@@ -54,6 +57,7 @@ When using `python.run` skill, the code runs in a RESTRICTED sandbox with these 
 - ✅ YES: Basic Python (list, dict, str, int, float, bool, for, if, while)
 - ✅ YES: `print()` for output (captured automatically)
 - ✅ YES pre-installed packages: `numpy`, `pandas`, `openpyxl`, `scipy`, `matplotlib`, `pillow`, `requests`, `httpx`, `beautifulsoup4`, `lxml`, `pydantic`
+- ✅ YES injected helpers: `_output(value)` for structured output, `_save_binary(path, hex_str)` to write binary files directly
 - ❌ DO NOT use packages not listed above (e.g. `xlrd`, `xlwt`, `paramiko`) — they are NOT installed
 
 **DATA PASSING TO python.run (CRITICAL):**
@@ -81,12 +85,21 @@ The framework injects a `_output(value)` function into every python.run executio
 - **Rule**: Always call `_output(value)` when a downstream step needs to use the result as a Python object. `_output()` is already available — do NOT import or define it.
 
 **BATCH FILE OPERATIONS:**
-`fs.move`, `fs.copy`, and `fs.delete` all support batch mode. Use batch whenever operating on multiple files — do NOT loop with individual calls.
+`fs.write`, `fs.move`, `fs.copy`, and `fs.delete` all support batch mode. Use batch whenever operating on multiple files — do NOT loop with individual calls.
 
+- `fs.write` batch: `{"writes": [{"path": "a.txt", "content": "..."}, {"path": "b.txt", "content": "..."}]}`
 - `fs.move` batch: `{"moves": [{"src": "a.txt", "dst": "1_a.txt"}, ...]}`
 - `fs.copy` batch: `{"copies": [{"src": "a.txt", "dst": "backup/a.txt"}, ...]}`
 - `fs.delete` batch: `{"paths": ["a.txt", "b.txt", "c.txt"], "recursive": false}`
 
+✅ CORRECT (batch write 20 files, 1 step):
+  ```json
+  {"skill": "fs.write", "params": {"writes": [{"path": "test/file1.txt", "content": "This is file 1."}, {"path": "test/file2.txt", "content": "This is file 2."}]}}
+  ```
+✅ CORRECT (batch read multiple files, 1 step):
+  ```json
+  {"skill": "fs.read", "params": {"reads": [{"path": "a.txt"}, {"path": "b.txt"}]}}
+  ```
 ✅ CORRECT (batch move, 1 step):
   ```json
   {"skill": "fs.move", "params": {"moves": [{"src": "a.txt", "dst": "1_a.txt"}, {"src": "b.txt", "dst": "2_b.txt"}]}}
@@ -109,7 +122,7 @@ The framework injects a `_output(value)` function into every python.run executio
 4. ❌ `import ast; ast.literal_eval(...)` → ✅ Use `json.loads()` or manual parsing
 
 **Output Format**:
-You must output a JSON object.
+You must output a JSON object. The `thought` field MUST be under 100 words — be concise, do NOT write long reasoning chains.
 
 Case 1: To execute a step
 ```json
@@ -173,10 +186,13 @@ def _format_history(task: Task, workspace_root: Optional[str] = None) -> str:
         result_str = ""
         if step.result:
             if step.result.success:
-                # 优化 1: 首尾保留策略（针对长输出）
                 out_preview = str(step.result.output)
-                if len(out_preview) > 600:
-                    # 保留前 250 字符 + 后 300 字符
+                # binary-like payload（hex/base64/低语义密度）：只展示长度，不展示内容
+                # 防止 LLM 把截断后含脏字符的字符串内联进下游 skill 参数
+                if _is_binary_like_payload(out_preview):
+                    out_preview = f"[binary payload, {len(out_preview)} chars — use step_{i+1}_output variable, do NOT inline this value]"
+                elif len(out_preview) > 600:
+                    # 普通长输出：首尾保留策略
                     out_preview = out_preview[:250] + "\n... [中间省略] ...\n" + out_preview[-300:]
                 # 路径脱敏：把宿主机路径替换成容器路径，防止 Planner 硬编码 Windows 路径
                 out_preview = _sanitize_host_paths(out_preview, workspace_root)
@@ -193,6 +209,162 @@ def _format_history(task: Task, workspace_root: Optional[str] = None) -> str:
         lines.append(f"  Status: {status}")
         lines.append(f"  Result: {result_str}")
         lines.append("---")
+
+    # ── Goal Coverage Summary（第二层：面向目标判定的结构化摘要）──────────────
+    # 让 LLM 看到"目标是否已满足"的明确结论，而不是只看事件流
+    summary = _build_goal_coverage_summary(task, workspace_root)
+    if summary:
+        lines.append("")
+        lines.append(summary)
+
+    return "\n".join(lines)
+
+
+def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = None) -> str:
+    """
+    在 execution history 末尾注入面向目标判定的结构化摘要。
+
+    包含：
+    - 最近成功步骤的输出摘要（Latest successful outputs）
+    - Finish Confidence 检查（第三层：规则化判定）
+    - 明确的 Recommended action
+    """
+    from difflib import SequenceMatcher
+
+    if not task.steps:
+        return ""
+
+    # 收集成功步骤
+    successful_steps = [
+        (i + 1, s) for i, s in enumerate(task.steps)
+        if s.result and s.result.success
+    ]
+    failed_steps = [
+        (i + 1, s) for i, s in enumerate(task.steps)
+        if s.result and not s.result.success
+    ]
+
+    if not successful_steps:
+        return ""
+
+    lines = ["## Goal Coverage Summary"]
+    lines.append(f"Goal: {task.goal}")
+    lines.append("")
+
+    # ── Latest successful outputs ──────────────────────────────────────────
+    lines.append("Latest successful outputs:")
+    # 只展示最近 3 个成功步骤的输出摘要
+    for step_num, step in successful_steps[-3:]:
+        out = str(step.result.output) if step.result.output else "(no output)"
+        out = _sanitize_host_paths(out, workspace_root)
+        # binary-like payload：只展示长度
+        if _is_binary_like_payload(out):
+            out = f"[binary payload, {len(out)} chars]"
+        elif len(out) > 300:
+            out = out[:250] + "...[truncated]"
+        lines.append(f"  step_{step_num} ({step.skill_name}): {out}")
+    lines.append("")
+
+    # ── Finish Confidence 检查（第三层：规则化判定）────────────────────────
+    # 规则 1：最近一步成功输出是否直接回答了 goal（关键词重叠）
+    last_success_num, last_success_step = successful_steps[-1]
+    last_output = str(last_success_step.result.output) if last_success_step.result.output else ""
+    last_output_lower = last_output.lower()
+    goal_lower = task.goal.lower()
+
+    # 提取 goal 中的关键词（去掉停用词）
+    _STOPWORDS = {"the", "a", "an", "is", "are", "in", "on", "at", "to", "of",
+                  "and", "or", "for", "with", "by", "from", "that", "this",
+                  "请", "帮我", "我要", "一下", "所有", "的", "了", "在", "把",
+                  "并", "然后", "接着", "之后"}
+    goal_tokens = set(re.findall(r'[\w\u4e00-\u9fff]+', goal_lower)) - _STOPWORDS
+    output_tokens = set(re.findall(r'[\w\u4e00-\u9fff]+', last_output_lower))
+    keyword_overlap = len(goal_tokens & output_tokens) / max(len(goal_tokens), 1)
+
+    # 规则 2：最近两步是否是相同 skill + 相似参数（重复迹象）
+    # 使用与 DedupGuard 一致的指纹比较，避免误判同 skill 不同参数的合法调用
+    recent_duplicate = False
+    if len(successful_steps) >= 2:
+        prev_num, prev_step = successful_steps[-2]
+        if prev_step.skill_name == last_success_step.skill_name:
+            # 提取关键参数做指纹，而非直接比较完整 JSON
+            _DEDUP_KEY_PARAMS = {
+                "fs.read": ["path"], "fs.write": ["path"], "fs.list": ["path"],
+                "net.get": ["url"], "net.post": ["url"], "net.download": ["url"],
+                "browser.run": ["url", "script"], "python.run": ["code"],
+                "shell.run": ["command"], "llm.call": ["prompt"],
+            }
+            skill = last_success_step.skill_name
+            key_params = _DEDUP_KEY_PARAMS.get(skill, list((last_success_step.params or {}).keys())[:2])
+
+            def _fp(params):
+                parts = [skill]
+                for k in key_params:
+                    v = (params or {}).get(k)
+                    if v is not None:
+                        s = re.sub(r'\s+', ' ', str(v).strip())[:200]
+                        parts.append(f"{k}={s}")
+                return "|".join(parts)
+
+            prev_fp = _fp(prev_step.params)
+            last_fp = _fp(last_success_step.params)
+            param_sim = SequenceMatcher(None, prev_fp, last_fp).ratio()
+            if param_sim >= 0.92:
+                recent_duplicate = True
+
+    # 规则 3：是否有明确未完成的失败步骤（最近一步失败）
+    has_recent_failure = bool(failed_steps) and failed_steps[-1][0] > (successful_steps[-1][0] if successful_steps else 0)
+
+    # ── 规则 4：写文件意图但缺少 fs.write 成功步骤 ───────────────────────
+    # goal 含写/创建文件关键词时，必须有 fs.write/fs.copy 成功才能 FINISH
+    # 防止 python.run 只输出文件路径列表就被误判为"已完成写文件"
+    _WRITE_INTENT_KEYWORDS = {
+        "写入", "写到", "写文件", "创建文件", "保存", "存储", "生成文件",
+        "write", "create file", "save file", "output file",
+    }
+    _WRITE_SKILLS = {"fs.write", "fs.copy"}
+    goal_has_write_intent = any(kw in goal_lower for kw in _WRITE_INTENT_KEYWORDS)
+    has_write_success = any(
+        s.skill_name in _WRITE_SKILLS and s.result and s.result.success
+        for _, s in successful_steps
+    )
+    missing_write = goal_has_write_intent and not has_write_success
+
+    # ── 综合判定 ──────────────────────────────────────────────────────────
+    finish_signals = []
+    continue_signals = []
+
+    if keyword_overlap >= 0.4 and not missing_write:
+        finish_signals.append(f"last output has {keyword_overlap:.0%} keyword overlap with goal")
+    if recent_duplicate:
+        finish_signals.append("last two successful steps are near-identical (possible redundant loop)")
+    if has_recent_failure:
+        continue_signals.append("last step failed — may need retry or alternative approach")
+    if missing_write:
+        continue_signals.append("goal requires writing files but no fs.write/fs.copy has succeeded yet")
+
+    lines.append("Finish Confidence Check:")
+    if finish_signals:
+        lines.append(f"  ✓ FINISH signals: {'; '.join(finish_signals)}")
+    if continue_signals:
+        lines.append(f"  ✗ CONTINUE signals: {'; '.join(continue_signals)}")
+
+    # ── Recommended action ────────────────────────────────────────────────
+    lines.append("")
+    if has_recent_failure:
+        lines.append(
+            "Recommended action: CONTINUE — last step failed, fix or try alternative."
+        )
+    elif finish_signals and not continue_signals:
+        lines.append(
+            "Recommended action: FINISH — goal appears satisfied. "
+            "Do NOT add verification/reformatting steps unless the goal explicitly requires them."
+        )
+    else:
+        lines.append(
+            "Recommended action: EVALUATE — check if all sub-goals are covered before deciding."
+        )
+
     return "\n".join(lines)
 
 def _format_skills(available_skills: Mapping[str, Any]) -> str:
@@ -314,12 +486,13 @@ Please try a DIFFERENT approach:
                 meta = msg.get("metadata", {})
                 msg_type = meta.get("message_type", "chat") if meta else "chat"
 
-                # 截断过长的消息
-                if len(content) > 1500:
+                # 截断过长的消息（binary-like payload 只展示长度）
+                if _is_binary_like_payload(content):
+                    content = f"[binary payload, {len(content)} chars — do NOT inline]"
+                elif len(content) > 1500:
                     content = content[:1200] + "...[truncated]"
 
                 if role == "Assistant" and msg_type == "task_result":
-                    # 结构化任务结果：直接暴露 metadata 中的关键字段，让 Planner 精确引用
                     output_path = meta.get("output_path", "")
                     output_value = meta.get("output_value", "")
                     goal = meta.get("goal", "")
@@ -328,8 +501,14 @@ Please try a DIFFERENT approach:
                     if output_path:
                         lines.append(f"  File Path (use this exact path): {output_path}")
                     if output_value:
-                        preview = output_value[:400] + "...[truncated]" if len(output_value) > 400 else output_value
-                        lines.append(f"  Content (embed directly, do NOT re-fetch): {preview}")
+                        # binary-like output_value 也只展示长度
+                        if _is_binary_like_payload(output_value):
+                            ov_preview = f"[binary payload, {len(output_value)} chars — do NOT inline]"
+                        elif len(output_value) > 400:
+                            ov_preview = output_value[:400] + "...[truncated]"
+                        else:
+                            ov_preview = output_value
+                        lines.append(f"  Content (embed directly, do NOT re-fetch): {ov_preview}")
                     lines.append(f"  Display: {content}")
                 elif role == "Assistant":
                     lines.append(f"\n[Assistant — previous reply, use this value directly if user refers to it]:\n{content}")
@@ -363,7 +542,13 @@ Please try a DIFFERENT approach:
 
             if content_ref and content_ref.get("content"):
                 content = content_ref["content"]
-                preview = content[:800] + "...[truncated]" if len(content) > 800 else content
+                # binary-like：不展示内容，只告知长度，防止 LLM 内联截断后的脏字符串
+                if _is_binary_like_payload(content):
+                    preview = f"[binary payload, {len(content)} chars — use step_N_output variable, do NOT inline]"
+                elif len(content) > 800:
+                    preview = content[:800] + "...[truncated]"
+                else:
+                    preview = content
                 lines.append(
                     f"- [content_ref | source={content_ref.get('source_type')} | "
                     f"confidence={content_ref.get('confidence', 0):.2f}] "
@@ -371,7 +556,12 @@ Please try a DIFFERENT approach:
                 )
             elif resolved_inputs.get("content"):
                 content = resolved_inputs["content"]
-                preview = content[:800] + "...[truncated]" if len(content) > 800 else content
+                if _is_binary_like_payload(content):
+                    preview = f"[binary payload, {len(content)} chars — use step_N_output variable, do NOT inline]"
+                elif len(content) > 800:
+                    preview = content[:800] + "...[truncated]"
+                else:
+                    preview = content
                 lines.append(f"- content (use as `content` / `text` param):\n```\n{preview}\n```")
 
             context_bindings_section = "\n".join(lines) + "\n"
@@ -463,7 +653,9 @@ Return ONLY the JSON object.
 
     def _call_llm(self, prompt: str) -> str:
         # 统一接口：所有 LLM 客户端必须实现 call() 方法
-        return self._llm.call(prompt)
+        content, usage = self._llm.call_with_usage(prompt)
+        self._last_usage: dict = usage  # 缓存供 GraphPlanner 读取
+        return content
 
     def _parse_json(self, text: str) -> Dict[str, Any]:
         # Reuse the robust parser from simple_llm or write a simple one
@@ -472,7 +664,61 @@ Return ONLY the JSON object.
             match = re.search(r'```(?:json)?(.*?)```', cleaned, re.DOTALL)
             if match:
                 cleaned = match.group(1).strip()
-        return json.loads(cleaned)
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        # ── Truncation recovery ──────────────────────────────────────────────
+        # LLM output may be cut off mid-string (e.g. thought field too long).
+        # If we can extract skill + params, we can still execute the step.
+        type_match = re.search(r'"type"\s*:\s*"(\w+)"', cleaned)
+        skill_match = re.search(r'"skill"\s*:\s*"([^"]+)"', cleaned)
+        params_match = re.search(r'"params"\s*:\s*(\{.*?\})', cleaned, re.DOTALL)
+
+        if type_match and type_match.group(1) == "finish":
+            return {"type": "finish", "thought": "[truncated]", "final_message": "Task completed."}
+
+        if type_match and type_match.group(1) == "execute" and skill_match:
+            # 用括号深度匹配提取 params 对象，比正则更健壮（支持嵌套 JSON）
+            params: Dict[str, Any] = {}
+            params_start = cleaned.find('"params"')
+            if params_start != -1:
+                brace_start = cleaned.find('{', params_start + len('"params"'))
+                if brace_start != -1:
+                    depth = 0
+                    end = brace_start
+                    for i, ch in enumerate(cleaned[brace_start:], brace_start):
+                        if ch == '{':
+                            depth += 1
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end = i
+                                break
+                    try:
+                        params = json.loads(cleaned[brace_start:end + 1])
+                    except Exception:
+                        # 括号匹配也失败（params 本身被截断），尝试 regex fallback
+                        if params_match:
+                            try:
+                                params = json.loads(params_match.group(1))
+                            except Exception:
+                                pass
+            logger.warning(
+                f"[Planner] LLM output truncated, recovered skill={skill_match.group(1)} "
+                f"params_keys={list(params.keys())}"
+            )
+            return {
+                "type": "execute",
+                "thought": "[truncated — thought field exceeded token limit]",
+                "skill": skill_match.group(1),
+                "params": params,
+            }
+
+        # 无法恢复，抛出原始错误
+        raise ValueError(f"Cannot parse or recover LLM output")
 
     def _get_workspace_state(self, env_context: Dict[str, Any]) -> str:
         """
@@ -527,23 +773,17 @@ Return ONLY the JSON object.
     def _check_loop(self, thought: str, skill_name: str, params: Dict[str, Any]) -> None:
         """
         优化 2: 检测思维死循环
+        只在 thought + action 完全一致时才计数，避免误判同 skill 不同参数的合法调用。
         """
-        # 计算相似度
         if self._last_thought and self._last_action:
             thought_similarity = SequenceMatcher(None, thought, self._last_thought).ratio()
             action_match = (skill_name == self._last_action[0] and params == self._last_action[1])
-            
+
             if thought_similarity > 0.95 and action_match:
                 self._repeat_count += 1
-            elif skill_name == self._last_action[0]:
-                # 同一 skill 不同参数：宽松检测（相似度 > 0.7 也算重复）
-                if thought_similarity > 0.7:
-                    self._repeat_count += 1
-                else:
-                    self._repeat_count = 0
             else:
                 self._repeat_count = 0
-        
+
         # 更新历史
         self._last_thought = thought
         self._last_action = (skill_name, params)
@@ -642,12 +882,12 @@ Return ONLY the JSON object.
                 from app.avatar.planner.models import StepStatus, StepResult
                 if node.status == NodeStatus.SUCCESS:
                     step.status = StepStatus.SUCCESS
-                    # 按优先级提取输出：stdout > output > content > 整个 outputs dict
+                    # 按优先级提取输出：structured output 优先于原始 stdout
                     outputs = node.outputs or {}
                     output_val = (
-                        outputs.get("stdout")
-                        or outputs.get("output")
+                        outputs.get("output")
                         or outputs.get("content")
+                        or outputs.get("stdout")
                         or outputs
                     )
                     step.result = StepResult(

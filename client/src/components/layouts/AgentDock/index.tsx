@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import { LayoutGrid } from "lucide-react";
 import { DockItem } from "./DockItem";
 import { SystemStatus } from "./SystemStatus";
 import { cn } from "@/lib/utils";
@@ -26,7 +25,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-export type DockTab = AppId | 'home' | 'files';
+export type DockTab = AppId | 'files';
 
 interface AgentDockProps {
   activeTab: string;
@@ -148,17 +147,6 @@ export function AgentDock({ activeTab, onTabChange, isLeftPanelOpen, onToggleLef
       <div className="h-2" />
 
       <nav className="flex flex-col items-center gap-4 mt-2 flex-1 w-full px-2">
-        {/* Home is always first and pinned (Not draggable) */}
-        <DockItem 
-          icon={LayoutGrid} 
-          label="Home" 
-          isActive={activeTab === 'home'} 
-          onClick={() => onTabChange('home')}
-          shortcut="⌘H"
-        />
-
-        <div className="w-8 h-px bg-slate-200 dark:bg-white/10 my-1" />
-
         {/* Dynamic Pinned Apps with DnD */}
         <DndContext
           sensors={sensors}

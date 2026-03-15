@@ -48,20 +48,19 @@ class SandboxExecutor(SkillExecutor):
         cpu_quota: int = 50000,  # 50% CPU
         timeout: int = 30,
         network_enabled: bool = False,
+        docker_executor=None,  # 可传入已有的 DockerExecutor 单例，避免重复创建 ContainerPool
     ):
         super().__init__()
-        self.strategy = ExecutionStrategy.DOCKER  # 使用 Docker 策略标识
+        self.strategy = ExecutionStrategy.DOCKER
         self.mem_limit = mem_limit
         self.cpu_quota = cpu_quota
         self.timeout = timeout
         self.network_enabled = network_enabled
         
-        # 后端执行器
         self._kata_executor: Optional[KataExecutor] = None
-        self._docker_executor: Optional[DockerExecutor] = None
+        self._docker_executor: Optional[DockerExecutor] = docker_executor  # 复用传入的实例
         self._backend: Optional[SkillExecutor] = None
         
-        # 初始化后端
         self._init_backend()
     
     def _init_backend(self):
@@ -80,13 +79,14 @@ class SandboxExecutor(SkillExecutor):
         except Exception as e:
             logger.warning(f"[SandboxExecutor] Failed to init KataExecutor: {e}")
         
-        # 降级到 Docker
+        # 降级到 Docker（优先复用传入的实例，避免重复创建 ContainerPool）
         try:
-            self._docker_executor = DockerExecutor(
-                mem_limit=self.mem_limit,
-                cpu_quota=self.cpu_quota,
-                timeout=self.timeout,
-            )
+            if self._docker_executor is None:
+                self._docker_executor = DockerExecutor(
+                    mem_limit=self.mem_limit,
+                    cpu_quota=self.cpu_quota,
+                    timeout=self.timeout,
+                )
             if self._docker_executor._available:
                 self._backend = self._docker_executor
                 logger.info("[SandboxExecutor] Using DockerExecutor backend (Kata unavailable)")

@@ -149,3 +149,17 @@ class BaseLLMClient(ABC):
             return response.content
         finally:
             self.config.json_schema = original_schema
+
+    def call_with_usage(self, prompt: str, json_schema: Optional[dict] = None) -> Tuple[str, Dict[str, Any]]:
+        """Like call(), but also returns usage dict with token counts."""
+        from app.llm.types import LLMMessage, LLMRole
+
+        original_schema = self.config.json_schema
+        if json_schema is not None:
+            self.config.json_schema = json_schema
+        try:
+            msg = LLMMessage(role=LLMRole.USER, content=prompt)
+            response = self.chat([msg])
+            return response.content, (response.usage or {})
+        finally:
+            self.config.json_schema = original_schema

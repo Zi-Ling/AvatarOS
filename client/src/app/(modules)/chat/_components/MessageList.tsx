@@ -41,7 +41,7 @@ export function MessageList({
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-3 scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-white/10">
-      {messages.map((message) => (
+      {messages.filter(m => m.messageType !== 'approval').map((message) => (
         <div
           key={message.id}
           className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}

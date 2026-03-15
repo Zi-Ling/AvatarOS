@@ -109,12 +109,16 @@ class StepTraceStore:
         session_id: str,
         event_type: str,
         step_id: Optional[str] = None,
+        task_id: Optional[str] = None,
         container_id: Optional[str] = None,
         artifact_id: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         写一条细粒度 EventTraceRecord（append-only，失败静默）。
+
+        P3: 写入前校验必填字段（session_id / event_type / timestamp）。
+        缺少任意必填字段时拒绝写入并记录警告。
 
         event_type 约定值：
           sandbox_start / sandbox_end / sandbox_broken
@@ -123,6 +127,14 @@ class StepTraceStore:
           container_created / container_removed
           policy_block
         """
+        # P3: Field completeness validation
+        if not session_id or not event_type:
+            logger.warning(
+                f"[StepTraceStore] record_event rejected: missing required fields "
+                f"(session_id={session_id!r}, event_type={event_type!r})"
+            )
+            return
+
         record = EventTraceRecord(
             session_id=session_id,
             step_id=step_id,

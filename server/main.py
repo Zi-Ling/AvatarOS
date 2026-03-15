@@ -29,15 +29,15 @@ setup_logging(
 )
 
 from app.api import (
-    chat_router, task_router, speech_router, skill_router,
-    filesystem_router, schedule_router, history_router, artifacts_router, workspace_router,
-    state_router, memory_router, approval_router,
-    policy_router, cost_router, maintenance_router, settings_router,
+    chat_router, speech_router,
+    task_router,
+    skill_router,
+    trace_router, cost_router, approval_router, history_router, policy_router,
+    workspace_router, filesystem_router, artifacts_router,
+    memory_router, state_router, knowledge_router, learning_router,
+    settings_router, maintenance_router, schedule_router, workflow_router,
 )
-from app.api.learning import learning_router
 from app.api.log import logging_router
-from app.api.knowledge import router as knowledge_router
-from app.api.workflow import router as workflow_router
 from app.core.config import config
 from app.io.manager import SocketManager
 
@@ -82,11 +82,22 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # 注册路由
 for router in [
-    chat_router, task_router, speech_router, learning_router,
-    logging_router, skill_router, filesystem_router, schedule_router,
-    history_router, artifacts_router, workspace_router, knowledge_router, workflow_router,
-    state_router, memory_router, approval_router,
-    policy_router, cost_router, maintenance_router, settings_router,
+    # chat
+    chat_router, speech_router,
+    # task
+    task_router,
+    # skill
+    skill_router,
+    # workbench
+    trace_router, cost_router, approval_router, history_router, policy_router,
+    # workspace
+    workspace_router, filesystem_router, artifacts_router,
+    # knowledge
+    memory_router, state_router, knowledge_router, learning_router,
+    # setting
+    settings_router, maintenance_router, schedule_router, workflow_router,
+    # log
+    logging_router,
 ]:
     fastapi_app.include_router(router)
 
