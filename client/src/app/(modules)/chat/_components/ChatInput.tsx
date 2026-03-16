@@ -25,7 +25,7 @@ interface ChatInputProps {
   isThinkEnabled: boolean;
   toggleThinkMode: () => void;
   fileInputRef: RefObject<HTMLInputElement | null>;
-  handleSend: () => void;
+  handleSend: (overrideInput?: string) => void;
   handleKeyPress: (e: React.KeyboardEvent) => void;
   handleFileUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
   removeAttachment: (id: string) => void;
@@ -33,35 +33,19 @@ interface ChatInputProps {
   handleStopGeneration: () => void;
   toggleRecording: () => void;
   formatFileSize: (bytes: number) => string;
-  canCancel?: boolean; // 是否可以取消当前操作
-  hasActiveTask?: boolean; // 是否有活跃任务
+  canCancel?: boolean;
+  hasActiveTask?: boolean;
+  hasPendingApproval?: boolean; // 有待审批请求
 }
 
 export function ChatInput({
-  inputValue,
-  setInputValue,
-  attachments,
-  isRecording,
-  isTranscribing = false,
-  isTyping,
-  audioLevel = 0,
-  isThinkEnabled,
-  toggleThinkMode,
-  fileInputRef,
-  handleSend,
-  handleKeyPress,
-  handleFileUpload,
-  removeAttachment,
-  handleNewChat,
-  handleStopGeneration,
-  toggleRecording,
-  formatFileSize,
-  canCancel = false,
-  hasActiveTask = false,
+  inputValue, setInputValue, attachments, isRecording, isTranscribing = false,
+  isTyping, audioLevel = 0, isThinkEnabled, toggleThinkMode, fileInputRef,
+  handleSend, handleKeyPress, handleFileUpload, removeAttachment, handleNewChat,
+  handleStopGeneration, toggleRecording, formatFileSize,
+  canCancel = false, hasActiveTask = false, hasPendingApproval = false,
 }: ChatInputProps) {
   const { t, language } = useLanguage();
-  
-  // 判断是否应该显示停止按钮（正在输出或有活跃任务）
   const shouldShowStopButton = isTyping || hasActiveTask;
   
   // Context menu state
@@ -212,11 +196,16 @@ export function ChatInput({
           <textarea
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            onKeyPress={handleKeyPress}
+            onKeyDown={handleKeyPress}
             onContextMenu={handleContextMenu}
-            placeholder={t.chat.placeholder}
-            className="w-full min-h-[100px] max-h-[240px] resize-none bg-transparent px-4 pt-3 pb-12 text-sm text-slate-800 dark:text-white placeholder:text-slate-400 dark:placeholder:text-white/40 focus:outline-none"
-            disabled={isRecording || isTranscribing || isTyping}
+            placeholder={hasPendingApproval ? "请先处理上方的审批请求..." : t.chat.placeholder}
+            className={cn(
+              "w-full min-h-[100px] max-h-[240px] resize-none bg-transparent px-4 pt-3 pb-12 text-sm placeholder:text-slate-400 dark:placeholder:text-white/40 focus:outline-none",
+              hasPendingApproval
+                ? "text-slate-400 dark:text-slate-500"
+                : "text-slate-800 dark:text-white"
+            )}
+            disabled={isRecording || isTranscribing}
           />
 
           {/* 功能按钮栏 - 无边框，统一背景 */}
@@ -293,7 +282,6 @@ export function ChatInput({
 
               {/* 发送/停止按钮 */}
               {shouldShowStopButton ? (
-                /* 停止按钮 */
                 <button
                   type="button"
                   onClick={handleStopGeneration}
@@ -304,6 +292,14 @@ export function ChatInput({
                     <rect x="6" y="6" width="12" height="12" rx="1" />
                   </svg>
                 </button>
+              ) : hasPendingApproval ? (
+                /* 待审批提示按钮 */
+                <div className="flex items-center gap-1.5 px-2.5 h-8 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 text-xs font-medium">
+                  <svg className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                  </svg>
+                  <span>待审批</span>
+                </div>
               ) : (
                 /* 发送按钮 */
                 <button

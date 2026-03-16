@@ -372,6 +372,11 @@ class AvatarMain:
                 if resolved_inputs:
                     env_context["resolved_inputs"] = resolved_inputs
 
+                # P1: 简单任务 → 注入 fast-finish 信号，减少 Planner 调用次数
+                _is_complex = intent.metadata.get("is_complex", True)
+                if not _is_complex:
+                    env_context["simple_task_mode"] = True
+
                 graph_result = await self._graph_controller.execute(
                     intent.goal, mode="react", env_context=env_context,
                     control_handle=control_handle,

@@ -1,0 +1,43 @@
+# SearXNG Configuration — AvatarOS built-in search engine
+# JSON API enabled for web.search skill
+
+use_default_settings: true
+
+server:
+  secret_key: "avatarsearxng2024"
+  bind_address: "0.0.0.0"
+  port: 8888
+  limiter: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "auto"
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: false
+  - name: bing
+    engine: bing
+    shortcut: b
+    disabled: false
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    disabled: false
+
+ui:
+  static_use_hash: true
+
+outgoing:
+  request_timeout: 10
+  useragent_suffix: "AvatarOS"

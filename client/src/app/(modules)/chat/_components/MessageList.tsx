@@ -1,13 +1,15 @@
 "use client";
 
-import React, { useRef, useEffect } from "react";
+import { useRef, useEffect } from "react";
 import { MessageContent } from "./MessageContent";
 import { MessageActions } from "./MessageActions";
-import { TaskProgressBar } from "./TaskProgressBar";
+import { AgentExecutionBlock } from "./AgentExecutionBlock";
 import { ApprovalCard } from "./ApprovalCard";
 import { RunSummaryCard } from "./RunSummaryCard";
+import { TaskPausedCard } from "./TaskPausedCard";
 import { cn } from "@/lib/utils";
-import { Message } from "@/stores/chatStore";
+import { XCircle } from "lucide-react";
+import { resolveKind, resolveRunSubtype, type Message } from "@/types/chat";
 
 interface MessageListProps {
   messages: Message[];
@@ -19,94 +21,166 @@ interface MessageListProps {
   formatFileSize: (bytes: number) => string;
 }
 
+/** Renders the inner content of an assistant message bubble */
+function AssistantBubbleContent({ message }: { message: Message }) {
+  const kind = resolveKind(message);
+  const subtype = resolveRunSubtype(message);
+
+  // ── run kind ────────────────────────────────────────────────────────
+  if (kind === "run") {
+    if (subtype === "block") {
+      return <AgentExecutionBlock runId={message.runId!} />;
+    }
+    if (subtype === "paused") {
+      return (
+        <TaskPausedCard
+          runId={message.runId}
+          pausedAtStep={message.pausedAtStep}
+          pausedTotalSteps={message.pausedTotalSteps}
+        />
+      );
+    }
+    if (subtype === "cancelled") {
+      return (
+        <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 py-1">
+          <XCircle className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+          <span>{message.content || "任务已取消"}</span>
+        </div>
+      );
+    }
+    // legacy task_progress without subtype
+    if (message.runId) return <AgentExecutionBlock runId={message.runId} />;
+  }
+
+  // ── approval kind ────────────────────────────────────────────────────
+  if (kind === "approval") {
+    return message.approvalRequest ? (
+      <ApprovalCard
+        messageId={message.id}
+        request={message.approvalRequest}
+        status={message.approvalStatus ?? "pending"}
+        comment={message.approvalComment}
+      />
+    ) : null;
+  }
+
+  // ── summary kind ─────────────────────────────────────────────────────
+  if (kind === "summary") {
+    return (
+      <>
+        {message.runSummary ? (
+          <RunSummaryCard data={message.runSummary} />
+        ) : message.content ? (
+          <MessageContent content={message.content} isStreaming={false} isUserMessage={false} />
+        ) : null}
+      </>
+    );
+  }
+
+  // ── chat (default) ───────────────────────────────────────────────────
+  return (
+    <MessageContent
+      content={message.content}
+      isStreaming={message.isStreaming}
+      isUserMessage={false}
+    />
+  );
+}
+
+function shouldShowActions(message: Message): boolean {
+  if (message.isStreaming) return false;
+  const kind = resolveKind(message);
+  const subtype = resolveRunSubtype(message);
+  if (kind === "approval") return false;
+  if (kind === "run" && subtype !== undefined) return false; // paused/cancelled/block — no actions
+  return true;
+}
+
+function bubbleStyle(message: Message): string {
+  const kind = resolveKind(message);
+  const subtype = resolveRunSubtype(message);
+  if (kind === "approval" || (kind === "run" && subtype === "paused")) {
+    return "border-amber-200 dark:border-amber-800/40 bg-amber-50/30 dark:bg-amber-950/10";
+  }
+  if (kind === "run" && subtype === "block") {
+    return "border-indigo-100 dark:border-indigo-900/40 bg-slate-50 dark:bg-slate-900/60";
+  }
+  return "border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 text-slate-800 dark:text-slate-200";
+}
+
 export function MessageList({
-  messages,
-  isTyping,
-  onRegenerate,
-  onLike,
-  onDislike,
-  onDelete,
-  formatFileSize,
+  messages, isTyping, onRegenerate, onLike, onDislike, onDelete, formatFileSize,
 }: MessageListProps) {
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const prevLengthRef = useRef<number>(messages.length);
+  const isInitialMount = useRef(true);
+  const userScrolledUpRef = useRef(false);
+
+  // Track whether user has manually scrolled up
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      userScrolledUpRef.current = distanceFromBottom > 80;
+    };
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // Derive a content fingerprint that changes during streaming
+  const lastMsg = messages[messages.length - 1];
+  const streamingContentLen = lastMsg?.isStreaming ? lastMsg.content.length : 0;
 
   useEffect(() => {
-    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
-    scrollTimerRef.current = setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, 150);
-    return () => { if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current); };
-  }, [messages]);
+    const el = containerRef.current;
+    if (!el) return;
+    if (isInitialMount.current) {
+      el.scrollTop = el.scrollHeight;
+      isInitialMount.current = false;
+      prevLengthRef.current = messages.length;
+      return;
+    }
+    // New message added — auto-scroll and reset user-scrolled flag
+    if (messages.length > prevLengthRef.current) {
+      userScrolledUpRef.current = false;
+      el.scrollTop = el.scrollHeight;
+    }
+    // Streaming content update — keep scrolled to bottom unless user scrolled up
+    if (!userScrolledUpRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+    prevLengthRef.current = messages.length;
+  }, [messages, streamingContentLen, isTyping]);
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 space-y-3 scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-white/10">
-      {messages.filter(m => m.messageType !== 'approval').map((message) => (
-        <div
-          key={message.id}
-          className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
-        >
-          {/* AI message */}
+    <div
+      ref={containerRef}
+      className="flex-1 overflow-y-auto p-6 space-y-3 scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-white/10"
+    >
+      {messages.map((message) => (
+        <div key={message.id} className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}>
+
+          {/* ── Assistant message ── */}
           {message.role === "assistant" && (
-            <div className="group flex items-start gap-2 max-w-[75%]">
+            <div className="group flex items-start gap-2 max-w-[80%] min-w-0">
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-xs font-bold text-white shadow-sm">
                 AO
               </div>
-              <div className="flex-1 space-y-2">
-                <div className="rounded-2xl rounded-tl-sm border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-3 py-2 text-slate-800 dark:text-slate-200 shadow-sm dark:shadow-none">
+              <div className="flex-1 min-w-0 space-y-1">
+                {/* system-style messages skip the bubble wrapper */}
+                {resolveKind(message) === "run" && resolveRunSubtype(message) === "cancelled" ? (
+                  <AssistantBubbleContent message={message} />
+                ) : (
+                  <div className={cn(
+                    "rounded-2xl rounded-tl-sm border px-3 py-2 shadow-sm dark:shadow-none",
+                    bubbleStyle(message)
+                  )}>
+                    <AssistantBubbleContent message={message} />
+                  </div>
+                )}
 
-                  {/* task_progress: progress bar while streaming, fallback text when done */}
-                  {message.messageType === 'task_progress' && (
-                    message.isStreaming ? (
-                      <TaskProgressBar
-                        currentStepName={message.currentStepName}
-                        completedCount={message.completedStepCount}
-                        totalCount={message.totalStepCount}
-                      />
-                    ) : (
-                      <MessageContent
-                        content={message.content || "⏳ 任务执行中..."}
-                        isStreaming={false}
-                        isUserMessage={false}
-                      />
-                    )
-                  )}
-
-                  {/* approval: inline card */}
-                  {message.messageType === 'approval' && message.approvalRequest && (
-                    <ApprovalCard
-                      messageId={message.id}
-                      request={message.approvalRequest}
-                      status={message.approvalStatus ?? 'pending'}
-                      comment={message.approvalComment}
-                    />
-                  )}
-
-                  {/* run_summary: text + summary card */}
-                  {message.messageType === 'run_summary' && (
-                    <>
-                      {message.content && (
-                        <MessageContent
-                          content={message.content}
-                          isStreaming={false}
-                          isUserMessage={false}
-                        />
-                      )}
-                      {message.runSummary && <RunSummaryCard data={message.runSummary} />}
-                    </>
-                  )}
-
-                  {/* default chat message */}
-                  {(!message.messageType || message.messageType === 'chat') && (
-                    <MessageContent
-                      content={message.content}
-                      isStreaming={message.isStreaming}
-                      isUserMessage={false}
-                    />
-                  )}
-                </div>
-
-                {!message.isStreaming && message.messageType !== 'approval' && (
+                {shouldShowActions(message) && (
                   <MessageActions
                     messageId={message.id}
                     content={message.content}
@@ -123,7 +197,7 @@ export function MessageList({
             </div>
           )}
 
-          {/* User message */}
+          {/* ── User message ── */}
           {message.role === "user" && (
             <div className="group flex flex-row items-start gap-2 max-w-[75%]">
               <div className="flex-1 flex flex-col items-end space-y-2">
@@ -165,7 +239,6 @@ export function MessageList({
         </div>
       ))}
 
-      {/* Typing indicator */}
       {isTyping && (
         <div className="flex justify-start">
           <div className="flex items-start gap-3">
@@ -183,8 +256,6 @@ export function MessageList({
           </div>
         </div>
       )}
-
-      <div ref={messagesEndRef} />
     </div>
   );
 }

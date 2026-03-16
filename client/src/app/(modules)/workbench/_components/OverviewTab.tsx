@@ -435,100 +435,89 @@ export function OverviewTab() {
         <p className="text-xs text-slate-400 dark:text-slate-500">{loading ? "加载中…" : summary}</p>
       </div>
 
-      {/* 内容区 */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="p-5 space-y-5">
-          <div className="grid grid-cols-3 gap-4">
+      {/* 内容区：三列独立滚动 + 底部最近交付固定 */}
+      <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+        {/* 三列区域，各自独立滚动 */}
+        <div className="flex-1 min-h-0 px-5 pt-5 grid grid-cols-1 lg:grid-cols-3 gap-4">
 
-            {/* 正在执行 / 最近执行 */}
-            <div>
-              {running.length > 0 ? (
-                <>
-                  <SectionHeader icon={Zap} title="正在执行" count={running.length} />
-                  <div className="space-y-2">
-                    {running.map(s => (
-                      <RunningCard
-                        key={s.id}
-                        session={s}
-                        isActive={activeTask?.id === s.id}
-                        controlStatus={activeTask?.id === s.id ? controlStatus : undefined}
-                        onPauseResume={activeTask?.id === s.id ? handlePauseResume : undefined}
-                        onCancel={activeTask?.id === s.id ? handleCancel : undefined}
-                        isActioning={isActioning}
-                        onClick={() => setActiveTab("active")}
-                      />
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <SectionHeader icon={History} title="最近执行" subtitle="无运行中任务" />
-                  <div className="space-y-2">
-                    {recentRan.length === 0
-                      ? <EmptyState text="暂无执行记录" />
-                      : recentRan.map(s => (
-                        <RecentRunCard key={s.id} session={s} onClick={() => setActiveTab("history")} />
-                      ))
-                    }
-                  </div>
-                </>
-              )}
+          {/* 正在执行 / 最近执行 */}
+          <div className="flex flex-col min-h-0">
+            {running.length > 0 ? (
+              <SectionHeader icon={Zap} title="正在执行" count={running.length} />
+            ) : (
+              <SectionHeader icon={History} title="最近执行" subtitle="无运行中任务" />
+            )}
+            <div className="flex-1 overflow-y-auto scrollbar-thin space-y-2 pr-0.5">
+              {running.length > 0
+                ? running.map(s => (
+                    <RunningCard
+                      key={s.id}
+                      session={s}
+                      isActive={activeTask?.id === s.id}
+                      controlStatus={activeTask?.id === s.id ? controlStatus : undefined}
+                      onPauseResume={activeTask?.id === s.id ? handlePauseResume : undefined}
+                      onCancel={activeTask?.id === s.id ? handleCancel : undefined}
+                      isActioning={isActioning}
+                      onClick={() => setActiveTab("active")}
+                    />
+                  ))
+                : recentRan.length === 0
+                  ? <EmptyState text="暂无执行记录" />
+                  : recentRan.map(s => (
+                      <RecentRunCard key={s.id} session={s} onClick={() => setActiveTab("history")} />
+                    ))
+              }
             </div>
+          </div>
 
-            {/* 待确认 / 历史审批 */}
-            <div>
-              {pendingApprovals.length > 0 ? (
-                <>
-                  <SectionHeader icon={AlertTriangle} title="待确认" count={pendingApprovals.length} />
-                  <div className="space-y-2">
-                    {pendingApprovals.map(a => (
-                      <PendingApprovalCard key={a.request_id} req={a} onRespond={handleApprovalRespond} />
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <SectionHeader icon={History} title="历史审批" subtitle="无待确认项" />
-                  <div className="space-y-2">
-                    {approvalHistory.length === 0
-                      ? <EmptyState text="暂无审批记录" />
-                      : approvalHistory.slice(0, 5).map(r => (
-                        <ApprovalHistoryCard key={r.request_id} record={r} />
-                      ))
-                    }
-                  </div>
-                </>
-              )}
+          {/* 待确认 / 历史审批 */}
+          <div className="flex flex-col min-h-0">
+            {pendingApprovals.length > 0 ? (
+              <SectionHeader icon={AlertTriangle} title="待确认" count={pendingApprovals.length} />
+            ) : (
+              <SectionHeader icon={History} title="历史审批" subtitle="无待确认项" />
+            )}
+            <div className="flex-1 overflow-y-auto scrollbar-thin space-y-2 pr-0.5">
+              {pendingApprovals.length > 0
+                ? pendingApprovals.map(a => (
+                    <PendingApprovalCard key={a.request_id} req={a} onRespond={handleApprovalRespond} />
+                  ))
+                : approvalHistory.length === 0
+                  ? <EmptyState text="暂无审批记录" />
+                  : approvalHistory.slice(0, 5).map(r => (
+                      <ApprovalHistoryCard key={r.request_id} record={r} />
+                    ))
+              }
             </div>
+          </div>
 
-            {/* 最近结果：24h 内优先，不足 3 条往前补 */}
-            <div>
-              <SectionHeader
-                icon={CheckCircle2}
-                title="最近结果"
-                count={recent.length}
-                subtitle={done24h.length < 3 ? "含 24h 前" : undefined}
-              />
-              <div className="space-y-2">
-                {recent.length === 0
-                  ? <EmptyState text="暂无历史记录" />
-                  : recent.map(s => (
+          {/* 最近结果 */}
+          <div className="flex flex-col min-h-0">
+            <SectionHeader
+              icon={CheckCircle2}
+              title="最近结果"
+              count={recent.length}
+              subtitle={done24h.length < 3 ? "含 24h 前" : undefined}
+            />
+            <div className="flex-1 overflow-y-auto scrollbar-thin space-y-2 pr-0.5">
+              {recent.length === 0
+                ? <EmptyState text="暂无历史记录" />
+                : recent.map(s => (
                     <ResultCard key={s.id} session={s} onClick={() => setActiveTab("history")} />
                   ))
-                }
-              </div>
+              }
             </div>
-
           </div>
 
-          {/* 最近交付 */}
-          <div>
-            <SectionHeader icon={Package} title="最近交付" count={artifacts.length} />
-            {artifacts.length === 0
-              ? <EmptyState text="暂无交付文件" />
-              : <div className="flex gap-3 overflow-x-auto pb-2">{artifacts.map(a => <ArtifactCard key={a.artifact_id} artifact={a} />)}</div>
-            }
-          </div>
+        </div>
+
+        {/* 最近交付：固定在底部，不被三列内容撑走 */}
+        <div className="shrink-0 px-5 py-4 border-t border-slate-100 dark:border-slate-800">
+          <SectionHeader icon={Package} title="最近交付" count={artifacts.length} />
+          {artifacts.length === 0
+            ? <EmptyState text="暂无交付文件" />
+            : <div className="flex gap-3 overflow-x-auto scrollbar-hide pb-1">{artifacts.map(a => <ArtifactCard key={a.artifact_id} artifact={a} />)}</div>
+          }
         </div>
       </div>
     </div>

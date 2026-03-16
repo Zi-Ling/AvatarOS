@@ -8,15 +8,40 @@ interface LogsViewProps {
 }
 
 export function LogsView({ logs }: LogsViewProps) {
-  const logsEndRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const prevLengthRef = useRef<number>(logs.length);
+  const isInitialMount = useRef(true);
 
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = containerRef.current;
+    if (!el) return;
+
+    if (isInitialMount.current) {
+      // 初次挂载：直接跳到底部，不做动画
+      el.scrollTop = el.scrollHeight;
+      isInitialMount.current = false;
+      prevLengthRef.current = logs.length;
+      return;
+    }
+
+    // 只有新增了日志才滚动
+    if (logs.length > prevLengthRef.current) {
+      // 判断用户是否已经手动滚上去了（距底部超过 100px 则不强制滚）
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom < 100) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+
+    prevLengthRef.current = logs.length;
   }, [logs]);
 
   return (
     <div className="h-full flex flex-col bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 font-mono">
-      <div className="flex-1 overflow-auto p-4 space-y-1 text-xs leading-relaxed custom-scrollbar">
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-auto p-4 space-y-1 text-xs leading-relaxed custom-scrollbar"
+      >
         {logs.length === 0 && (
           <div className="text-slate-400 dark:text-slate-600 italic mt-2 text-center">-- No logs available --</div>
         )}
@@ -54,7 +79,6 @@ export function LogsView({ logs }: LogsViewProps) {
             </div>
           );
         })}
-        <div ref={logsEndRef} />
       </div>
     </div>
   );

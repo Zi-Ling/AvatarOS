@@ -25,7 +25,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-export type DockTab = AppId | 'files';
+export type DockTab = AppId;
 
 interface AgentDockProps {
   activeTab: string;
@@ -102,7 +102,7 @@ export function AgentDock({ activeTab, onTabChange, isLeftPanelOpen, onToggleLef
   const agentStatus = isConnected ? 'idle' : 'idle';
 
   const handleTabClick = (tab: string) => {
-    const isPanelApp = tab === 'workspace' || tab === 'files';
+    const isPanelApp = tab === 'workspace';
 
     if (tab === activeTab) {
       if (isPanelApp) {

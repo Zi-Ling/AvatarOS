@@ -1,6 +1,6 @@
 const path = require("node:path");
 const { existsSync, readFileSync, writeFileSync, mkdirSync } = require("node:fs");
-const { app, BrowserWindow, ipcMain, screen } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, clipboard } = require("electron");
 
 const DEFAULT_HOST = process.env.RENDERER_HOST || "127.0.0.1";
 const DEFAULT_PORT = process.env.RENDERER_PORT || "3000";
@@ -182,6 +182,55 @@ function createMainWindow() {
 }
 
 ipcMain.handle("app:get-version", () => app.getVersion());
+
+// 读取系统剪贴板中的文件路径列表（Windows）
+ipcMain.handle("clipboard:read-file-paths", async () => {
+  if (process.platform !== 'win32') return [];
+
+  // 用 PowerShell 读取剪贴板文件列表（最可靠，支持多文件）
+  try {
+    const { execFile } = require('node:child_process');
+    const { promisify } = require('node:util');
+    const execFileAsync = promisify(execFile);
+    const ps = `
+Add-Type -AssemblyName System.Windows.Forms
+$files = [System.Windows.Forms.Clipboard]::GetFileDropList()
+if ($files -and $files.Count -gt 0) { $files -join "\`n" } else { "" }
+`.trim();
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command', ps
+    ], { timeout: 3000 });
+    const paths = stdout.split('\n').map(s => s.trim()).filter(s => s.length > 2 && /^[A-Za-z]:/.test(s));
+    if (paths.length > 0) return paths;
+  } catch (e) {
+    console.warn('[IPC] PowerShell clipboard error:', e.message);
+  }
+
+  // fallback: FileNameW 单文件
+  try {
+    const fileNameBuf = clipboard.readBuffer('FileNameW');
+    if (fileNameBuf && fileNameBuf.length > 0) {
+      const filePath = fileNameBuf.toString('ucs2').replace(/\0/g, '').trim();
+      if (filePath && filePath.length > 1) {
+        return [filePath];
+      }
+    }
+  } catch (e) {
+    console.warn('[IPC] FileNameW error:', e.message);
+  }
+
+  return [];
+});
+
+// 粘贴完成后清除剪贴板中的文件内容（写入空文本，不影响剪贴板历史）
+// 注：保留此 handler 供未来使用，当前不主动调用
+ipcMain.handle("clipboard:clear", () => {
+  try {
+    clipboard.writeText('');
+  } catch (e) {
+    console.warn('[IPC] clipboard:clear error:', e.message);
+  }
+});
 
 ipcMain.on("window:minimize", () => {
   if (mainWindow) mainWindow.minimize();

@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   History, CheckCircle2, XCircle, Loader2, ChevronRight, Clock,
   Cpu, AlertCircle, Paperclip, Download, GitBranch, Layers,
+  ShieldAlert, DollarSign,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -14,11 +15,74 @@ import {
 } from "@/lib/api/history";
 import { getSkillMeta } from "./StepPreview";
 import { LoadingSpinner, EmptyState } from "@/components/ui/StateViews";
+import { ApprovalView } from "./ApprovalView";
+import { CostView } from "./CostView";
+import { TraceViewer } from "./TraceViewer";
+import { useChatStore } from "@/stores/chatStore";
+import { useTaskStore } from "@/stores/taskStore";
+
+type HistorySubTab = "sessions" | "approval" | "cost" | "trace";
 
 // -----------------------------------------------------------------------
 // HistoryView root
 // -----------------------------------------------------------------------
 export function HistoryView() {
+  const [subTab, setSubTab] = useState<HistorySubTab>("sessions");
+  const { pendingApprovals } = useTaskStore();
+  const { sessionId } = useChatStore();
+
+  const subTabs: { id: HistorySubTab; label: string; icon: React.ElementType; badge?: number }[] = [
+    { id: "sessions", label: "Sessions", icon: History },
+    { id: "approval", label: "Approval", icon: ShieldAlert, badge: pendingApprovals.length > 0 ? pendingApprovals.length : undefined },
+    { id: "cost", label: "Cost", icon: DollarSign },
+    { id: "trace", label: "Trace", icon: GitBranch },
+  ];
+
+  return (
+    <div className="h-full flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-950">
+      {/* 子 tab bar */}
+      <div className="shrink-0 flex items-center gap-1 px-3 py-1.5 bg-white dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800">
+        {subTabs.map(t => {
+          const Icon = t.icon;
+          const active = subTab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setSubTab(t.id)}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+                active
+                  ? "bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100"
+                  : "text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50"
+              )}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {t.label}
+              {t.badge !== undefined && (
+                <span className="ml-0.5 px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-amber-500 text-white">
+                  {t.badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 子视图内容 */}
+      <div className="flex-1 overflow-hidden">
+        {subTab === "sessions" && <SessionsView />}
+        {subTab === "approval" && <ApprovalView />}
+        {subTab === "cost" && <CostView />}
+        {subTab === "trace" && <TraceViewer sessionId={sessionId ?? ""} />}
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------
+// SessionsView（原 HistoryView 主体内容，抽出为独立组件）
+// -----------------------------------------------------------------------
+function SessionsView() {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);

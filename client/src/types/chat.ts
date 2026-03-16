@@ -1,7 +1,5 @@
 /**
  * Chat Domain Types
- *
- * 从 chatStore 提取的共享类型，供 API、hooks、组件共用。
  */
 
 export type TaskStep = {
@@ -46,10 +44,34 @@ export type RunSummaryData = {
   durationMs: number;
   hadApproval: boolean;
   success: boolean;
-  keyOutputs: Array<{ stepName: string; skillName?: string; summary?: string }>;
+  // 终态：completed | failed | partial | paused | cancelled
+  terminalStatus?: "completed" | "failed" | "partial" | "paused" | "cancelled";
+  // LLM 生成的用户态说明（Final Answer）
+  finalAnswer?: string;
+  keyOutputs: Array<{ stepName: string; skillName?: string; summary?: string; artifacts?: string[] }>;
 };
 
-export type MessageType = "chat" | "task_progress" | "approval" | "run_summary";
+// ─── Message Kind System ───────────────────────────────────────────────────
+// kind = top-level category, subtype = variant within that category
+// This replaces the flat messageType enum to avoid switch-hell as types grow.
+
+export type MessageKind =
+  | "chat"       // plain AI reply or user message
+  | "run"        // agent execution lifecycle (block / paused / cancelled)
+  | "approval"   // human-in-the-loop approval request
+  | "summary";   // run completion summary
+
+export type RunSubtype = "block" | "paused" | "cancelled";
+
+// Legacy flat type — kept for migration path only
+export type MessageType =
+  | "chat"
+  | "task_progress"   // legacy
+  | "run_block"       // → kind:"run" subtype:"block"
+  | "approval"        // → kind:"approval"
+  | "run_summary"     // → kind:"summary"
+  | "task_paused"     // → kind:"run" subtype:"paused"
+  | "task_cancelled"; // → kind:"run" subtype:"cancelled"
 
 export type Message = {
   id: string;
@@ -60,18 +82,72 @@ export type Message = {
   attachments?: Attachment[];
   liked?: boolean;
   disliked?: boolean;
+
+  // ── New kind/subtype system ──────────────────────────────────────────
+  kind?: MessageKind;
+  subtype?: RunSubtype;
+
+  // ── Legacy messageType (still used for backward compat + migration) ──
+  messageType?: MessageType;
+
+  // ── run kind payload ─────────────────────────────────────────────────
+  /** run_block / paused / cancelled: which run this message belongs to */
+  runId?: string;
+  /** paused snapshot */
+  pausedAtStep?: number;
+  pausedTotalSteps?: number;
+
+  // ── approval kind payload ─────────────────────────────────────────────
+  approvalRequest?: ApprovalRequest;
+  approvalStatus?: ApprovalStatus;
+  approvalComment?: string;
+
+  // ── summary kind payload ──────────────────────────────────────────────
+  runSummary?: RunSummaryData;
+
+  // ── Legacy task fields (kept for rehydration migration) ──────────────
   isTask?: boolean;
   taskId?: string;
   taskSteps?: TaskStep[];
   taskStatus?: "planning" | "executing" | "completed" | "failed";
-  // Extended message types
-  messageType?: MessageType;
-  approvalRequest?: ApprovalRequest;
-  approvalStatus?: ApprovalStatus;
-  approvalComment?: string;
-  runSummary?: RunSummaryData;
-  // Progress tracking (for task_progress messages)
   currentStepName?: string;
   completedStepCount?: number;
   totalStepCount?: number;
 };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+/** Resolve effective kind from a message (supports both new and legacy) */
+export function resolveKind(msg: Message): MessageKind {
+  if (msg.kind) return msg.kind;
+  // map legacy messageType → kind
+  switch (msg.messageType) {
+    case "run_block":
+    case "task_progress":
+    case "task_paused":
+    case "task_cancelled":
+      return "run";
+    case "approval":
+      return "approval";
+    case "run_summary":
+      return "summary";
+    default:
+      return "chat";
+  }
+}
+
+/** Resolve effective subtype for run-kind messages */
+export function resolveRunSubtype(msg: Message): RunSubtype | undefined {
+  if (msg.subtype) return msg.subtype;
+  switch (msg.messageType) {
+    case "run_block":
+    case "task_progress":
+      return "block";
+    case "task_paused":
+      return "paused";
+    case "task_cancelled":
+      return "cancelled";
+    default:
+      return undefined;
+  }
+}

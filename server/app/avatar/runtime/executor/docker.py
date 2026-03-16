@@ -158,11 +158,20 @@ class DockerExecutor(SkillExecutor):
 
         # 从 context 获取 workspace 挂载配置
         workspace_volumes = None
+        base_path_str = None
         if hasattr(context, "extra") and context.extra.get("workspace") is not None:
             workspace_volumes = context.extra["workspace"].get_docker_volumes()
+            # base_path 用 workspace output_dir，让文件落到可扫描目录
+            base_path_str = str(context.extra["workspace"].output_dir)
+        elif hasattr(context, "base_path") and context.base_path is not None:
+            # fallback：没有 SessionWorkspace 时，把 base_path 挂到容器 /workspace
+            _bp = str(context.base_path.resolve()) if hasattr(context.base_path, "resolve") else str(context.base_path)
+            workspace_volumes = {_bp: {"bind": "/workspace", "mode": "rw"}}
+            base_path_str = _bp
+            logger.debug(f"[DockerExecutor] No SessionWorkspace, fallback mount base_path={_bp} → /workspace")
         
         try:
-            result_dict = await self._run_python_in_container(code, workspace_volumes)
+            result_dict = await self._run_python_in_container(code, workspace_volumes, base_path=base_path_str)
             logger.debug(f"[DockerExecutor] Success: {api_name}")
             output_model = skill.spec.output_model
             return output_model(**result_dict)
@@ -176,7 +185,7 @@ class DockerExecutor(SkillExecutor):
                 stderr=str(e)
             )
     
-    async def _run_python_in_container(self, code: str, workspace_volumes: Optional[dict] = None) -> dict:
+    async def _run_python_in_container(self, code: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None) -> dict:
         """在 Docker 容器中执行 Python 代码"""
         import docker
         
@@ -192,6 +201,7 @@ class DockerExecutor(SkillExecutor):
                     self._run_container_sync,
                     tmpdir,
                     workspace_volumes,
+                    base_path,
                 )
                 return result
             except docker.errors.ContainerError as e:
@@ -215,15 +225,15 @@ class DockerExecutor(SkillExecutor):
                     "variables": {},
                 }
     
-    def _run_container_sync(self, tmpdir: str, workspace_volumes: Optional[dict] = None) -> dict:
+    def _run_container_sync(self, tmpdir: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None) -> dict:
         """同步运行容器（在线程池中执行）"""
         # 容器池里的容器创建时没有挂载 workspace volumes，
         # 如果有 workspace_volumes 必须走 _run_without_pool（新建容器并挂载）
         if self.use_pool and self._pool and not workspace_volumes:
-            return self._run_with_pool(tmpdir)
+            return self._run_with_pool(tmpdir, base_path=base_path)
         return self._run_without_pool(tmpdir, workspace_volumes)
     
-    def _run_with_pool(self, tmpdir: str) -> dict:
+    def _run_with_pool(self, tmpdir: str, base_path: Optional[str] = None) -> dict:
         """使用容器池执行，自动适配 Docker/Podman"""
         from .container_pool import exec_run_in_container
 
@@ -250,12 +260,30 @@ class DockerExecutor(SkillExecutor):
 
             if exit_code == 0:
                 # 从 stdout 识别 __OUTPUT__: 标记行提取结构化输出
-                import json as _json
                 structured_output = _extract_output_from_stdout(stdout)
-                # _save_binary 写文件后 _output({"__file__": path}) 输出结构化对象，填充 file_path 字段
                 _file_path = None
                 if isinstance(structured_output, dict) and "__file__" in structured_output:
-                    _file_path = structured_output["__file__"]
+                    container_file_path = structured_output["__file__"]
+                    _file_path = container_file_path
+
+                    # 把容器内生成的文件 docker cp 到宿主机 base_path
+                    if base_path:
+                        try:
+                            import tarfile, io
+                            # docker cp 用 get_archive API
+                            bits, _ = container.get_archive(container_file_path)
+                            tar_bytes = b"".join(bits)
+                            with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tar:
+                                # 只提取文件名，放到 base_path 下
+                                for member in tar.getmembers():
+                                    member.name = os.path.basename(member.name)
+                                    tar.extract(member, path=base_path)
+                            host_file = os.path.join(base_path, os.path.basename(container_file_path))
+                            _file_path = host_file
+                            logger.info(f"[DockerExecutor] Copied container file {container_file_path} → {host_file}")
+                        except Exception as cp_err:
+                            logger.warning(f"[DockerExecutor] Failed to copy file from container: {cp_err}")
+
                 return {
                     "success": True,
                     "message": "Execution completed",

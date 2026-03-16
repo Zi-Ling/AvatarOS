@@ -76,52 +76,73 @@ from playwright.async_api import Page, BrowserContext
 # 安全约束：禁止访问 preamble 注入的内部变量
 _WORKSPACE = Path(__file_workspace__)
 _ARTIFACTS = []
+_current_page = None  # 当前活跃页面，open_page() 后自动设置
 
 # ── helper API（推荐 LLM 使用这些原语，而不是裸 Playwright）────────────────
 
 async def open_page(url: str, wait_until: str = "domcontentloaded") -> Page:
-    \"\"\"打开页面并等待加载\"\"\"
+    \"\"\"打开页面并等待加载，自动成为当前页\"\"\"
+    global _current_page
     page = await _ctx.new_page()
-    page.set_default_timeout(15000)
+    page.set_default_timeout(30000)
     await page.goto(url, wait_until=wait_until)
+    # 等待页面稳定（处理弹窗/重定向）
+    try:
+        await page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+    _current_page = page
     return page
 
-async def wait_for(page: Page, selector: str, timeout: int = 10000):
-    \"\"\"等待元素出现\"\"\"
-    await page.wait_for_selector(selector, timeout=timeout)
+def _resolve_page(page=None) -> Page:
+    \"\"\"解析 page 参数：优先用传入的，否则用当前页\"\"\"
+    p = page if page is not None else _current_page
+    if p is None:
+        raise RuntimeError("No page available. Call open_page(url) first.")
+    return p
 
-async def click(page: Page, selector: str):
-    \"\"\"安全点击（等待可见后点击）\"\"\"
-    await page.locator(selector).click()
+async def wait_for(selector: str, page=None, timeout: int = 10000):
+    \"\"\"等待元素出现（page 可省略，默认用当前页）\"\"\"
+    await _resolve_page(page).wait_for_selector(selector, timeout=timeout)
 
-async def fill(page: Page, selector: str, value: str):
-    \"\"\"填写表单字段\"\"\"
-    await page.locator(selector).fill(value)
+async def click(selector: str, page=None):
+    \"\"\"安全点击（等待可见后点击，page 可省略）\"\"\"
+    p = _resolve_page(page)
+    await p.locator(selector).wait_for(state="visible")
+    await p.locator(selector).click()
 
-async def extract_text(page: Page, selector: str = "body") -> str:
-    \"\"\"提取指定区域的纯文本\"\"\"
-    return await page.locator(selector).inner_text()
+async def fill(selector: str, value: str, page=None):
+    \"\"\"填写表单字段（page 可省略）\"\"\"
+    p = _resolve_page(page)
+    await p.locator(selector).wait_for(state="visible")
+    await p.locator(selector).fill(value)
 
-async def extract_table(page: Page, selector: str = "table") -> list:
-    \"\"\"
-    多级回退提取表格数据：
-    1. 优先用 all_inner_texts() 取每行文本
-    2. 回退到 inner_html() 交给后续 python.run 解析
-    \"\"\"
+async def press_key(key: str, page=None):
+    \"\"\"按键（如 Enter），page 可省略\"\"\"
+    await _resolve_page(page).keyboard.press(key)
+
+async def extract_text(selector: str = "body", page=None) -> str:
+    \"\"\"提取指定区域的纯文本（page 可省略）\"\"\"
+    return await _resolve_page(page).locator(selector).inner_text()
+
+async def extract_table(selector: str = "table", page=None) -> list:
+    \"\"\"多级回退提取表格数据（page 可省略）\"\"\"
+    p = _resolve_page(page)
     try:
-        rows = await page.locator(f"{selector} tr").all()
+        rows = await p.locator(f"{selector} tr").all()
         result = []
         for row in rows:
             cells = await row.locator("td, th").all_inner_texts()
             result.append(cells)
         return result
     except Exception:
-        html = await page.locator(selector).inner_html()
+        html = await p.locator(selector).inner_html()
         return [{"__raw_html__": html}]
 
-async def extract_links(page: Page, selector: str = "a") -> list:
-    \"\"\"提取链接列表\"\"\"
-    links = await page.locator(selector).all()
+async def extract_links(selector: str = "a", page=None) -> list:
+    \"\"\"提取链接列表（page 可省略）\"\"\"
+    p = _resolve_page(page)
+    links = await p.locator(selector).all()
     result = []
     for link in links:
         href = await link.get_attribute("href")
@@ -130,49 +151,46 @@ async def extract_links(page: Page, selector: str = "a") -> list:
             result.append({"text": text.strip(), "href": href})
     return result
 
-async def save_screenshot(page: Page, filename: str = "") -> str:
-    \"\"\"截图并保存到 workspace，返回文件路径\"\"\"
+async def save_screenshot(filename: str = "", page=None) -> str:
+    \"\"\"截图并保存到 workspace（page 可省略）\"\"\"
     import time as _time
     if not filename:
         filename = f"screenshot_{int(_time.time() * 1000)}.png"
     safe_name = re.sub(r'[^\\w\\-_\\.]', '_', filename)[:64]
     path = _WORKSPACE / safe_name
-    await page.screenshot(path=str(path), full_page=False)
+    await _resolve_page(page).screenshot(path=str(path), full_page=False)
     _ARTIFACTS.append(str(path))
     print(f"[artifact] {path}")
     return str(path)
 
-async def save_full_screenshot(page: Page, filename: str = "") -> str:
-    \"\"\"全页截图\"\"\"
+async def save_full_screenshot(filename: str = "", page=None) -> str:
+    \"\"\"全页截图（page 可省略）\"\"\"
     import time as _time
     if not filename:
         filename = f"screenshot_full_{int(_time.time() * 1000)}.png"
     safe_name = re.sub(r'[^\\w\\-_\\.]', '_', filename)[:64]
     path = _WORKSPACE / safe_name
-    await page.screenshot(path=str(path), full_page=True)
+    await _resolve_page(page).screenshot(path=str(path), full_page=True)
     _ARTIFACTS.append(str(path))
     print(f"[artifact] {path}")
     return str(path)
 
-async def get_page_content(page: Page, selector: str = None) -> str:
-    \"\"\"
-    多级回退获取页面内容：
-    1. 有 selector → 取该容器 inner_text（最小上下文）
-    2. 无 selector → 取 body inner_text（去掉 HTML 噪音）
-    3. 需要 HTML 时显式调用 get_page_html()
-    \"\"\"
+async def get_page_content(selector: str = None, page=None) -> str:
+    \"\"\"获取页面文本内容（page 可省略）\"\"\"
+    p = _resolve_page(page)
     if selector:
         try:
-            return await page.locator(selector).inner_text()
+            return await p.locator(selector).inner_text()
         except Exception:
             pass
-    return await page.locator("body").inner_text()
+    return await p.locator("body").inner_text()
 
-async def get_page_html(page: Page, selector: str = None) -> str:
-    \"\"\"获取页面 HTML（最后手段，内容较大）\"\"\"
+async def get_page_html(selector: str = None, page=None) -> str:
+    \"\"\"获取页面 HTML（page 可省略）\"\"\"
+    p = _resolve_page(page)
     if selector:
-        return await page.locator(selector).inner_html()
-    return await page.content()
+        return await p.locator(selector).inner_html()
+    return await p.content()
 
 async def save_file(content: str, filename: str, encoding: str = "utf-8") -> str:
     \"\"\"保存文本内容到 workspace 文件\"\"\"
@@ -193,11 +211,19 @@ class BrowserRunInput(SkillInput):
     script: str = Field(
         ...,
         description=(
-            "Playwright async Python script. Use helper API: open_page(), wait_for(), click(), "
-            "fill(), extract_text(), extract_table(), extract_links(), save_screenshot(), "
-            "get_page_content(), get_page_html(), save_file(). "
-            "Script runs inside async def _run(): ... — do NOT define async def main(). "
-            "Use print() for outputs. Files saved via save_screenshot()/save_file() become artifacts."
+            "Playwright async Python script. Use helper API — page parameter is OPTIONAL (auto-uses current page): "
+            "open_page(url) → opens page and sets it as current; "
+            "fill(selector, value) → fills input; "
+            "click(selector) → clicks element; "
+            "press_key(key) → presses keyboard key (e.g. 'Enter'); "
+            "wait_for(selector) → waits for element; "
+            "extract_text(selector?) → returns text; "
+            "get_page_content(selector?) → returns body text; "
+            "save_screenshot() → saves screenshot artifact; "
+            "save_file(content, filename) → saves text file. "
+            "Example: page = await open_page('https://baidu.com'); await fill('input#kw', 'query'); await press_key('Enter'); await wait_for('#content_left'); text = await extract_text('#content_left'); print(text). "
+            "Do NOT call asyncio.run(). Do NOT define async def main(). Do NOT use 'if __name__==\"__main__\"'. "
+            "Just write await statements directly. Use print() for all outputs."
         ),
     )
     start_url: Optional[str] = Field(None, description="Initial URL to open before script runs (optional)")
@@ -275,40 +301,44 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
         artifacts: List[str] = []
         final_url: Optional[str] = None
         page_title: Optional[str] = None
-        page_ref: list = []  # 用 list 让内层函数可修改
 
         try:
             # 构建完整脚本：preamble + 用户脚本包装在 async def _run()
             preamble = _PREAMBLE.replace("__file_workspace__", repr(str(workspace)))
 
-            # 用户脚本包装
-            indented_script = textwrap.indent(params.script, "    ")
-            full_script = f"{preamble}\n\nasync def _run(_ctx, _page_ref):\n{indented_script}\n"
+            # 清理 LLM 可能生成的 asyncio.run(...) 调用（在已有 event loop 里会报错）
+            cleaned_script = re.sub(r'^\s*asyncio\.run\s*\(.*\)\s*$', '', params.script, flags=re.MULTILINE)
+            # 同时移除 if __name__ == "__main__": 块
+            cleaned_script = re.sub(r'^\s*if\s+__name__\s*==\s*["\']__main__["\']\s*:.*', '', cleaned_script, flags=re.MULTILINE)
 
-            # 执行环境
-            exec_globals: Dict[str, Any] = {}
+            # 用户脚本包装为无参 async def _main()，_ctx 通过 exec_globals 注入
+            indented_script = textwrap.indent(cleaned_script, "    ")
+            full_script = f"{preamble}\n\nasync def _main():\n{indented_script}\n"
+
+            # 执行环境：预注入 _ctx（BrowserContext），preamble helper 直接引用
+            exec_globals: Dict[str, Any] = {"_ctx": context}
             exec(full_script, exec_globals)
-            _run_fn = exec_globals.get("_run")
-            if not _run_fn:
-                raise ValueError("Script must not redefine _run — use the helper API directly")
+            _main_fn = exec_globals.get("_main")
+            if not _main_fn:
+                raise ValueError("Script compilation failed — _main not found")
 
             # 如果有 start_url，先打开一个初始页面
-            initial_page = None
             if params.start_url:
                 initial_page = await context.new_page()
                 initial_page.set_default_timeout(_DEFAULT_TIMEOUT)
                 await initial_page.goto(params.start_url, wait_until="domcontentloaded")
-                page_ref.append(initial_page)
+                # 同步到 exec_globals 里的 _current_page，让 helper 能感知
+                exec_globals["_current_page"] = initial_page
 
             # 捕获 print 输出
-            import io, sys as _sys
+            import io
+            import contextlib
             stdout_buf = io.StringIO()
             stderr_buf = io.StringIO()
 
-            import contextlib
             with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
                 await asyncio.wait_for(
-                    _run_fn(context, page_ref),
+                    _main_fn(),
                     timeout=params.timeout,
                 )
 
@@ -370,6 +400,8 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
             )
             has_output = bool(stdout_out.strip()) or bool(artifacts)
             if has_fetch_intent and not has_output:
+                if stderr_out.strip():
+                    logger.warning(f"[browser.run] Script stderr:\n{stderr_out[:2000]}")
                 return BrowserRunOutput(
                     success=False,
                     message=(

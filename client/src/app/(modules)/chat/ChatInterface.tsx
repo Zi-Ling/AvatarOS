@@ -8,6 +8,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useLanguage } from "@/theme/i18n/LanguageContext";
 import { useChatStore } from "@/stores/chatStore";
 import { useChat } from "@/lib/hooks/useChat";
+import { useTaskStore } from "@/stores/taskStore";
 
 export default function ChatInterface() {
   const { language } = useLanguage();
@@ -41,6 +42,9 @@ export default function ChatInterface() {
   const [showNewChatDialog, setShowNewChatDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [messageToDelete, setMessageToDelete] = useState<string | null>(null);
+
+  const { pendingApprovals } = useTaskStore();
+  const hasPendingApproval = pendingApprovals.length > 0;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { isRecording, isTranscribing, audioLevel, toggleRecording } = VoiceRecording();
@@ -127,15 +131,17 @@ export default function ChatInterface() {
       if (messageIndex === -1) return;
       const previousMessages = messages.slice(0, messageIndex);
       const lastUserMessage = [...previousMessages].reverse().find((msg) => msg.role === "user");
-      if (lastUserMessage) {
-        useChatStore.setState((state) => ({
-          messages: state.messages.filter((m) => m.id !== id),
-        }));
-        setInputValue(lastUserMessage.content);
-        handleSend();
-      }
+      if (!lastUserMessage) return;
+
+      // Remove the AI message being regenerated
+      useChatStore.setState((state) => ({
+        messages: state.messages.filter((m) => m.id !== id),
+      }));
+
+      // Pass content directly to handleSend to avoid async state issue
+      handleSend(lastUserMessage.content);
     },
-    [messages, setInputValue, handleSend]
+    [messages, handleSend]
   );
 
   return (
@@ -171,6 +177,7 @@ export default function ChatInterface() {
         formatFileSize={formatFileSize}
         canCancel={canCancel}
         hasActiveTask={!!activeTask && activeTask.status === "executing"}
+        hasPendingApproval={hasPendingApproval}
       />
 
       <ConfirmDialog

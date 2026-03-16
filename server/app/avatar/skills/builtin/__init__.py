@@ -16,6 +16,7 @@ Importing this package registers all builtin skills.
 from ..core import python  # noqa: F401
 from ..core import fs  # noqa: F401
 from ..core import net  # noqa: F401
+from ..core import web  # noqa: F401
 from ..core import state  # noqa: F401
 from ..core import memory  # noqa: F401
 from ..core import approval  # noqa: F401

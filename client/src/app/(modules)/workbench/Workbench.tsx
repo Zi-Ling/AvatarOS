@@ -1,16 +1,13 @@
 "use client";
 
-import React from "react";
-import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2, ShieldAlert, DollarSign, LayoutGrid, GitBranch } from "lucide-react";
+import React, { useRef, useState, useEffect, useCallback } from "react";
+import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2, LayoutGrid, ChevronLeft, ChevronRight } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/components/providers/SocketProvider";
 import { ActiveTaskView } from "./_components/ActiveTaskView";
 import { LogsView } from "./_components/LogsView";
 import { HistoryView } from "./_components/HistoryView";
-import { ApprovalView } from "./_components/ApprovalView";
-import { CostView } from "./_components/CostView";
-import { TraceViewer } from "./_components/TraceViewer";
 import { useTaskExecution } from "@/lib/hooks/useTaskExecution";
 import { useWorkbenchStore, type WorkbenchTab } from "@/stores/workbenchStore";
 import { useTaskStore } from "@/stores/taskStore";
@@ -33,6 +30,34 @@ export default function Workbench() {
   const { pendingApprovals } = useTaskStore();
   const { sessionId } = useChatStore();
 
+  // Tab bar scroll state
+  const tabScrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const updateScrollState = useCallback(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    setCanScrollLeft(el.scrollLeft > 4);
+    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+  }, []);
+
+  useEffect(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    updateScrollState();
+    el.addEventListener("scroll", updateScrollState, { passive: true });
+    const ro = new ResizeObserver(updateScrollState);
+    ro.observe(el);
+    return () => { el.removeEventListener("scroll", updateScrollState); ro.disconnect(); };
+  }, [updateScrollState]);
+
+  const scrollTabs = (dir: "left" | "right") => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir === "left" ? -120 : 120, behavior: "smooth" });
+  };
+
   const tabs: TabConfig[] = [
     {
       id: "overview",
@@ -51,16 +76,13 @@ export default function Workbench() {
     },
     { id: "editor", label: "Editor", icon: Code2, badge: openFiles.length > 0 ? openFiles.length : undefined, color: "text-orange-500" },
     { id: "logs", label: "Logs", icon: Terminal, badge: logs.length > 0 ? logs.length : undefined, color: "text-blue-500" },
-    { id: "history", label: "History", icon: History, color: "text-purple-500" },
     {
-      id: "approval",
-      label: "Approval",
-      icon: ShieldAlert,
+      id: "history",
+      label: "History",
+      icon: History,
       badge: pendingApprovals.length > 0 ? pendingApprovals.length : undefined,
-      color: "text-amber-500",
+      color: "text-purple-500",
     },
-    { id: "cost", label: "Cost", icon: DollarSign, color: "text-yellow-500" },
-    { id: "trace", label: "Trace", icon: GitBranch, color: "text-cyan-500" },
   ];
 
   return (
@@ -80,46 +102,69 @@ export default function Workbench() {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-x-auto scrollbar-hide relative">
-        {tabs.map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={cn(
-                "relative flex items-center gap-2 px-4 py-3 text-xs font-medium transition-all duration-200",
-                "border-b-2 whitespace-nowrap",
-                isActive
-                  ? "border-indigo-500 text-slate-900 dark:text-white bg-slate-50 dark:bg-slate-800/50"
-                  : "border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/30"
-              )}
-            >
-              <Icon className={cn("w-3.5 h-3.5 transition-colors", isActive && tab.color)} />
-              <span>{tab.label}</span>
-              {tab.badge && (
-                <motion.span
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  className={cn(
-                    "ml-1 px-1.5 py-0.5 text-[10px] font-bold rounded-full",
-                    isActive ? "bg-indigo-500 text-white" : "bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300"
-                  )}
-                >
-                  {tab.badge}
-                </motion.span>
-              )}
-              {isActive && (
-                <motion.div
-                  layoutId="activeTabIndicator"
-                  className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500"
-                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                />
-              )}
-            </button>
-          );
-        })}
+      <div className="relative flex items-stretch border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+        {/* 左箭头 */}
+        {canScrollLeft && (
+          <button
+            onClick={() => scrollTabs("left")}
+            className="shrink-0 flex items-center justify-center w-7 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors z-10 border-r border-slate-100 dark:border-slate-800"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+        )}
+
+        {/* Tab 列表 */}
+        <div ref={tabScrollRef} className="flex flex-1 overflow-x-auto scrollbar-hide min-w-0">
+          {tabs.map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={cn(
+                  "relative flex items-center gap-2 px-4 py-3 text-xs font-medium transition-all duration-200",
+                  "border-b-2 whitespace-nowrap shrink-0",
+                  isActive
+                    ? "border-indigo-500 text-slate-900 dark:text-white bg-slate-50 dark:bg-slate-800/50"
+                    : "border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/30"
+                )}
+              >
+                <Icon className={cn("w-3.5 h-3.5 transition-colors", isActive && tab.color)} />
+                <span>{tab.label}</span>
+                {tab.badge && (
+                  <motion.span
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    className={cn(
+                      "ml-1 px-1.5 py-0.5 text-[10px] font-bold rounded-full",
+                      isActive ? "bg-indigo-500 text-white" : "bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300"
+                    )}
+                  >
+                    {tab.badge}
+                  </motion.span>
+                )}
+                {isActive && (
+                  <motion.div
+                    layoutId="activeTabIndicator"
+                    className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500"
+                    transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* 右箭头 */}
+        {canScrollRight && (
+          <button
+            onClick={() => scrollTabs("right")}
+            className="shrink-0 flex items-center justify-center w-7 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors z-10 border-l border-slate-100 dark:border-slate-800"
+          >
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
 
       {/* Content */}
@@ -154,11 +199,6 @@ export default function Workbench() {
               )}
               {activeTab === "logs" && <LogsView logs={logs} />}
               {activeTab === "history" && <HistoryView />}
-              {activeTab === "approval" && <ApprovalView />}
-              {activeTab === "cost" && <CostView />}
-              {activeTab === "trace" && (
-                <TraceViewer sessionId={sessionId ?? ""} />
-              )}
             </motion.div>
           )}
         </AnimatePresence>

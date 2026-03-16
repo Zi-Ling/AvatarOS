@@ -32,7 +32,7 @@ export const APP_REGISTRY: AppDefinition[] = [
     icon: FolderOpen, 
     color: 'text-blue-500', 
     path: '/chat',
-    description: 'File system and resource management.'
+    description: 'File explorer and workspace management.'
   },
   { 
     id: 'schedule', 

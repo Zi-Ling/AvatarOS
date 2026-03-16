@@ -162,18 +162,21 @@ class CompletionGate:
                 reason=f"{len(blocking_failed)} blocking verifier(s) failed",
             )
 
-        # Rule 4: all blocking PASSED + coverage satisfied → PASS
-        if blocking_passed and not blocking_failed and coverage_summary.is_currently_covered:
+        # Rule 2 (verifier-first): blocking verifiers exist and ALL passed → PASS
+        # Verifier 结果是确定性执行事实，优先级高于 GoalCoverageTracker 的
+        # 文本匹配。当 verifier 有结论时以 verifier 为准，不再要求 coverage
+        # 同时满足。GoalCoverageTracker 降级为无 verifier 场景的 fallback。
+        if blocking_passed and not blocking_failed:
             return GateDecision(
                 verdict=GateVerdict.PASS,
                 passed_count=passed_count,
                 failed_count=failed_count,
                 uncertain_count=uncertain_count,
                 uncertain_results=uncertain_results,
-                reason="All blocking verifiers passed and coverage satisfied",
+                reason="All blocking verifiers passed (verifier-first rule)",
             )
 
-        # Rule 5: critical uncertain weight > threshold → UNCERTAIN
+        # Rule 3: critical uncertain weight > threshold → UNCERTAIN
         critical_uncertain_weight = sum(
             v.spec.weight
             for v in self._registry._all
@@ -197,26 +200,26 @@ class CompletionGate:
                 llm_judge_prompt=self._build_llm_prompt(results),
             )
 
-        # Coverage not satisfied → FAIL (sub-goals incomplete)
-        if not coverage_summary.is_currently_covered:
+        # Rule 4 (coverage fallback): 无 blocking verifier 时，以 coverage 为准
+        if coverage_summary.is_currently_covered:
             return GateDecision(
-                verdict=GateVerdict.FAIL,
+                verdict=GateVerdict.PASS,
                 passed_count=passed_count,
                 failed_count=failed_count,
                 uncertain_count=uncertain_count,
-                failed_results=[],
                 uncertain_results=uncertain_results,
-                reason="Sub-goals not currently satisfied",
+                reason="No blocking verifiers; coverage satisfied (fallback rule)",
             )
 
-        # Default: PASS (no blocking failures, coverage ok)
+        # Rule 5: coverage not satisfied and no verifier evidence → FAIL
         return GateDecision(
-            verdict=GateVerdict.PASS,
+            verdict=GateVerdict.FAIL,
             passed_count=passed_count,
             failed_count=failed_count,
             uncertain_count=uncertain_count,
+            failed_results=[],
             uncertain_results=uncertain_results,
-            reason="Verification passed",
+            reason="No blocking verifiers passed and sub-goals not covered",
         )
 
     # ------------------------------------------------------------------

@@ -232,7 +232,7 @@ class FsWriteSkill(BaseSkill[FsWriteInput, FsWriteOutput]):
             for item in params.writes:
                 ok, msg, nbytes = await self._write_one(ctx, item)
                 if ok:
-                    results.append(item.path)
+                    results.append(msg)  # msg = str(target) 绝对路径，与单文件模式一致
                     total_bytes += nbytes
                 else:
                     failed.append(f"{item.path}: {msg}")

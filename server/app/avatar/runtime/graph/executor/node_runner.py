@@ -139,7 +139,13 @@ class NodeRunner:
 
         # Workspace is resolved once by GraphRuntime and stored on ExecutionContext.
         # NodeRunner has no global state dependency.
-        session_id = getattr(context, "session_id", None) or "default"
+        # Prefer exec_session_id (ExecutionSession UUID) for trace correlation,
+        # fallback to identity.session_id, then "default".
+        session_id = (
+            (context.env.get("exec_session_id") if isinstance(getattr(context, "env", None), dict) else None)
+            or getattr(getattr(context, "identity", None), "session_id", None)
+            or "default"
+        )
         workspace = getattr(context, "workspace", None) or self.workspace
 
         # --- DB Step 持久化（节点开始）---
@@ -504,7 +510,11 @@ class NodeRunner:
         if self.trace_store is None:
             return
         try:
-            session_id = getattr(context, "session_id", None) or "default"
+            session_id = (
+                (context.env.get("exec_session_id") if isinstance(getattr(context, "env", None), dict) else None)
+                or getattr(getattr(context, "identity", None), "session_id", None)
+                or "default"
+            )
             graph_id   = getattr(context, "graph_id", None)
 
             self.trace_store.record_step(

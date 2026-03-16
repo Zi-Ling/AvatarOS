@@ -1,24 +1,53 @@
 FROM python:3.13-slim
 
-# Chromium 运行时 OS 依赖（browser.run skill 需要）
+# ── System Dependencies ─────────────────────────────────────────────
+# Chromium runtime (browser.run skill)
+# Tesseract OCR (pytesseract fallback)
+# Browser stability patches (libxshmfence1, ca-certificates, xdg-utils)
+# RAR extraction support (unrar)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
-    libatspi2.0-0 libwayland-client0 fonts-noto-cjk fonts-liberation \
+    libatspi2.0-0 libwayland-client0 libxshmfence1 \
+    fonts-noto-cjk fonts-liberation \
+    ca-certificates wget xdg-utils \
+    tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
+    unrar-free file \
+    libcairo2-dev libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 依赖（数据处理 + 网络 + 浏览器自动化 + Office 文档处理）
-RUN pip install --no-cache-dir \
-    numpy pandas openpyxl scipy matplotlib pillow \
-    requests httpx beautifulsoup4 lxml pydantic playwright \
-    python-docx python-pptx
+# ── Python Dependencies ─────────────────────────────────────────────
 
-# 安装 Chromium（仅 chromium，节省空间）
+# Data processing + scientific computing
+# Networking + browser automation
+# Office documents (Word/Excel/PPT) + document conversion
+# PDF processing (read/generate/table extraction/rendering)
+# Image processing + OCR + QR/barcode
+# Web content extraction
+# Archive + file type detection
+# Data formats + encoding + text utilities
+# Database + local query
+# Machine learning
+RUN pip install --no-cache-dir \
+    numpy pandas openpyxl xlsxwriter xlrd odfpy pyarrow \
+    scipy matplotlib sympy scikit-learn tabulate \
+    requests httpx beautifulsoup4 lxml cssselect pydantic playwright \
+    python-docx python-pptx mammoth \
+    PyPDF2 reportlab pdfplumber pymupdf \
+    pillow opencv-python-headless qrcode[pil] python-barcode pytesseract \
+    readability-lxml trafilatura markdownify \
+    py7zr rarfile filetype \
+    chardet pyyaml toml markdown orjson \
+    python-dateutil rapidfuzz unidecode \
+    sqlalchemy duckdb \
+    pyxlsb jsonschema tenacity defusedxml cairosvg aiofiles
+
+# Install Chromium (chromium only, saves space)
 RUN playwright install chromium
 
-# 网络模式由容器启动参数控制，不由镜像决定：
-#   python.run  → network_mode=none   （无网络，代码沙箱）
-#   browser.run → network_mode=bridge （有网络，浏览器沙箱）
+# Network mode is controlled by container launch args, not the image:
+#   python.run  -> network_mode=none   (no network, code sandbox)
+#   browser.run -> network_mode=bridge (network enabled, browser sandbox)
 
 CMD ["sleep", "infinity"]

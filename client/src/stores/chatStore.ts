@@ -95,10 +95,27 @@ export const useChatStore = create<ChatState>()(
       onRehydrateStorage: () => (state) => {
         if (!state) return;
         state.messages = state.messages.map((m) => {
-          if (m.messageType) return m;
-          // Old task messages with steps → treat as plain chat (history)
+          // Already migrated
+          if (m.kind) return m;
+          // Map legacy messageType → kind/subtype
+          if (m.messageType === "run_block" || m.messageType === "task_progress") {
+            return { ...m, kind: "run" as const, subtype: "block" as const };
+          }
+          if (m.messageType === "task_paused") {
+            return { ...m, kind: "run" as const, subtype: "paused" as const };
+          }
+          if (m.messageType === "task_cancelled") {
+            return { ...m, kind: "run" as const, subtype: "cancelled" as const };
+          }
+          if (m.messageType === "approval") {
+            return { ...m, kind: "approval" as const };
+          }
+          if (m.messageType === "run_summary") {
+            return { ...m, kind: "summary" as const };
+          }
+          // Old task messages with steps → plain chat
           if (m.isTask || m.taskSteps?.length) {
-            return { ...m, messageType: 'chat' as const, taskSteps: undefined };
+            return { ...m, kind: "chat" as const, taskSteps: undefined };
           }
           return m;
         });

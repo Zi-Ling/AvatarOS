@@ -6,6 +6,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   maximizeWindow: () => ipcRenderer.send("window:maximize"),
   closeWindow: () => ipcRenderer.send("window:close"),
+  // Clipboard
+  readClipboardFilePaths: () => ipcRenderer.invoke("clipboard:read-file-paths"),
+  clearClipboard: () => ipcRenderer.invoke("clipboard:clear"),
   // Floating window APIs
   expandFloatingWindow: () => ipcRenderer.send("floating:expand"),
   resizeFloatingExpanded: () => ipcRenderer.send("floating:resize-expanded"),

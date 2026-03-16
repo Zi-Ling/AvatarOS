@@ -72,7 +72,7 @@ client/next-env.d.ts
 # Cursor IDE
 .git/cursor/
 
-#临时忽略文件
+# Temporarily ignored
 /server/tests/
 /server/examples/
 /server/docs

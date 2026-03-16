@@ -144,38 +144,17 @@ function ResultCard({ session }: { session: SessionItem }) {
   );
 }
 
-function ApprovalCard({ record, onRespond }: { record: ApprovalHistoryRecord; onRespond: (id: string, approved: boolean) => void }) {
-  const [loading, setLoading] = useState(false);
-
-  const handle = async (approved: boolean) => {
-    setLoading(true);
-    await onRespond(record.request_id, approved);
-    setLoading(false);
-  };
-
+function ApprovalCard({ record }: { record: ApprovalHistoryRecord }) {
   return (
     <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 transition-colors">
-      <div className="flex items-start gap-2 mb-2">
+      <div className="flex items-start gap-2">
         <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
-        <p className="text-sm text-slate-700 dark:text-slate-200 leading-snug line-clamp-2">
-          {record.message || record.operation}
-        </p>
-      </div>
-      <div className="flex gap-2">
-        <button
-          onClick={() => handle(true)}
-          disabled={loading}
-          className="flex-1 text-xs font-medium py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white transition-colors disabled:opacity-50"
-        >
-          批准
-        </button>
-        <button
-          onClick={() => handle(false)}
-          disabled={loading}
-          className="flex-1 text-xs font-medium py-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-red-100 dark:hover:bg-red-900/30 text-slate-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 transition-colors disabled:opacity-50"
-        >
-          拒绝
-        </button>
+        <div className="min-w-0">
+          <p className="text-sm text-slate-700 dark:text-slate-200 leading-snug line-clamp-2">
+            {record.message || record.operation}
+          </p>
+          <p className="text-[11px] text-amber-500 mt-1">请前往对话处理</p>
+        </div>
       </div>
     </div>
   );
@@ -354,9 +333,8 @@ export default function HomePage() {
     }
   };
 
-  const handleApprovalRespond = async (id: string, approved: boolean) => {
-    await approvalApi.respond(id, approved);
-    setApprovals(prev => prev.filter(a => a.request_id !== id));
+  const handleApprovalRespond = async (_id: string, _approved: boolean) => {
+    // 审批操作已移至 Chat，overview 仅展示
   };
 
   // 派生数据
@@ -450,7 +428,7 @@ export default function HomePage() {
                 {approvals.length === 0
                   ? <EmptyState text="暂无待确认项" />
                   : approvals.slice(0, 5).map(a => (
-                    <ApprovalCard key={a.request_id} record={a} onRespond={handleApprovalRespond} />
+                    <ApprovalCard key={a.request_id} record={a} />
                   ))
                 }
               </div>

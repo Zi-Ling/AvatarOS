@@ -56,6 +56,29 @@ export function ApprovalCard({ messageId, request, status, comment }: ApprovalCa
   const cfg = statusConfig[effectiveStatus];
   const Icon = cfg.icon;
   const isPending = effectiveStatus === "pending";
+  const isResolved = effectiveStatus === "approved" || effectiveStatus === "rejected" || effectiveStatus === "expired";
+
+  // 已处理：缩小为紧凑行
+  if (isResolved) {
+    return (
+      <div className={cn(
+        "flex items-center gap-2 px-2 py-1.5 rounded-lg border text-xs",
+        effectiveStatus === "approved"
+          ? "border-green-200 dark:border-green-800/40 bg-green-50/50 dark:bg-green-950/10"
+          : effectiveStatus === "rejected"
+          ? "border-red-200 dark:border-red-800/40 bg-red-50/50 dark:bg-red-950/10"
+          : "border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/30"
+      )}>
+        <Icon className={cn("w-3.5 h-3.5 shrink-0", cfg.color)} />
+        <span className={cn("font-medium", cfg.color)}>{cfg.label}</span>
+        <span className="text-slate-400 truncate flex-1">{request.operation}</span>
+        {comment && <span className="text-slate-400 italic truncate max-w-[120px]">{comment}</span>}
+        <span className="text-[10px] text-slate-400 font-mono shrink-0">
+          {new Date(request.expires_at).toLocaleTimeString()}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className={cn("mt-2 rounded-xl border p-3 space-y-2.5", cfg.bg, cfg.border)}>

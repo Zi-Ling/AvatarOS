@@ -261,6 +261,12 @@ class VerifierRegistry:
         ]:
             self.register(cls)
 
+    # MIME types that are NOT bitmap images — Pillow cannot open these.
+    # They must be excluded from IMAGE_OPENABLE matching.
+    _NON_BITMAP_IMAGE_MIMES: frozenset = frozenset({
+        "image/svg+xml",
+    })
+
     @staticmethod
     def _mime_matches(mime_type: str, ctype: VerifierConditionType) -> bool:
         """Check if a MIME type implies a particular condition type."""
@@ -275,5 +281,7 @@ class VerifierRegistry:
         }
         expected = _mime_to_ctype.get(mime_type)
         if expected is None and mime_type.startswith("image/"):
-            expected = VerifierConditionType.IMAGE_OPENABLE
+            # SVG etc. are not bitmap — don't route to IMAGE_OPENABLE
+            if mime_type not in VerifierRegistry._NON_BITMAP_IMAGE_MIMES:
+                expected = VerifierConditionType.IMAGE_OPENABLE
         return expected == ctype

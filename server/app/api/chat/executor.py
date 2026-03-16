@@ -66,7 +66,67 @@ def _classify_execution_error(error: Exception) -> str:
     return "unknown"
 
 
-async def _analyze_code_error(llm_client, goal: str, error_detail: str, user_language: str = "zh") -> str:
+async def _generate_final_answer(
+    llm_client,
+    goal: str,
+    terminal_status: str,
+    output_value: str = "",
+    error_detail: str = "",
+    step_count: int = 0,
+    completed_steps: int = 0,
+    user_language: str = "zh",
+) -> str:
+    """
+    统一的 Final Answer 生成器。
+    覆盖所有终态：completed / failed / partial / paused / cancelled。
+    返回用户可直接阅读的自然语言说明。
+    """
+    status_context = {
+        "completed": "任务已成功完成",
+        "failed": "任务执行失败",
+        "partial": f"任务部分完成（{completed_steps}/{step_count} 步成功）",
+        "paused": "任务已被用户暂停",
+        "cancelled": "任务已被用户取消",
+    }.get(terminal_status, "任务已结束")
+
+    if user_language == "zh":
+        output_section = f"\n\n执行结果摘要：\n{output_value[:800]}" if output_value else ""
+        error_section = f"\n\n错误信息：\n{error_detail[:400]}" if error_detail else ""
+        prompt = f"""用户的任务目标：{goal}
+
+执行状态：{status_context}{output_section}{error_section}
+
+请用自然语言向用户说明：
+1. 任务做了什么、得到了什么结果（如果成功）
+2. 遇到了什么问题（如果失败）
+3. 当前状态说明（如果暂停/取消）
+
+要求：
+- 直接面向用户，语气友好
+- 2-4句话，简洁清晰
+- 不要重复"执行状态"这类系统词汇
+- 不要暴露技术细节（如 skill 名称、traceback）
+- 只返回说明文本，不要额外格式"""
+    else:
+        output_section = f"\n\nResult summary:\n{output_value[:800]}" if output_value else ""
+        error_section = f"\n\nError:\n{error_detail[:400]}" if error_detail else ""
+        prompt = f"""Task goal: {goal}
+Status: {status_context}{output_section}{error_section}
+
+Explain to the user in 2-4 friendly sentences what happened. No technical jargon."""
+
+    try:
+        if inspect.iscoroutinefunction(llm_client.call):
+            answer = await llm_client.call(prompt)
+        else:
+            answer = llm_client.call(prompt)
+        return answer.strip()
+    except Exception as e:
+        logger.warning(f"[FinalAnswer] LLM call failed: {e}")
+        return ""
+
+
+
     """用 LLM 分析代码执行错误，给出可能原因和修复建议"""
     # 截断 error_detail，避免 prompt 过长
     truncated = error_detail[:1500] if len(error_detail) > 1500 else error_detail
@@ -340,7 +400,7 @@ async def execute_task(
                     relevance_score=decision.relevance_score,
                     user_language=user_language,
                 )
-                explanation_msg = f"{prefix_content}💡 {explanation}"
+                explanation_msg = f"💡 {explanation}"
             except Exception as e:
                 logger.error(f"Capability explanation failed: {e}")
         
@@ -348,7 +408,7 @@ async def execute_task(
             missing_info = ""
             if decision.missing_skills:
                 missing_info = f"\n\n缺少的技能：{', '.join(decision.missing_skills)}"
-            explanation_msg = f"{prefix_content}💡 {decision.llm_explanation}{missing_info}"
+            explanation_msg = f"💡 {decision.llm_explanation}{missing_info}"
         
         # 保存并推送
         save_message_to_session(session_id, "assistant", explanation_msg)
@@ -490,7 +550,7 @@ async def execute_task(
         logger.error(f"[TaskExecution] Unexpected error for goal='{decision.goal}': {e}", exc_info=True)
         from .session import save_message_to_session
         user_language = _detect_language(user_message)
-        err_msg = f"{prefix_content}❌ 任务执行时发生意外错误，请稍后重试。" if user_language == "zh" else f"{prefix_content}❌ An unexpected error occurred. Please try again."
+        err_msg = "❌ 任务执行时发生意外错误，请稍后重试。" if user_language == "zh" else "❌ An unexpected error occurred. Please try again."
         save_message_to_session(session_id, "assistant", err_msg)
         await socket_manager.emit("server_event", {
             "type": "task.summary",
@@ -681,9 +741,9 @@ async def _handle_planning_failure(error, avatar_router, decision, user_message,
 
     if error_class == "infra":
         if user_language == "zh":
-            result_msg = f"{prefix_content}⚠️ 沙箱暂时不可用，请稍后重试。"
+            result_msg = "⚠️ 沙箱暂时不可用，请稍后重试。"
         else:
-            result_msg = f"{prefix_content}⚠️ Sandbox is temporarily unavailable. Please try again later."
+            result_msg = "⚠️ Sandbox is temporarily unavailable. Please try again later."
 
     elif error_class == "code":
         analysis = await _analyze_code_error(
@@ -693,22 +753,22 @@ async def _handle_planning_failure(error, avatar_router, decision, user_message,
             user_language=user_language,
         )
         if analysis:
-            result_msg = f"{prefix_content}❌ 代码执行失败\n\n{analysis}" if user_language == "zh" else f"{prefix_content}❌ Code execution failed\n\n{analysis}"
+            result_msg = f"❌ 代码执行失败\n\n{analysis}" if user_language == "zh" else f"❌ Code execution failed\n\n{analysis}"
         else:
-            result_msg = f"{prefix_content}❌ 代码执行失败，请检查代码逻辑后重试。" if user_language == "zh" else f"{prefix_content}❌ Code execution failed. Please check your code and retry."
+            result_msg = "❌ 代码执行失败，请检查代码逻辑后重试。" if user_language == "zh" else "❌ Code execution failed. Please check your code and retry."
 
     else:
         # skill 业务失败（如 DNS 解析失败、HTTP 错误）：直接透传 skill 错误信息
         if skill_error_msg:
             if user_language == "zh":
-                result_msg = f"{prefix_content}❌ 任务执行失败：{skill_error_msg}"
+                result_msg = f"❌ 任务执行失败：{skill_error_msg}"
             else:
-                result_msg = f"{prefix_content}❌ Task failed: {skill_error_msg}"
+                result_msg = f"❌ Task failed: {skill_error_msg}"
         else:
             if user_language == "zh":
-                result_msg = f"{prefix_content}❌ 任务执行失败，请稍后重试。"
+                result_msg = "❌ 任务执行失败，请稍后重试。"
             else:
-                result_msg = f"{prefix_content}❌ Task execution failed. Please try again."
+                result_msg = "❌ Task execution failed. Please try again."
 
     save_message_to_session(session_id, "assistant", result_msg)
     await socket_manager.emit("server_event", {
@@ -721,12 +781,30 @@ async def _handle_planning_failure(error, avatar_router, decision, user_message,
     })
 
 
-def _build_run_summary_payload(graph, run_record, start_time_ms: int = 0) -> dict:
+def _build_run_summary_payload(
+    graph, run_record, start_time_ms: int = 0,
+    terminal_status: str = None, final_answer: str = "",
+) -> dict:
     """
-    从 ExecutionGraph 构建 run_summary payload，直接在后端计算，
-    前端不再依赖 taskStore 运行时状态来统计步骤。
+    从 ExecutionGraph 构建 run_summary payload。
+    terminal_status: completed | failed | partial | paused | cancelled
+    final_answer: LLM 生成的用户态说明
     """
     from app.avatar.runtime.graph.models.step_node import NodeStatus
+
+    def _infer_status(graph, run_record):
+        if terminal_status:
+            return terminal_status
+        status = getattr(run_record, "status", "completed")
+        if status == "completed":
+            return "completed"
+        if status == "failed":
+            return "failed"
+        if status == "paused":
+            return "paused"
+        if status == "cancelled":
+            return "cancelled"
+        return "partial"
 
     if graph and graph.nodes:
         nodes = list(graph.nodes.values())
@@ -743,20 +821,25 @@ def _build_run_summary_payload(graph, run_record, start_time_ms: int = 0) -> dic
                     outputs.get("stdout") or outputs.get("output") or
                     outputs.get("content") or outputs.get("message")
                 )
+                artifacts = outputs.get("__artifacts__", [])
                 if summary_val and isinstance(summary_val, str) and summary_val.strip():
                     key_outputs.append({
                         "skill_name": n.capability_name,
                         "step_name": n.capability_name.split(".")[-1],
                         "summary": summary_val.strip()[:120],
+                        "artifacts": artifacts if isinstance(artifacts, list) else [],
                     })
 
+        inferred = _infer_status(graph, run_record)
         return {
             "total_steps": total,
             "completed_steps": completed,
             "failed_steps": failed,
             "duration_ms": duration_ms,
-            "key_outputs": key_outputs[-3:],  # 最多 3 个
+            "key_outputs": key_outputs[-3:],
             "success": failed == 0 and total > 0,
+            "terminal_status": inferred,
+            "final_answer": final_answer,
         }
 
     # fallback: DB steps
@@ -765,6 +848,7 @@ def _build_run_summary_payload(graph, run_record, start_time_ms: int = 0) -> dic
         total = len(steps)
         completed = sum(1 for s in steps if getattr(s, "status", "") == "completed")
         failed = sum(1 for s in steps if getattr(s, "status", "") == "failed")
+        inferred = _infer_status(None, run_record)
         return {
             "total_steps": total,
             "completed_steps": completed,
@@ -772,30 +856,40 @@ def _build_run_summary_payload(graph, run_record, start_time_ms: int = 0) -> dic
             "duration_ms": 0,
             "key_outputs": [],
             "success": failed == 0 and total > 0,
+            "terminal_status": inferred,
+            "final_answer": final_answer,
         }
 
-    return {"total_steps": 0, "completed_steps": 0, "failed_steps": 0, "duration_ms": 0, "key_outputs": [], "success": False}
+    return {
+        "total_steps": 0, "completed_steps": 0, "failed_steps": 0,
+        "duration_ms": 0, "key_outputs": [], "success": False,
+        "terminal_status": terminal_status or "failed", "final_answer": final_answer,
+    }
 
 
 async def _format_and_push_result(run_record, decision, avatar_router, session_id, prefix_content, memory_manager=None, task_start_ms: int = 0):
     """格式化任务结果并通过 Socket 推送到前端，同时保存到 session 历史"""
     from .session import save_message_to_session
 
-    # llm.fallback 特殊处理：输出是对话消息，不是任务结果
     graph = getattr(run_record, "_graph", None)
+    user_language = _detect_language(decision.goal or "")
+
+    # ── llm.fallback 特殊处理：输出是对话消息，不是任务结果 ──────────────────
+    # 仅当"最后一个成功节点"是 llm.fallback 时才走此路径。
+    # 如果 llm.fallback 只是中间步骤（如翻译后 fs.write），不应拦截。
     if graph and graph.nodes:
+        from app.avatar.runtime.graph.models.step_node import NodeStatus as _NS
         nodes = list(graph.nodes.values())
-        last_node = nodes[-1]
-        if last_node.capability_name == "llm.fallback":
-            outputs = last_node.outputs or {}
-            # FallbackOutput 结构：response_zh / response_en / next_steps
+        last_success = next(
+            (n for n in reversed(nodes) if n.status == _NS.SUCCESS),
+            None,
+        )
+        if last_success and last_success.capability_name == "llm.fallback":
+            outputs = last_success.outputs or {}
             fallback_msg = (
-                outputs.get("response_zh")
-                or outputs.get("response_en")
-                or outputs.get("message")
-                or "我暂时无法完成这个请求，请补充更多信息。"
+                outputs.get("response_zh") or outputs.get("response_en")
+                or outputs.get("message") or "我暂时无法完成这个请求，请补充更多信息。"
             )
-            # next_steps 拼接到消息末尾
             next_steps = outputs.get("next_steps") or []
             if next_steps:
                 steps_text = "\n".join(
@@ -803,19 +897,25 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
                 )
                 if steps_text:
                     fallback_msg = f"{fallback_msg}\n\n{steps_text}"
-
-            chat_msg = prefix_content + fallback_msg
-            # 保存为普通 chat 消息（message_type=chat），下一轮 ReferenceResolver 可正常识别
+            chat_msg = fallback_msg
             save_message_to_session(session_id, "assistant", chat_msg)
+            # 构建 run_summary 让前端 RunSummaryCard 能显示 finalAnswer
+            run_summary = _build_run_summary_payload(
+                graph, run_record, task_start_ms,
+                terminal_status="completed",
+                final_answer=chat_msg,
+            )
             await socket_manager.emit("server_event", {
                 "type": "task.summary",
-                "payload": {"session_id": session_id, "content": chat_msg},
+                "payload": {
+                    "session_id": session_id,
+                    "content": chat_msg,
+                    "run_summary": run_summary,
+                },
             })
-            logger.info(f"[llm.fallback] Pushed as chat message, len={len(chat_msg)}")
             return chat_msg
 
-    # 优先从 ExecutionGraph 读取最后一个节点的输出
-    graph = getattr(run_record, "_graph", None)
+    # ── 提取输出数据 ──────────────────────────────────────────────────────────
     real_b64_image = None
     target_obj = None
 
@@ -825,107 +925,103 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
         outputs = last_node.outputs or {}
         real_b64_image = outputs.get("base64_image")
         target_obj = {k: v for k, v in outputs.items() if k != "base64_image"} or outputs
-        success = True
     else:
-        success, output_val, real_b64_image, target_obj = _extract_step_result(run_record)
-    
-    # 任务失败：从 graph nodes 取真实错误信息，按错误类型处理
-    if run_record.status != "completed":
-        # 收集所有失败节点的错误信息
-        error_detail = ""
+        _, _, real_b64_image, target_obj = _extract_step_result(run_record)
+
+    # ── 确定终态 ──────────────────────────────────────────────────────────────
+    run_status = getattr(run_record, "status", "completed")
+    if run_status == "completed":
+        terminal_status = "completed"
+    elif run_status == "paused":
+        terminal_status = "paused"
+    elif run_status == "cancelled":
+        terminal_status = "cancelled"
+    else:
         if graph and graph.nodes:
             from app.avatar.runtime.graph.models.step_node import NodeStatus
-            failed_nodes = [n for n in graph.nodes.values() if n.status == NodeStatus.FAILED]
-            if failed_nodes:
-                error_parts = []
-                for n in failed_nodes:
-                    if n.error_message:
-                        error_parts.append(f"[{n.capability_name}] {n.error_message}")
-                error_detail = "\n".join(error_parts)
-
-        user_language = _detect_language("")  # 无 user_message，默认 zh
-        error_class = _classify_execution_error(Exception(error_detail)) if error_detail else "unknown"
-
-        if error_class == "infra":
-            error_summary = f"{prefix_content}⚠️ 沙箱暂时不可用，请稍后重试。"
-        elif error_class == "code" and error_detail:
-            analysis = await _analyze_code_error(
-                llm_client=avatar_router.llm,
-                goal=decision.goal or "",
-                error_detail=error_detail,
-                user_language="zh",
-            )
-            if analysis:
-                error_summary = f"{prefix_content}❌ 代码执行失败\n\n{analysis}"
-            else:
-                error_summary = f"{prefix_content}❌ 代码执行失败，请检查代码逻辑后重试。"
+            nodes = list(graph.nodes.values())
+            has_success = any(n.status == NodeStatus.SUCCESS for n in nodes)
+            terminal_status = "partial" if has_success else "failed"
         else:
-            detail_hint = f"\n\n`{error_detail[:300]}`" if error_detail else ""
-            error_summary = f"{prefix_content}❌ 任务执行失败 (Status: {run_record.status})。{detail_hint}"
+            terminal_status = "failed"
 
-        save_message_to_session(session_id, "assistant", error_summary)
-        await socket_manager.emit("server_event", {
-            "type": "task.summary",
-            "payload": {"session_id": session_id, "content": error_summary},
-        })
-        return error_summary
+    # ── 收集错误信息 ──────────────────────────────────────────────────────────
+    error_detail = ""
+    if terminal_status in ("failed", "partial") and graph and graph.nodes:
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+        failed_nodes = [n for n in graph.nodes.values() if n.status == NodeStatus.FAILED]
+        error_parts = [
+            f"[{n.capability_name}] {n.error_message}"
+            for n in failed_nodes if n.error_message
+        ]
+        error_detail = "\n".join(error_parts)
 
-    # 生成友好总结
-    from app.avatar.planner.summarizer import ResultSummarizer
-    summary_lines = []
+    # ── 提取 output_value 供 Final Answer 使用 ───────────────────────────────
+    output_value = ""
+    if target_obj and isinstance(target_obj, dict):
+        for key in ("stdout", "output", "content", "text", "message"):
+            val = target_obj.get(key)
+            if val and isinstance(val, str) and val.strip():
+                output_value = val[:800]
+                break
 
-    # 从 graph nodes 或 DB steps 获取步骤信息
-    graph = getattr(run_record, "_graph", None)
+    # ── 步骤统计 ─────────────────────────────────────────────────────────────
     if graph and graph.nodes:
         nodes = list(graph.nodes.values())
         step_count = len(nodes)
-        last_node = nodes[-1]
-        skill_name = last_node.capability_name
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+        completed_steps = sum(1 for n in nodes if n.status == NodeStatus.SUCCESS)
     elif run_record.steps:
         step_count = len(run_record.steps)
-        last_step = run_record.steps[-1]
-        skill_name = getattr(last_step, "skill_name", "unknown")
+        completed_steps = sum(1 for s in run_record.steps if getattr(s, "status", "") == "completed")
     else:
         step_count = 0
-        skill_name = "unknown"
+        completed_steps = 0
 
-    if step_count == 1:
-        if target_obj:
-            try:
-                friendly = ResultSummarizer.summarize(skill_name, target_obj, avatar_router.llm)
-                summary_lines.append(f"✅ {friendly}")
-            except Exception:
-                summary_lines.append("✅ 任务执行完成")
-        else:
-            summary_lines.append("✅ 任务执行完成")
-    elif step_count > 1:
-        summary_lines.append("✅ **任务执行成功**\n")
-        summary_lines.append(f"完成了 {step_count} 个步骤")
-        if target_obj:
-            try:
-                friendly = ResultSummarizer.summarize(skill_name, target_obj, avatar_router.llm)
-                summary_lines.append(f"\n📊 {friendly}")
-            except Exception:
-                pass
-    else:
-        summary_lines.append("✅ 任务执行完成")
-    
-    # 添加图片
+    # ── LLM Final Answer（所有终态）──────────────────────────────────────────
+    error_class = _classify_execution_error(Exception(error_detail)) if error_detail else "unknown"
+    final_answer = ""
+
+    if terminal_status == "completed" or (terminal_status in ("partial", "failed") and error_class != "infra"):
+        final_answer = await _generate_final_answer(
+            llm_client=avatar_router.llm,
+            goal=decision.goal or "",
+            terminal_status=terminal_status,
+            output_value=output_value,
+            error_detail=error_detail if terminal_status != "completed" else "",
+            step_count=step_count,
+            completed_steps=completed_steps,
+            user_language=user_language,
+        )
+    elif terminal_status == "paused":
+        final_answer = (
+            f"任务已暂停，已完成 {completed_steps}/{step_count} 步。你可以随时继续。"
+            if user_language == "zh"
+            else f"Task paused at step {completed_steps}/{step_count}. You can resume anytime."
+        )
+    elif terminal_status == "cancelled":
+        final_answer = "任务已取消。" if user_language == "zh" else "Task cancelled."
+    elif error_class == "infra":
+        final_answer = "⚠️ 沙箱暂时不可用，请稍后重试。" if user_language == "zh" else "⚠️ Sandbox temporarily unavailable. Please try again."
+
+    # ── 构建推送内容 ──────────────────────────────────────────────────────────
+    # 注意：prefix_content 已经通过 SSE 流式推送给前端，task.summary 只发 final_answer
+    # 避免前端同一条消息里 prefix_content 出现两次
+    content_parts = [final_answer or "任务已结束"]
     if real_b64_image:
         clean = real_b64_image.replace("\n", "").replace("\r", "")
-        summary_lines.append(f"\n```image\n{clean}\n```")
-    
-    final_summary = prefix_content + "\n".join(summary_lines)
-    
-    # 保存任务结果到 session 历史（刷新页面后可见），携带结构化 metadata 供 Planner 跨轮引用
+        content_parts.append(f"\n```image\n{clean}\n```")
+    final_content = "".join(content_parts)
+
+    # ── 保存到 session 历史 ───────────────────────────────────────────────────
     task_result_summary = build_task_result_summary(
         run_record=run_record,
         goal=decision.goal or "",
         target_obj=target_obj,
-        final_summary=final_summary,
+        final_summary=final_content,
     )
     save_message_to_session(
-        session_id, "assistant", final_summary,
+        session_id, "assistant", final_content,
         metadata={
             "message_type": "task_result",
             "goal": task_result_summary["goal"],
@@ -936,28 +1032,33 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
         },
     )
 
-    # 保存 last_output 到 SessionContext（供其他非 Planner 路径使用）
+    # ── 保存 last_output 到 SessionContext ───────────────────────────────────
     try:
         from app.avatar.runtime.core import SessionContext
         if memory_manager:
             session_data = memory_manager.get_session_context(session_id)
-            if session_data:
-                session_ctx = SessionContext.from_dict(session_data)
-            else:
-                session_ctx = SessionContext.create(session_id=session_id)
-            session_ctx.set_variable("last_output", final_summary)
+            session_ctx = (
+                SessionContext.from_dict(session_data) if session_data
+                else SessionContext.create(session_id=session_id)
+            )
+            session_ctx.set_variable("last_output", final_content)
             memory_manager.save_session_context(session_ctx)
     except Exception as e:
         logger.warning(f"Failed to save last_output to session: {e}")
-    
+
+    # ── 推送 task.summary ─────────────────────────────────────────────────────
+    run_summary = _build_run_summary_payload(
+        graph, run_record, task_start_ms,
+        terminal_status=terminal_status,
+        final_answer=final_answer,
+    )
     await socket_manager.emit("server_event", {
         "type": "task.summary",
         "payload": {
             "session_id": session_id,
-            "content": final_summary,
-            "run_summary": _build_run_summary_payload(
-                getattr(run_record, "_graph", None), run_record, task_start_ms
-            ),
+            "content": final_content,
+            "run_summary": run_summary,
         },
     })
-    return final_summary
+    return final_content
+

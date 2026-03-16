@@ -19,7 +19,16 @@ type MainShellProps = {
 export function MainShell({ children }: MainShellProps) {
   const router = useRouter();
   const pathname = usePathname();
-  const [activeTab, setActiveTab] = useState<DockTab>('chat');
+
+  // 从当前路由初始化 activeTab，保持刷新后 Dock 高亮正确
+  const tabFromPath = (path: string): DockTab => {
+    if (path === '/schedule') return 'schedule';
+    if (path === '/knowledge') return 'knowledge';
+    if (path === '/avatar') return 'avatar';
+    return 'workspace';
+  };
+
+  const [activeTab, setActiveTab] = useState<DockTab>(() => tabFromPath(pathname));
   
   // Left Panel (Files/History)
   const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(false);
@@ -38,23 +47,17 @@ export function MainShell({ children }: MainShellProps) {
   const handleTabChange = (tab: DockTab) => {
     setActiveTab(tab);
     
-    if (tab === 'files') {
+    if (tab === 'workspace') {
         router.push('/chat'); 
         setIsLeftPanelOpen(true);
     } else if (tab === 'schedule') {
         router.push('/schedule');
         setIsLeftPanelOpen(false);
-    } else if (tab === 'workspace') {
-        router.push('/chat'); 
-        setIsLeftPanelOpen(true);
     } else if (tab === 'knowledge') {
         router.push('/knowledge');
         setIsLeftPanelOpen(false);
-    } else if (tab === 'skills') {
-        router.push('/skills');
-        setIsLeftPanelOpen(false);
-    } else if (tab === 'analytics') {
-        router.push('/analytics');
+    } else if (tab === 'avatar') {
+        router.push('/avatar');
         setIsLeftPanelOpen(false);
     }
   };
@@ -121,14 +124,14 @@ export function MainShell({ children }: MainShellProps) {
             {/* 2.2.3 Right Panel - Chat对话区 */}
             {isRightPanelOpen && (
               <>
-                <PanelResizeHandle className="w-1 bg-slate-200 dark:bg-white/5 hover:bg-blue-500/50 transition-colors cursor-col-resize hidden xl:block" />
+                <PanelResizeHandle className="w-1 bg-slate-200 dark:bg-white/5 hover:bg-blue-500/50 transition-colors cursor-col-resize" />
                 <Panel 
                   id="right-panel"
                   order={3}
                   defaultSize={30} 
                   minSize={20} 
                   maxSize={45}
-                  className="bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-white/5 hidden xl:block"
+                  className="bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-white/5"
                 >
                   <div className="h-full bg-white dark:bg-transparent">
                     {/* Chat在右侧始终可用，且使用同一实例保持状态 */}

@@ -62,8 +62,14 @@ class TargetResolver:
             logger.debug(f"[TargetResolver] {len(targets)} target(s) from graph output contract")
             return targets
 
+        # --- Priority 2.5: extract actual file paths from fs.write/fs.copy/fs.move node outputs ---
+        targets = self._from_fs_node_outputs(graph, workspace)
+        if targets:
+            logger.debug(f"[TargetResolver] {len(targets)} target(s) from fs node outputs")
+            return targets
+
         # --- Priority 3: workspace snapshot diff (new files in output/) ---
-        targets = self._from_workspace_snapshot(workspace)
+        targets = self._from_workspace_snapshot(workspace, graph)
         if targets:
             logger.debug(f"[TargetResolver] {len(targets)} target(s) from workspace snapshot")
             return targets
@@ -132,18 +138,99 @@ class TargetResolver:
             logger.debug(f"[TargetResolver] output_contract extraction failed: {e}")
         return targets
 
-    def _from_workspace_snapshot(self, workspace: "SessionWorkspace") -> List[VerificationTarget]:
-        """Return all files currently in output/ as file targets."""
+    # fs skill 名称集合，用于从节点输出中提取实际写入的文件路径
+    _FS_WRITE_SKILLS = {"fs.write", "fs.copy", "fs.move"}
+
+    def _from_fs_node_outputs(
+        self,
+        graph: "ExecutionGraph",
+        workspace: "SessionWorkspace",
+    ) -> List[VerificationTarget]:
+        """
+        从已成功的 fs.write/fs.copy/fs.move 节点的 outputs 中反向提取实际写入的文件路径。
+
+        这解决了 TargetResolver 无法从 goal 文本推断运行时文件名的问题：
+        Planner 在运行时决定文件名（如 random_sentence_ja.txt），TargetResolver
+        在 FINISH 前无法猜到。但 fs.write 节点执行后，outputs 里有实际写入的路径。
+        """
         targets: List[VerificationTarget] = []
         try:
+            from app.avatar.runtime.graph.models.step_node import NodeStatus
+            for node in graph.nodes.values():
+                if node.status != NodeStatus.SUCCESS:
+                    continue
+                if node.capability_name not in self._FS_WRITE_SKILLS:
+                    continue
+
+                outputs = node.outputs or {}
+                # fs.write output 有 path 字段（单文件）或逗号分隔的多文件路径
+                raw_path = outputs.get("path") or outputs.get("output") or ""
+                if not raw_path:
+                    continue
+
+                # 支持 batch 模式：path 可能是 "a.txt, b.txt, c.txt"
+                paths = [p.strip() for p in str(raw_path).split(",") if p.strip()]
+                for fp in paths:
+                    targets.append(VerificationTarget(
+                        kind="file",
+                        path=fp,
+                        mime_type=self._guess_mime(fp),
+                        producer_step_id=node.id,
+                    ))
+        except Exception as e:
+            logger.debug(f"[TargetResolver] fs node output extraction failed: {e}")
+        return targets
+
+    def _from_workspace_snapshot(
+        self,
+        workspace: "SessionWorkspace",
+        graph: "ExecutionGraph",
+    ) -> List[VerificationTarget]:
+        """
+        Fallback: return files in workspace that were produced by the CURRENT graph.
+
+        Scopes to current task by collecting all file paths referenced in
+        succeeded nodes' outputs/params, then intersecting with the workspace
+        snapshot. This prevents old files from previous tasks leaking in.
+        """
+        targets: List[VerificationTarget] = []
+        try:
+            # Collect file paths that the current graph's nodes actually produced
+            from app.avatar.runtime.graph.models.step_node import NodeStatus
+            graph_produced_names: set[str] = set()
+            for node in graph.nodes.values():
+                if node.status != NodeStatus.SUCCESS:
+                    continue
+                # Scan node outputs for file path references
+                for v in (node.outputs or {}).values():
+                    if isinstance(v, str) and v.strip():
+                        # Could be a path or comma-separated paths
+                        for segment in v.split(","):
+                            segment = segment.strip()
+                            if segment and ("." in segment or "/" in segment or "\\" in segment):
+                                graph_produced_names.add(Path(segment).name)
+                # Scan node params for file path references
+                for v in (node.params or {}).values():
+                    if isinstance(v, str) and v.strip():
+                        for segment in v.split(","):
+                            segment = segment.strip()
+                            if segment and ("." in segment or "/" in segment or "\\" in segment):
+                                graph_produced_names.add(Path(segment).name)
+
+            if not graph_produced_names:
+                logger.debug("[TargetResolver] workspace snapshot: no file names from graph nodes")
+                return targets
+
             snapshot = workspace.snapshot_workspace()
             for rel_path in snapshot:
-                abs_path = workspace.root / rel_path
-                targets.append(VerificationTarget(
-                    kind="file",
-                    path=str(abs_path),
-                    mime_type=self._guess_mime(rel_path),
-                ))
+                file_name = Path(rel_path).name
+                if file_name in graph_produced_names:
+                    abs_path = workspace.root / rel_path
+                    targets.append(VerificationTarget(
+                        kind="file",
+                        path=str(abs_path),
+                        mime_type=self._guess_mime(rel_path),
+                    ))
         except Exception as e:
             logger.debug(f"[TargetResolver] workspace snapshot failed: {e}")
         return targets
@@ -173,6 +260,7 @@ class TargetResolver:
             ".jpg":  "image/jpeg",
             ".jpeg": "image/jpeg",
             ".gif":  "image/gif",
+            ".svg":  "image/svg+xml",
             ".txt":  "text/plain",
             ".md":   "text/markdown",
             ".html": "text/html",

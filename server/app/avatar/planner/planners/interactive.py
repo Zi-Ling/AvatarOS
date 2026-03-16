@@ -39,12 +39,18 @@ Your Job:
 - **browser.run Empty Output (MANDATORY)**: If a `browser.run` step succeeded but its output is empty (no stdout, no artifacts), the script did NOT extract any data. Do NOT call `browser.run` again with the same or similar script. Instead: (1) try a different URL or search engine, OR (2) use `llm.fallback` to inform the user that the data could not be retrieved.
 - **No "Success" Claims**: Do not say "I have finished" unless you see the evidence in the history.
 - **No Redundant Steps (MANDATORY)**: If the execution history already contains a successful step whose output fully answers the goal, output `FINISH` immediately. Do NOT add another step to "verify", "double-check", or "reformat" the same result. Repeating a step that already succeeded is FORBIDDEN.
+- **No Inline Markup/Code Content (MANDATORY)**: NEVER embed raw XML, SVG, HTML, or any multi-line markup content directly as a string literal inside `python.run` code. These contain special characters (`<`, `>`, `"`, `\`) that WILL cause SyntaxError. Instead, ALWAYS reference such content via the `step_N_output` variable (which is auto-injected by the framework from `/workspace/input/`). The same applies to Windows file paths — use `step_N_output` instead of hardcoding paths with backslashes.
 - **Goal Decomposition Check (MANDATORY before FINISH)**: Before outputting `FINISH`, mentally enumerate EVERY sub-goal in the original Goal. If ANY sub-goal has no corresponding successful step in the history, you MUST execute that step next instead of finishing. Example: Goal="write a poem AND save to file" → you must see BOTH a poem-generation step AND a file-write step succeed before finishing. For simple single-goal tasks (e.g. "count lines", "list files", "read a file"), ONE successful step that produces the answer is sufficient — output `FINISH` immediately after.
 - **Cross-Turn Data Rule (MANDATORY)**: If the user refers to content from a previous turn (e.g., "this poem", "that result", "the text above", "统计这首诗", "这个时间", "刚才的结果"), FIRST look in the `Conversation History` section — the Assistant messages contain the actual output values. Treat those values as in-memory data — embed them directly as string literals in `python.run` code or as parameter values. Do NOT call `llm.fallback` to ask the user what they mean. Do NOT search the file system for content that already exists in the conversation history.
 - **Session Artifacts Rule (MANDATORY)**: If the user refers to a file or output from a previous task (e.g., "that file", "the result I saved", "上次生成的文件"), FIRST check the `Conversation History` section for assistant messages with `task result` label — they contain the exact file path and content value. Use those values directly — do NOT guess or search the workspace.
 - **net.download → python.run File Access (MANDATORY)**: When a previous `net.download` step saved a file, the framework injects `step_N_output` as the container-mapped file path (e.g., `/workspace/file.json`). To read that file in `python.run`, you MUST use the `fs.read` skill with `{"path": step_N_output_value}` — do NOT use `open()` (blocked in sandbox) and do NOT hardcode Windows host paths like `D:\Temp\...`. The correct pattern is: use `fs.read` skill with the path from `step_N_output`.
 - **fs.read binary mode → python.run Image Processing (MANDATORY)**: When `fs.read` is called with `mode="binary"`, the output is a **hex-encoded string** (e.g. `"89504e47..."`), NOT raw bytes. To use it in `python.run` with Pillow or any bytes-based API, you MUST convert it first: `img_bytes = bytes.fromhex(step_N_output)`, then `img = Image.open(io.BytesIO(img_bytes))`. NEVER pass the hex string directly to `BytesIO` — that causes `TypeError: a bytes-like object is required`. To save the processed image, call `_save_binary("output.png", buf.getvalue().hex())` inside `python.run` — this writes the file to `/workspace` and outputs `{"__file__": "/workspace/output.png"}` as structured output. Do NOT use `fs.write` with `mode="binary"` for image data — the hex string is megabytes long and cannot be passed as a JSON parameter literal.
 - **Unknown Skill Prohibition (MANDATORY)**: You MUST ONLY use skills listed in the `Available Skills` section. NEVER invent or guess a skill name that is not listed (e.g., `user.ask`, `user.input`, `ask_user` are NOT valid skills). If you need to ask the user a question or lack required information, use the `llm.fallback` skill instead.
+- **LLM-First for Text Tasks (MANDATORY)**: For tasks that are purely about text understanding or generation — including translation, summarization, rewriting, classification, extraction, Q&A — use `llm.fallback` directly. Do NOT use `python.run` with third-party translation/NLP libraries (e.g. `googletrans`, `translate`, `nltk`, `spacy`). The LLM can handle these tasks natively without any external dependencies. Only use `python.run` when the task requires computation, data processing, file manipulation, or library-specific functionality (e.g. image processing with Pillow, data analysis with pandas).
+- **ModuleNotFoundError Recovery (MANDATORY)**: If a `python.run` step failed with `ModuleNotFoundError` or `ImportError`, do NOT retry with the same code. The sandbox has a FIXED set of pre-installed packages (listed below). Instead: (1) rewrite the code using only pre-installed packages, OR (2) if the task is text-based (translation, summarization, etc.), switch to `llm.fallback`, OR (3) use a different approach that avoids the missing package entirely.
+- **llm.fallback Output Structure (MANDATORY)**: When `llm.fallback` is used for executable text tasks (translation, summarization, rewriting, etc.), it returns the result directly in its `result` field. The downstream step can reference this via `step_N_output` (which will be the result text string). This means you can chain `llm.fallback` → `fs.write` directly: use `llm.fallback` to produce the text, then `fs.write` with the result as `content`. Do NOT insert an unnecessary `python.run` step between them to "organize" or "format" the output — it is already a clean text string.
+- **web.search → Answer Flow (MANDATORY)**: When the goal requires searching the internet for information (current events, facts, documentation, product info, etc.), use `web.search` skill — do NOT use `browser.run` to visit search engines (Google, Bing, Baidu) directly. After `web.search` returns results, your IMMEDIATE next step MUST be `llm.fallback` to synthesize a concise answer from the search snippets. Do NOT insert `net.get`, `python.run`, or any other skill between `web.search` and `llm.fallback`. If the synthesized answer is insufficient and you need more detail, THEN you may use `net.get` to fetch a full page, followed by ANOTHER `llm.fallback` to produce the final answer. The pattern is always: `web.search → llm.fallback` (mandatory), optionally `→ net.get → llm.fallback` (if more detail needed). **CRITICAL**: Once `llm.fallback` has successfully synthesized an answer from search results, output `FINISH` immediately — do NOT add extra steps (python.run, net.get, etc.) to "verify", "parse", or "reformat" the search results. The synthesized answer IS the final answer. Do NOT use `python.run` to process web.search output — the results contain Unicode text that will cause SyntaxError if inlined into Python code.
+- **Search-First for Information Queries (MANDATORY)**: When the goal is to find, look up, or query information (e.g. product specs, prices, news, facts, documentation), your FIRST step MUST be `web.search` — do NOT start with `net.get` or `net.download` to fetch a guessed URL. Even if Context Bindings provide a file path or URL from a previous task, ignore them if they are unrelated to the current goal. The correct pattern is: `web.search` first to find relevant sources, then `llm.fallback` to synthesize the answer.
 
 **PYTHON CODE RESTRICTIONS (RestrictedPython):**
 When using `python.run` skill, the code runs in a RESTRICTED sandbox with these limitations:
@@ -56,9 +62,9 @@ When using `python.run` skill, the code runs in a RESTRICTED sandbox with these 
 - ✅ YES: `random`, `math`, `json`, `datetime`, `re` - Safe modules allowed
 - ✅ YES: Basic Python (list, dict, str, int, float, bool, for, if, while)
 - ✅ YES: `print()` for output (captured automatically)
-- ✅ YES pre-installed packages: `numpy`, `pandas`, `openpyxl`, `scipy`, `matplotlib`, `pillow`, `requests`, `httpx`, `beautifulsoup4`, `lxml`, `pydantic`
+- ✅ YES pre-installed packages: `numpy`, `pandas`, `openpyxl`, `xlsxwriter`, `xlrd`, `odfpy`, `pyarrow`, `pyxlsb`, `scipy`, `matplotlib`, `sympy`, `scikit-learn`, `tabulate`, `pillow`, `opencv-python-headless` (import as `cv2`), `qrcode`, `python-barcode`, `pytesseract`, `requests`, `httpx`, `beautifulsoup4`, `lxml`, `cssselect`, `pydantic`, `python-docx`, `python-pptx`, `mammoth`, `PyPDF2`, `reportlab`, `pdfplumber`, `pymupdf` (import as `fitz`), `readability-lxml`, `trafilatura`, `markdownify`, `py7zr`, `rarfile`, `filetype`, `chardet`, `pyyaml`, `toml`, `markdown`, `orjson`, `python-dateutil`, `rapidfuzz`, `unidecode`, `sqlalchemy`, `duckdb`, `jsonschema`, `tenacity`, `defusedxml`, `cairosvg`, `aiofiles`
 - ✅ YES injected helpers: `_output(value)` for structured output, `_save_binary(path, hex_str)` to write binary files directly
-- ❌ DO NOT use packages not listed above (e.g. `xlrd`, `xlwt`, `paramiko`) — they are NOT installed
+- ❌ DO NOT use packages not listed above (e.g. `googletrans`, `translate`, `paramiko`, `nltk`, `spacy`, `fpdf`, `weasyprint`, `camelot`, `paddleocr`) — they are NOT installed in the sandbox. If you need translation or text processing, use `llm.fallback` instead.
 
 **DATA PASSING TO python.run (CRITICAL):**
 The framework automatically writes all completed steps' outputs as JSON files into `/workspace/inputs/` before your code runs, and injects `import json` + `json.load()` statements at the top of your code.
@@ -176,6 +182,27 @@ def _sanitize_host_paths(text: str, workspace_root: Optional[str]) -> str:
     return _re.sub(pattern, _replace, text)
 
 
+def _is_markup_content(text: str) -> bool:
+    """
+    Detect XML/SVG/HTML markup content that should NOT be inlined into Python code.
+    These contain <, >, ", \\ etc. that cause SyntaxError when embedded as string literals.
+    """
+    stripped = text.strip()
+    if len(stripped) < 100:
+        return False
+    # Starts with XML declaration or root tag
+    if stripped.startswith('<?xml') or stripped.startswith('<!DOCTYPE'):
+        return True
+    # Starts with common markup root tags
+    if re.match(r'^<(svg|html|div|table|root|document|data)\b', stripped, re.IGNORECASE):
+        return True
+    # High density of angle brackets indicates markup
+    bracket_count = stripped.count('<') + stripped.count('>')
+    if bracket_count > 10 and bracket_count / len(stripped) > 0.02:
+        return True
+    return False
+
+
 def _format_history(task: Task, workspace_root: Optional[str] = None) -> str:
     if not task.steps:
         return "(No steps executed yet)"
@@ -191,6 +218,10 @@ def _format_history(task: Task, workspace_root: Optional[str] = None) -> str:
                 # 防止 LLM 把截断后含脏字符的字符串内联进下游 skill 参数
                 if _is_binary_like_payload(out_preview):
                     out_preview = f"[binary payload, {len(out_preview)} chars — use step_{i+1}_output variable, do NOT inline this value]"
+                elif _is_markup_content(out_preview):
+                    # XML/SVG/HTML markup: show only a brief hint, force LLM to use variable
+                    tag_hint = out_preview[:80].replace('\n', ' ')
+                    out_preview = f"[markup content, {len(out_preview)} chars, starts with: {tag_hint}... — use step_{i+1}_output variable, do NOT inline]"
                 elif len(out_preview) > 600:
                     # 普通长输出：首尾保留策略
                     out_preview = out_preview[:250] + "\n... [中间省略] ...\n" + out_preview[-300:]
@@ -205,7 +236,9 @@ def _format_history(task: Task, workspace_root: Optional[str] = None) -> str:
                 result_str = f"Error: {error_msg}"
         
         lines.append(f"Step {i+1}: {step.skill_name}")
-        lines.append(f"  Params: {json.dumps(step.params, ensure_ascii=False)}")
+        params_str = json.dumps(step.params, ensure_ascii=False)
+        params_str = _sanitize_host_paths(params_str, workspace_root)
+        lines.append(f"  Params: {params_str}")
         lines.append(f"  Status: {status}")
         lines.append(f"  Result: {result_str}")
         lines.append("---")
@@ -260,6 +293,8 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
         # binary-like payload：只展示长度
         if _is_binary_like_payload(out):
             out = f"[binary payload, {len(out)} chars]"
+        elif _is_markup_content(out):
+            out = f"[markup content, {len(out)} chars — use step_{step_num}_output variable]"
         elif len(out) > 300:
             out = out[:250] + "...[truncated]"
         lines.append(f"  step_{step_num} ({step.skill_name}): {out}")
@@ -282,24 +317,33 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
     keyword_overlap = len(goal_tokens & output_tokens) / max(len(goal_tokens), 1)
 
     # 规则 2：最近两步是否是相同 skill + 相似参数（重复迹象）
-    # 使用与 DedupGuard 一致的指纹比较，避免误判同 skill 不同参数的合法调用
+    # 从 skill registry 动态获取参数名，不依赖硬编码映射
     recent_duplicate = False
     if len(successful_steps) >= 2:
         prev_num, prev_step = successful_steps[-2]
         if prev_step.skill_name == last_success_step.skill_name:
-            # 提取关键参数做指纹，而非直接比较完整 JSON
-            _DEDUP_KEY_PARAMS = {
-                "fs.read": ["path"], "fs.write": ["path"], "fs.list": ["path"],
-                "net.get": ["url"], "net.post": ["url"], "net.download": ["url"],
-                "browser.run": ["url", "script"], "python.run": ["code"],
-                "shell.run": ["command"], "llm.call": ["prompt"],
-            }
             skill = last_success_step.skill_name
-            key_params = _DEDUP_KEY_PARAMS.get(skill, list((last_success_step.params or {}).keys())[:2])
+
+            # 动态获取 skill 参数名
+            _key_params = None
+            try:
+                from app.avatar.skills.registry import skill_registry as _sr
+                _cls = _sr.get(skill)
+                if _cls:
+                    _im = getattr(_cls.spec, "input_model", None)
+                    if _im:
+                        _schema = _im.model_json_schema()
+                        _props = _schema.get("properties", {})
+                        _req = set(_schema.get("required", []))
+                        _key_params = sorted(_props.keys(), key=lambda k: (k not in _req, k))
+            except Exception:
+                pass
+            if _key_params is None:
+                _key_params = list((last_success_step.params or {}).keys())[:2]
 
             def _fp(params):
                 parts = [skill]
-                for k in key_params:
+                for k in _key_params:
                     v = (params or {}).get(k)
                     if v is not None:
                         s = re.sub(r'\s+', ' ', str(v).strip())[:200]
@@ -460,11 +504,29 @@ Please try a DIFFERENT approach:
 - If all approaches failed, use llm.fallback to inform the user
 """
         
+        # P1: 简单任务快速完成提示
+        simple_task_section = ""
+        if env_context.get("simple_task_mode"):
+            simple_task_section = """
+## ⚡ Simple Task Mode (Framework Detected)
+This is a SIMPLE single-goal task. Follow these rules:
+1. Complete it in as FEW steps as possible (ideally 1-2 steps).
+2. Do NOT over-plan or add unnecessary verification/formatting steps.
+3. Output `FINISH` as soon as the single goal is achieved.
+4. For pure text tasks (translation, summarization, Q&A), use `llm.fallback` and FINISH immediately after.
+"""
+
         # Framework-level goal tracker hint (injected when FINISH was rejected)
         goal_tracker_section = ""
         goal_tracker_hint = env_context.get("goal_tracker_hint")
         if goal_tracker_hint:
             goal_tracker_section = f"\n## ⚠️ Incomplete Sub-Goals (Framework Enforcement)\n{goal_tracker_hint}\n"
+
+        # DedupGuard replan hint (injected when all proposed nodes were duplicates)
+        dedup_hint_section = ""
+        dedup_hint = env_context.get("dedup_hint")
+        if dedup_hint:
+            dedup_hint_section = f"\n## ⚠️ Duplicate Node Warning (Framework Enforcement)\n{dedup_hint}\n"
 
         # 跨轮对话历史：统一消息模型，task_result 类型消息携带结构化 metadata
         conversation_history_section = ""
@@ -520,11 +582,13 @@ Please try a DIFFERENT approach:
         context_bindings_section = ""
         resolved_inputs = env_context.get("resolved_inputs")
         if resolved_inputs and resolved_inputs.get("confidence", 0) >= 0.5:
-            lines = ["## Context Bindings (Pre-resolved, use these values directly)"]
+            lines = ["## Context Bindings (from previous turn — use ONLY if relevant to current goal)"]
             lines.append(
-                "> MANDATORY: The system has already resolved cross-turn references. "
-                "Use the bound values below as direct parameter values. "
-                "Do NOT call llm.fallback because you 'don't know what the user is referring to'."
+                "> These bindings are auto-resolved from the previous task result. "
+                "Use them ONLY if the current goal explicitly refers to a previous result "
+                "(e.g. 'translate that file', 'open the result', '翻译这个文件'). "
+                "If the current goal is a NEW independent query (e.g. searching for information, "
+                "creating something new), IGNORE these bindings entirely."
             )
 
             # 优先展示 typed refs（精确匹配）
@@ -597,7 +661,7 @@ Please try a DIFFERENT approach:
 ## Goal
 {task.goal}
 
-{system_env_section}## Available Skills
+{simple_task_section}{system_env_section}## Available Skills
 {_format_skills(available_skills)}
 
 ## Current Workspace State
@@ -607,7 +671,7 @@ Please try a DIFFERENT approach:
 ## Execution History (Truth)
 {_format_history(task, workspace_root=env_context.get("workspace_path"))}
 
-{loop_warning}{goal_tracker_section}
+{loop_warning}{goal_tracker_section}{dedup_hint_section}
 ## Your Next Move
 Return ONLY the JSON object.
 """
@@ -886,6 +950,7 @@ Return ONLY the JSON object.
                     outputs = node.outputs or {}
                     output_val = (
                         outputs.get("output")
+                        or outputs.get("result")
                         or outputs.get("content")
                         or outputs.get("stdout")
                         or outputs

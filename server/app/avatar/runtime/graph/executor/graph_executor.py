@@ -125,7 +125,7 @@ class GraphExecutor:
                 _ctx_task_id = ""
                 if context:
                     _ctx_session_id = (
-                        getattr(context, "session_id", None)
+                        (context.env.get("exec_session_id") if isinstance(getattr(context, "env", None), dict) else None)
                         or getattr(getattr(context, "identity", None), "session_id", None)
                         or ""
                     )
@@ -150,8 +150,8 @@ class GraphExecutor:
                     reason = matched_rule.reason if matched_rule else "policy denied"
                     if self.trace_store and context:
                         self.trace_store.record_event(
-                            session_id=context.session_id,
-                            task_id=context.task_id,
+                            session_id=_ctx_session_id,
+                            task_id=_ctx_task_id,
                             step_id=str(node.id),
                             event_type="policy_denied",
                             payload={"skill": node.capability_name, "reason": reason, "rule_id": matched_rule.rule_id if matched_rule else ""},
@@ -161,8 +161,8 @@ class GraphExecutor:
                     reason = matched_rule.reason if matched_rule else "approval required"
                     if self.trace_store and context:
                         self.trace_store.record_event(
-                            session_id=context.session_id,
-                            task_id=context.task_id,
+                            session_id=_ctx_session_id,
+                            task_id=_ctx_task_id,
                             step_id=str(node.id),
                             event_type="policy_approval_required",
                             payload={"skill": node.capability_name, "reason": reason},
@@ -194,7 +194,18 @@ class GraphExecutor:
                 else:
                     # 4xx HTTP 错误：客户端问题，重试无意义
                     status_code = outputs.get("status_code")
-                    retryable = not (isinstance(status_code, int) and 400 <= status_code < 500)
+                    if isinstance(status_code, int) and 400 <= status_code < 500:
+                        retryable = False
+                    else:
+                        # 环境错误（缺包、语法错误等）：确定性失败，重试无意义
+                        stderr = outputs.get("stderr") or outputs.get("output") or ""
+                        _ENV_ERROR_PATTERNS = (
+                            "ModuleNotFoundError",
+                            "ImportError",
+                            "SyntaxError",
+                            "IndentationError",
+                        )
+                        retryable = not any(pat in stderr for pat in _ENV_ERROR_PATTERNS)
                 raise ExecutionError(msg, retryable=retryable)
 
             if self.artifact_store:
@@ -263,8 +274,10 @@ class GraphExecutor:
         """
         session_id = None
         if context:
-            session_id = getattr(context, "session_id", None) or (
-                context.variables.get("session_id") if hasattr(context, "variables") else None
+            session_id = (
+                (context.env.get("exec_session_id") if isinstance(getattr(context, "env", None), dict) else None)
+                or getattr(getattr(context, "identity", None), "session_id", None)
+                or (context.variables.get("session_id") if hasattr(context, "variables") else None)
             )
 
         try:
@@ -486,6 +499,9 @@ class GraphExecutor:
         # python.run: inject upstream node outputs as variables
         if skill_name == "python.run" and context is not None:
             params = self._inject_node_outputs_into_code(params, context)
+            # Sanitize host paths in LLM-generated code: replace D:\Temp\IA\... with /workspace/...
+            # This prevents SyntaxError from unescaped backslashes in Windows paths
+            params = self._sanitize_code_host_paths(params)
 
         # 构建 extra：workspace 优先从 context 取，保证 session 隔离
         extra: Dict[str, Any] = {}
@@ -495,8 +511,12 @@ class GraphExecutor:
         # browser.run artifact 落到 session_workspace/output/，让 ArtifactCollector 能扫到
         if _effective_workspace is not None and hasattr(skill_cls, "spec"):
             from app.avatar.skills.base import SideEffect as _SE
-            if _SE.BROWSER in getattr(skill_cls.spec, "side_effects", set()):
+            _side_effects = getattr(skill_cls.spec, "side_effects", set())
+            if _SE.BROWSER in _side_effects:
                 base_path = _effective_workspace.output_dir
+            # net.download 落到 session_workspace root，保证容器内可达
+            elif _SE.NETWORK in _side_effects and _SE.FS in _side_effects:
+                base_path = Path(_effective_workspace.root)
         if _effective_workspace is not None:
             extra["workspace"] = _effective_workspace
         # 注入 exec_session_id，子进程查 Grant 时用于 scope_id 精确匹配
@@ -647,6 +667,46 @@ class GraphExecutor:
         # Otherwise treat as skill name string
         return await self._execute_skill(str(capability_or_skill), params)
 
+    def _sanitize_code_host_paths(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Replace host machine absolute paths in python.run code with container paths.
+        Prevents SyntaxError from unescaped backslashes in Windows paths like D:\\Temp\\IA\\file.svg.
+        """
+        code = params.get("code", "")
+        if not code:
+            return params
+
+        base_path = self._get_base_path()
+        if not base_path:
+            return params
+
+        from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH
+        workspace_root = str(Path(base_path).resolve())
+
+        # Build both forward-slash and backslash variants
+        root_fwd = workspace_root.replace("\\", "/").rstrip("/")
+        root_back = workspace_root.replace("/", "\\").rstrip("\\")
+
+        import re as _re
+
+        def _replace(m: _re.Match) -> str:
+            full = m.group(0)
+            normalized = full.replace("\\", "/")
+            if normalized.startswith(root_fwd):
+                rel = normalized[len(root_fwd):].lstrip("/")
+                return f"{CONTAINER_WORKSPACE_PATH}/{rel}" if rel else CONTAINER_WORKSPACE_PATH
+            return full
+
+        escaped_fwd = _re.escape(root_fwd)
+        escaped_back = _re.escape(root_back)
+        pattern = f"({escaped_fwd}|{escaped_back})[^\\s\"'\\)\\]]*"
+        new_code = _re.sub(pattern, _replace, code)
+
+        if new_code != code:
+            logger.debug("[GraphExecutor] Sanitized host paths in python.run code")
+            return {**params, "code": new_code}
+        return params
+
     def _inject_node_outputs_into_code(
         self,
         params: Dict[str, Any],
@@ -699,6 +759,7 @@ class GraphExecutor:
             # 提取最有意义的值：结构化输出优先于原始打印
             value = (
                 outputs.get("output")
+                or outputs.get("result")
                 or outputs.get("content")
                 or outputs.get("stdout")
                 or outputs

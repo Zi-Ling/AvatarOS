@@ -11,6 +11,14 @@
   outline: none;
 }
 
+/* 去掉节点 focus 时的黄色边框 */
+.arborist-tree [role="treeitem"] {
+  outline: none;
+}
+.arborist-tree [role="treeitem"] > * {
+  outline: none;
+}
+
 /* 拖拽预览样式 */
 .arborist-tree .drop-cursor {
   height: 2px;

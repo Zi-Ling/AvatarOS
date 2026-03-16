@@ -89,11 +89,32 @@ class GoalCoverageTracker:
 
             # Priority 1: output contract from succeeded nodes
             for node in succeeded_nodes:
-                contract = getattr(node, "output_contract", None) or {}
+                contract = (node.metadata or {}).get("output_contract")
+                # SkillOutputContract 是 dataclass，转成 dict 供匹配
+                if contract is not None and not isinstance(contract, dict):
+                    try:
+                        from dataclasses import asdict
+                        contract = asdict(contract)
+                    except Exception:
+                        contract = {}
+                contract = contract or {}
                 if self._contract_matches_subgoal(contract, sg.description):
                     new_satisfied = True
                     new_evidence = f"step:{node.id}"
                     break
+
+            # Priority 1.5: fs.write/fs.copy/fs.move 成功即判定覆盖
+            # 这些 skill 成功意味着文件已确定性写入，不需要文本匹配
+            _FS_WRITE_SKILLS = {"fs.write", "fs.copy", "fs.move"}
+            if not new_satisfied:
+                for node in succeeded_nodes:
+                    if node.capability_name in _FS_WRITE_SKILLS:
+                        outputs = node.outputs or {}
+                        if outputs.get("success") is not False:
+                            new_satisfied = True
+                            written_path = outputs.get("path") or outputs.get("output") or ""
+                            new_evidence = f"fs_write:{node.id}:{written_path}"
+                            break
 
             # Priority 2: verifier result binding
             if not new_satisfied and verifier_results:

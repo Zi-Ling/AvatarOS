@@ -6,13 +6,13 @@ RUN npm ci --legacy-peer-deps
 
 COPY client/ .
 
-# NEXT_PUBLIC_ 变量必须在构建时注入（Next.js 构建时静态替换）
+# NEXT_PUBLIC_ vars must be injected at build time (Next.js statically replaces them)
 ARG NEXT_PUBLIC_API_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
 RUN npm run build
 
-# ── 运行阶段 ──────────────────────────────────────────────
+# ── Runtime Stage ─────────────────────────────────────────────
 FROM node:20-alpine
 
 WORKDIR /app

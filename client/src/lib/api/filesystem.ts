@@ -176,6 +176,56 @@ export const fsApi = {
   },
 
   /**
+   * Read image file as base64 data URL
+   * @param path Relative path to image file
+   */
+  readImage: async (path: string): Promise<{ data_url: string; mime_type: string }> => {
+    const res = await fetch(`${API_BASE}/fs/image?path=${encodeURIComponent(path)}`);
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => ({}));
+      throw new Error(errorJson.detail || `Failed to read image: ${res.statusText}`);
+    }
+    return res.json();
+  },
+
+  /**
+   * Upload a file into the workspace
+   * @param file File object to upload
+   * @param targetDir Target directory relative path (empty = root)
+   */
+  uploadFile: async (file: File, targetDir: string = ''): Promise<{ success: boolean; message: string; path: string; name: string }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${API_BASE}/fs/upload?path=${encodeURIComponent(targetDir)}`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => ({}));
+      throw new Error(errorJson.detail || `Failed to upload: ${res.statusText}`);
+    }
+    return res.json();
+  },
+
+  /**
+   * Copy a file from an absolute path (outside workspace) into the workspace
+   * @param srcAbsolutePath Absolute path of the source file
+   * @param dstRelativePath Destination relative path inside workspace
+   */
+  copyFromAbsolute: async (srcAbsolutePath: string, dstRelativePath: string): Promise<{ success: boolean; message: string; name: string }> => {
+    const res = await fetch(`${API_BASE}/fs/copy-from-absolute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src_absolute_path: srcAbsolutePath, dst_relative_path: dstRelativePath })
+    });
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => ({}));
+      throw new Error(errorJson.detail || `Failed to copy from absolute: ${res.statusText}`);
+    }
+    return res.json();
+  },
+
+  /**
    * Copy a file or directory
    * @param srcPath Source path
    * @param dstPath Destination path

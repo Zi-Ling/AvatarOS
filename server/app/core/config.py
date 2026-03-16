@@ -51,6 +51,17 @@ class Config(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com"
     llm_api_key: str = ""
 
+    # Web 搜索 API（多 provider 支持，按优先级自动选择）
+    # 商业 API（配了哪个用哪个，优先级：Brave > Google > Tavily）
+    brave_api_key: str = ""
+    google_cse_key: str = ""
+    google_cse_id: str = ""
+    tavily_api_key: str = ""
+    # SearXNG 自托管（无需 key，配 URL 即可）
+    searxng_url: str = ""
+    # 兼容旧配置
+    web_search_api_key: str = ""
+
     # 用户工作目录（用户可随时切换，只含 input/ output/）
     avatar_workspace: Path = Path("./workspace")
 

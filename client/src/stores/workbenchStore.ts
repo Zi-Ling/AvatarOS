@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type WorkbenchTab = 'overview' | 'active' | 'logs' | 'history' | 'editor' | 'approval' | 'cost' | 'trace';
+export type WorkbenchTab = 'overview' | 'active' | 'logs' | 'history' | 'editor';
 
 interface WorkbenchState {
   activeTab: WorkbenchTab;
@@ -16,6 +16,9 @@ interface WorkbenchState {
   closeFile: (path: string) => void;
   setActiveFile: (path: string) => void;
   closeAllFiles: () => void;
+  closeOtherFiles: (path: string) => void;
+  closeFilesToLeft: (path: string) => void;
+  closeFilesToRight: (path: string) => void;
   
   setFileUnsaved: (path: string, unsaved: boolean) => void;
   updateFileContent: (path: string, content: string) => void;
@@ -79,6 +82,41 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
     activeFile: null,
     unsavedFiles: new Set(),
     fileContents: {}
+  }),
+
+  closeOtherFiles: (path) => set((state) => {
+    const newUnsaved = new Set<string>();
+    const newContents: Record<string, string> = {};
+    if (state.unsavedFiles.has(path)) newUnsaved.add(path);
+    if (state.fileContents[path] !== undefined) newContents[path] = state.fileContents[path];
+    return {
+      openFiles: [path],
+      activeFile: path,
+      unsavedFiles: newUnsaved,
+      fileContents: newContents,
+    };
+  }),
+
+  closeFilesToLeft: (path) => set((state) => {
+    const idx = state.openFiles.indexOf(path);
+    if (idx <= 0) return {};
+    const keep = state.openFiles.slice(idx);
+    const newUnsaved = new Set(Array.from(state.unsavedFiles).filter(p => keep.includes(p)));
+    const newContents: Record<string, string> = {};
+    keep.forEach(p => { if (state.fileContents[p] !== undefined) newContents[p] = state.fileContents[p]; });
+    const newActive = keep.includes(state.activeFile ?? '') ? state.activeFile : path;
+    return { openFiles: keep, activeFile: newActive, unsavedFiles: newUnsaved, fileContents: newContents };
+  }),
+
+  closeFilesToRight: (path) => set((state) => {
+    const idx = state.openFiles.indexOf(path);
+    if (idx === -1 || idx === state.openFiles.length - 1) return {};
+    const keep = state.openFiles.slice(0, idx + 1);
+    const newUnsaved = new Set(Array.from(state.unsavedFiles).filter(p => keep.includes(p)));
+    const newContents: Record<string, string> = {};
+    keep.forEach(p => { if (state.fileContents[p] !== undefined) newContents[p] = state.fileContents[p]; });
+    const newActive = keep.includes(state.activeFile ?? '') ? state.activeFile : path;
+    return { openFiles: keep, activeFile: newActive, unsavedFiles: newUnsaved, fileContents: newContents };
   }),
   
   setFileUnsaved: (path, unsaved) => set((state) => {

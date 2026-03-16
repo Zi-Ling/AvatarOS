@@ -113,7 +113,7 @@ export function ActiveTaskView({ task }: ActiveTaskViewProps) {
                      isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> :
                      <Clock className="w-4 h-4" />}
                   </div>
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 min-w-0" title={step.description || step.skill_name}>
                     <div className={cn(
                       'text-xs font-medium truncate',
                       isSelected ? 'text-indigo-600 dark:text-indigo-400' :
@@ -123,7 +123,7 @@ export function ActiveTaskView({ task }: ActiveTaskViewProps) {
                     )}>
                       {label}
                     </div>
-                    <div className="text-[10px] text-slate-400 truncate" title={step.description || step.skill_name}>
+                    <div className="text-[10px] text-slate-400 truncate">
                       {step.description || step.skill_name || `step ${index + 1}`}
                     </div>
                   </div>

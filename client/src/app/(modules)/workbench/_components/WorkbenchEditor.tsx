@@ -1,46 +1,75 @@
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useWorkbenchStore } from '@/stores/workbenchStore';
 import { FileEditor } from '@/app/(modules)/workspace/FileEditor';
 import { X, FileCode } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export function WorkbenchEditor() {
-  const { openFiles, activeFile, setActiveFile, closeFile, unsavedFiles } = useWorkbenchStore();
+interface TabContextMenu {
+  visible: boolean;
+  x: number;
+  y: number;
+  path: string;
+}
 
-  const handleClose = (e: React.MouseEvent, path: string) => {
-      e.stopPropagation();
-      
-      // 如果文件有未保存更改，分发事件通知 Editor 组件
-      if (unsavedFiles.has(path)) {
-          // 切换到该文件以确保 Editor 已经挂载并能接收事件
-          if (activeFile !== path) {
-              setActiveFile(path);
-              // 给一点时间让组件渲染（虽然在同一个渲染周期可能不生效，但我们的 Editor 是 persistent 的）
-              // 由于我们是 persistent 渲染（key={activeFile}），所以非 active 的文件其实没有挂载。
-              // 这是一个问题：未挂载的组件无法接收事件。
-              // 解决方案：如果文件未保存，强行切换过去，让用户看到弹窗。
-              // 等待下一个 tick 发送事件
-              setTimeout(() => {
-                  window.dispatchEvent(new CustomEvent('editor-close-request', { detail: { path } }));
-              }, 50);
-          } else {
-              window.dispatchEvent(new CustomEvent('editor-close-request', { detail: { path } }));
-          }
-      } else {
-          // 直接关闭
-          closeFile(path);
+export function WorkbenchEditor() {
+  const {
+    openFiles, activeFile, setActiveFile, closeFile,
+    closeAllFiles, closeOtherFiles, closeFilesToLeft, closeFilesToRight,
+    unsavedFiles,
+  } = useWorkbenchStore();
+
+  const [tabMenu, setTabMenu] = useState<TabContextMenu>({ visible: false, x: 0, y: 0, path: '' });
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // 点击外部关闭菜单
+  useEffect(() => {
+    if (!tabMenu.visible) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setTabMenu(m => ({ ...m, visible: false }));
       }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [tabMenu.visible]);
+
+  const openTabMenu = (e: React.MouseEvent, path: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTabMenu({ visible: true, x: e.clientX, y: e.clientY, path });
   };
 
+  const closeMenu = () => setTabMenu(m => ({ ...m, visible: false }));
+
+  const handleClose = (e: React.MouseEvent, path: string) => {
+    e.stopPropagation();
+    if (unsavedFiles.has(path)) {
+      if (activeFile !== path) {
+        setActiveFile(path);
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('editor-close-request', { detail: { path } }));
+        }, 50);
+      } else {
+        window.dispatchEvent(new CustomEvent('editor-close-request', { detail: { path } }));
+      }
+    } else {
+      closeFile(path);
+    }
+  };
+
+  const menuPath = tabMenu.path;
+  const menuIdx = openFiles.indexOf(menuPath);
+
   if (openFiles.length === 0) {
-     return (
-        <div className="h-full flex flex-col items-center justify-center text-slate-400">
-            <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-2xl flex items-center justify-center mb-4">
-                <FileCode className="w-8 h-8 opacity-20" />
-            </div>
-            <p>No open files</p>
+    return (
+      <div className="h-full flex flex-col items-center justify-center text-slate-400">
+        <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-2xl flex items-center justify-center mb-4">
+          <FileCode className="w-8 h-8 opacity-20" />
         </div>
-     );
+        <p>No open files</p>
+      </div>
+    );
   }
 
   return (
@@ -55,26 +84,19 @@ export function WorkbenchEditor() {
               key={path}
               className={cn(
                 "flex items-center gap-2 px-3 py-2 text-xs border-r border-slate-200 dark:border-slate-800 cursor-pointer min-w-[120px] max-w-[200px] group",
-                isActive 
-                  ? "bg-white dark:bg-slate-950 text-indigo-600 dark:text-indigo-400 border-t-2 border-t-indigo-500" 
+                isActive
+                  ? "bg-white dark:bg-slate-950 text-indigo-600 dark:text-indigo-400 border-t-2 border-t-indigo-500"
                   : "bg-transparent text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
               )}
               onClick={() => setActiveFile(path)}
+              onContextMenu={(e) => openTabMenu(e, path)}
             >
-              {/* 未保存的小圆点放到最左边，替换图标或在图标旁边？
-                  原需求：将未保存的提示挪到左边
-                  方案：如果是未保存状态，把 FileCode 图标替换成 圆点，或者放在 FileCode 左边？
-                  通常 IDE 做法：圆点替换关闭按钮。
-                  用户要求：挪到左边。
-                  实现：如果未保存，在 FileCode 左边显示圆点。
-              */}
               {unsavedFiles.has(path) ? (
-                  <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0" title="未保存" />
+                <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0" title="未保存" />
               ) : (
-                  <FileCode className="w-3 h-3 shrink-0" />
+                <FileCode className="w-3 h-3 shrink-0" />
               )}
-              
-              <span className={cn("truncate flex-1", path === activeFile ? "font-medium" : "")} title={path}>
+              <span className={cn("truncate flex-1", isActive ? "font-medium" : "")} title={path}>
                 {fileName}
               </span>
               <button
@@ -91,15 +113,71 @@ export function WorkbenchEditor() {
       {/* Editor Content */}
       <div className="flex-1 overflow-hidden relative">
         {activeFile && (
-           <FileEditor 
-             key={activeFile} // Re-mount on file change to reset state
-             filePath={activeFile} 
-             onClose={() => closeFile(activeFile)}
-             isEmbedded={true}
-           />
+          <FileEditor
+            key={activeFile}
+            filePath={activeFile}
+            onClose={() => closeFile(activeFile)}
+            isEmbedded={true}
+          />
         )}
       </div>
+
+      {/* Tab Context Menu */}
+      {tabMenu.visible && typeof window !== 'undefined' && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[9999] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl py-1 min-w-[180px]"
+          style={{ left: tabMenu.x, top: tabMenu.y }}
+        >
+          {/* 关闭当前 */}
+          <button
+            onClick={() => { closeMenu(); handleClose({ stopPropagation: () => {} } as any, menuPath); }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+          >
+            关闭
+          </button>
+
+          {/* 关闭其他 */}
+          <button
+            onClick={() => { closeMenu(); closeOtherFiles(menuPath); }}
+            disabled={openFiles.length <= 1}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            关闭其他
+          </button>
+
+          <div className="h-px bg-slate-200 dark:bg-slate-700 my-0.5" />
+
+          {/* 关闭左侧 */}
+          <button
+            onClick={() => { closeMenu(); closeFilesToLeft(menuPath); }}
+            disabled={menuIdx <= 0}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            关闭左侧标签
+          </button>
+
+          {/* 关闭右侧 */}
+          <button
+            onClick={() => { closeMenu(); closeFilesToRight(menuPath); }}
+            disabled={menuIdx === -1 || menuIdx === openFiles.length - 1}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            关闭右侧标签
+          </button>
+
+          <div className="h-px bg-slate-200 dark:bg-slate-700 my-0.5" />
+
+          {/* 关闭全部 */}
+          <button
+            onClick={() => { closeMenu(); closeAllFiles(); }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+          >
+            关闭全部
+          </button>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
-

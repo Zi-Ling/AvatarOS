@@ -44,7 +44,7 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [containerHeight, setContainerHeight] = useState<number>(500);
-  const { openFile } = useWorkbenchStore();
+  const { openFile, closeFile } = useWorkbenchStore();
   
   // Context menu state
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
@@ -106,8 +106,25 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
   const [workspaceMenuPosition, setWorkspaceMenuPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const workspaceButtonRef = useRef<HTMLButtonElement>(null);
 
-  // Clipboard state for copy/paste
+  // Clipboard state for copy/paste (workspace-internal)
   const [clipboard, setClipboard] = useState<{ path: string; name: string; type: 'file' | 'dir' } | null>(null);
+
+  // 多选状态
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const lastClickedPath = useRef<string | null>(null);
+
+  // System clipboard file paths from Electron (CF_HDROP)
+  const [sysClipboardPaths, setSysClipboardPaths] = useState<string[]>([]);
+
+  // Hidden file input refs
+  const fileInputRef = useRef<HTMLInputElement>(null);       // 上传
+  const [uploadTargetDir, setUploadTargetDir] = useState<string>('');
+
+  // Drag-over state for drop zone highlight
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  // Click timer map: keyed by node path, persists across NodeRenderer re-renders
+  const clickTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // 加载工作目录信息
   const loadWorkspaceInfo = async () => {
@@ -164,6 +181,44 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  // 刷新树但保留已展开文件夹的子节点状态
+  const refreshTreeKeepState = useCallback(async (changedDir?: string) => {
+    try {
+      if (changedDir) {
+        // 只刷新变更目录的内容，不重建整棵树
+        const res = await fsApi.listFiles(changedDir);
+        const newChildren = convertToTreeData(res.items, changedDir);
+        setTreeData(prev => {
+          const updateNode = (nodes: TreeNodeData[]): TreeNodeData[] =>
+            nodes.map(n => {
+              if (n.id === changedDir) return { ...n, children: newChildren, isLoaded: true };
+              if (n.children) return { ...n, children: updateNode(n.children) };
+              return n;
+            });
+          return updateNode(prev);
+        });
+        return;
+      }
+
+      // 根目录刷新：合并保留已展开子节点
+      const res = await fsApi.listFiles('');
+      const newRootItems = convertToTreeData(res.items);
+
+      const mergeNodes = (newNodes: TreeNodeData[], oldNodes: TreeNodeData[]): TreeNodeData[] =>
+        newNodes.map(newNode => {
+          const oldNode = oldNodes.find(o => o.id === newNode.id);
+          if (oldNode && oldNode.type === 'dir' && oldNode.isLoaded && oldNode.children) {
+            return { ...newNode, children: mergeNodes(oldNode.children, oldNode.children), isLoaded: true };
+          }
+          return newNode;
+        });
+
+      setTreeData(prev => mergeNodes(newRootItems, prev));
+    } catch (err: any) {
+      setError(err.message);
     }
   }, []);
 
@@ -263,7 +318,7 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
       // 300ms 内没有新事件才刷新（防抖）
       refreshTimer = setTimeout(() => {
         console.log(`[FileExplorer] Refreshing after ${eventCount} events`);
-        loadRootFiles();
+        refreshTreeKeepState();
         eventCount = 0;
       }, 300);
     };
@@ -276,7 +331,7 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
         clearTimeout(refreshTimer);
       }
     };
-  }, [socket, loadRootFiles]);
+  }, [socket, refreshTreeKeepState]);
 
   // 判断文件是否可编辑
   const isEditableFile = (fileName: string): boolean => {
@@ -344,13 +399,9 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
   const handleFileOpen = async (node: TreeNodeData) => {
     if (node.type === 'dir') return;
 
-    // 图片文件直接用系统默认程序打开
+    // 图片文件：在内置编辑器中预览
     if (isImageFile(node.name)) {
-      try {
-        await fsApi.openFile(node.path);
-      } catch (err: any) {
-        showToast(`打开失败: ${err.message}`, 'error');
-      }
+      openFile(node.path);
       return;
     }
 
@@ -368,7 +419,7 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
   };
 
   const handleRefresh = () => {
-    loadRootFiles();
+    refreshTreeKeepState();
   };
 
   const handleContextMenu = (e: React.MouseEvent, node: NodeApi<TreeNodeData> | null) => {
@@ -380,6 +431,13 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
       y: e.clientY,
       node
     });
+    // 通过 Electron IPC 读取系统剪贴板文件路径
+    const electronAPI = (window as any).electronAPI;
+    if (electronAPI?.readClipboardFilePaths) {
+      electronAPI.readClipboardFilePaths().then((paths: string[]) => {
+        setSysClipboardPaths(paths || []);
+      }).catch(() => setSysClipboardPaths([]));
+    }
   };
 
   const handleRevealInExplorer = async () => {
@@ -406,14 +464,36 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
 
   const handleDeleteConfirm = async () => {
     if (!deleteDialog.item) return;
-    
     try {
-      await fsApi.deleteFileOrDir(deleteDialog.item.path);
-      await loadRootFiles();
+      const deletedPath = deleteDialog.item.path;
+      // 获取父目录用于局部刷新
+      const parts = deletedPath.split('/');
+      parts.pop();
+      const parentDir = parts.join('/') || undefined;
+      await fsApi.deleteFileOrDir(deletedPath);
+      closeFile(deletedPath);
+      await refreshTreeKeepState(parentDir);
       showToast('删除成功', 'success');
     } catch (err: any) {
       showToast(`删除失败: ${err.message}`, 'error');
     }
+  };
+
+  // 批量删除选中项
+  const handleBatchDelete = async () => {
+    const paths = Array.from(selectedPaths);
+    if (paths.length === 0) return;
+    closeContextMenu();
+    for (const p of paths) {
+      try {
+        await fsApi.deleteFileOrDir(p);
+        closeFile(p);
+      } catch (err: any) {
+        console.error(`Delete failed for ${p}:`, err.message);
+      }
+    }
+    setSelectedPaths(new Set());
+    await refreshTreeKeepState();
   };
 
   const showToast = (message: string, type: 'success' | 'error') => {
@@ -426,7 +506,7 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
       await workspaceApi.setWorkspace(path);
       await loadWorkspaceInfo();
       await loadRecentPaths();
-      await loadRootFiles();
+      await loadRootFiles(); // 切换工作区必须完整重建
       showToast('工作目录已切换', 'success');
       setShowWorkspaceMenu(false);
     } catch (err: any) {
@@ -449,7 +529,7 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
     try {
       await workspaceApi.resetToDefault();
       await loadWorkspaceInfo();
-      await loadRootFiles();
+      await loadRootFiles(); // 切换工作区必须完整重建
       showToast('已返回默认工作目录', 'success');
       setShowWorkspaceMenu(false);
     } catch (err: any) {
@@ -524,15 +604,18 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
 
   const handleRenameConfirm = async () => {
     if (!renameDialog.item || !renameDialog.newName.trim()) return;
-    
     try {
-      await fsApi.renameFileOrDir(renameDialog.item.path, renameDialog.newName);
-      await loadRootFiles();
+      const oldPath = renameDialog.item.path;
+      const parts = oldPath.split('/');
+      parts.pop();
+      const parentDir = parts.join('/') || undefined;
+      await fsApi.renameFileOrDir(oldPath, renameDialog.newName);
+      closeFile(oldPath);
+      await refreshTreeKeepState(parentDir);
       showToast('重命名成功', 'success');
     } catch (err: any) {
       showToast(`重命名失败: ${err.message}`, 'error');
     }
-    
     setRenameDialog({ isOpen: false, item: null, newName: '' });
   };
 
@@ -547,19 +630,16 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
 
   const handleCreateFolderConfirm = async () => {
     if (!createFolderDialog.folderName.trim()) return;
-    
     try {
       const newPath = createFolderDialog.targetDir
-        ? `${createFolderDialog.targetDir}/${createFolderDialog.folderName}` 
+        ? `${createFolderDialog.targetDir}/${createFolderDialog.folderName}`
         : createFolderDialog.folderName;
-      
       await fsApi.createFolder(newPath);
-      await loadRootFiles();
+      await refreshTreeKeepState(createFolderDialog.targetDir || undefined);
       showToast('文件夹创建成功', 'success');
     } catch (err: any) {
       showToast(`创建失败: ${err.message}`, 'error');
     }
-    
     setCreateFolderDialog({ isOpen: false, folderName: '', targetDir: '' });
   };
 
@@ -574,56 +654,38 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
 
   const handleCreateFileConfirm = async () => {
     if (!createFileDialog.fileName.trim()) return;
-    
     try {
       const newPath = createFileDialog.targetDir
-        ? `${createFileDialog.targetDir}/${createFileDialog.fileName}` 
+        ? `${createFileDialog.targetDir}/${createFileDialog.fileName}`
         : createFileDialog.fileName;
-      
       await fsApi.writeFile(newPath, '', true);
-      await loadRootFiles();
+      await refreshTreeKeepState(createFileDialog.targetDir || undefined);
       showToast('文件创建成功', 'success');
-      
-      // 智能打开
       const newFileItem: TreeNodeData = {
-        id: newPath,
-        name: createFileDialog.fileName,
-        path: newPath,
-        type: 'file',
-        size: 0,
-        modified: Date.now(),
-        mime_type: null
+        id: newPath, name: createFileDialog.fileName, path: newPath,
+        type: 'file', size: 0, modified: Date.now(), mime_type: null
       };
-      
       await handleFileOpen(newFileItem);
     } catch (err: any) {
       showToast(err.message || '创建失败', 'error');
     }
-    
     setCreateFileDialog({ isOpen: false, fileName: '', targetDir: '' });
   };
 
-  // 处理拖拽移动
   const handleMove = async (args: { dragIds: string[]; parentId: string | null; index: number }) => {
     const { dragIds, parentId } = args;
-    
     try {
       for (const dragId of dragIds) {
-        const sourcePath = dragId;
-        const fileName = sourcePath.split('/').pop() || '';
+        const fileName = dragId.split('/').pop() || '';
         const targetPath = parentId ? `${parentId}/${fileName}` : fileName;
-        
-        if (sourcePath === targetPath) continue;
-        
-        // 调用后端 API 移动文件/文件夹
-        await fsApi.moveFileOrDir(sourcePath, targetPath);
+        if (dragId === targetPath) continue;
+        await fsApi.moveFileOrDir(dragId, targetPath);
       }
-      
-      await loadRootFiles();
+      await refreshTreeKeepState();
       showToast('移动成功', 'success');
     } catch (err: any) {
       showToast(`移动失败: ${err.message}`, 'error');
-      await loadRootFiles(); // 失败后刷新以恢复状态
+      await refreshTreeKeepState();
     }
   };
 
@@ -631,10 +693,18 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
   const handlePaste = async () => {
     if (!clipboard) return;
     
-    // 确定目标目录
-    const targetDir = contextMenu.node?.data.type === 'dir' 
-      ? contextMenu.node.data.path 
-      : '';
+    // 确定目标目录：文件夹节点 → 该文件夹；文件节点 → 文件所在目录；空白 → 根目录
+    let targetDir = '';
+    if (contextMenu.node) {
+      if (contextMenu.node.data.type === 'dir') {
+        targetDir = contextMenu.node.data.path;
+      } else {
+        // 文件节点：取父目录
+        const parts = contextMenu.node.data.path.split('/');
+        parts.pop();
+        targetDir = parts.join('/');
+      }
+    }
     
     try {
       // 构建目标路径
@@ -659,10 +729,9 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
       } else {
         await fsApi.copyFileOrDir(clipboard.path, dstPath);
       }
-      
-      await loadRootFiles();
-      const message = clipboard.type === 'dir' 
-        ? `已粘贴文件夹: ${clipboard.name}` 
+      await refreshTreeKeepState(targetDir || undefined);
+      const message = clipboard.type === 'dir'
+        ? `已粘贴文件夹: ${clipboard.name}`
         : `已粘贴文件: ${clipboard.name}`;
       showToast(message, 'success');
     } catch (err: any) {
@@ -674,6 +743,119 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
 
   const closeContextMenu = () => {
     setContextMenu({ visible: false, x: 0, y: 0, node: null });
+  };
+
+  // 触发文件上传
+  const handleUploadClick = () => {
+    const targetDir = contextMenu.node?.data.type === 'dir'
+      ? contextMenu.node.data.path
+      : '';
+    setUploadTargetDir(targetDir);
+    closeContextMenu();
+    // 延迟触发，等右键菜单关闭
+    setTimeout(() => fileInputRef.current?.click(), 50);
+  };
+
+  // 粘贴系统文件：读取 Electron 剪贴板，有文件直接复制，无文件则提示
+  const handlePasteClick = () => {
+    let targetDir = '';
+    if (contextMenu.node) {
+      if (contextMenu.node.data.type === 'dir') {
+        targetDir = contextMenu.node.data.path;
+      } else {
+        const parts = contextMenu.node.data.path.split('/');
+        parts.pop();
+        targetDir = parts.join('/');
+      }
+    }
+
+    closeContextMenu();
+
+    const electronAPI = (window as any).electronAPI;
+    if (!electronAPI?.readClipboardFilePaths) {
+      showToast('粘贴功能仅在桌面版可用', 'error');
+      return;
+    }
+
+    electronAPI.readClipboardFilePaths()
+      .then(async (paths: string[]) => {
+        console.log('[Paste] Electron clipboard paths:', paths);
+        if (!paths || paths.length === 0) return;
+
+        for (const absPath of paths) {
+          const fileName = absPath.replace(/\\/g, '/').split('/').pop() || 'file';
+          const dstRelPath = targetDir ? `${targetDir}/${fileName}` : fileName;
+          try {
+            await fsApi.copyFromAbsolute(absPath, dstRelPath);
+          } catch (err: any) {
+            console.error(`Paste failed for ${absPath}:`, err.message);
+          }
+        }
+
+        await refreshTreeKeepState(targetDir || undefined);
+      })
+      .catch((e: any) => {
+        console.warn('[Paste] readClipboardFilePaths failed:', e);
+        showToast('读取剪贴板失败', 'error');
+      });
+  };
+
+  // 拖拽文件到 workspace 区域上传
+  const handleDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes('Files')) {
+      e.preventDefault();
+      setIsDragOver(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    // 只在离开整个容器时才取消高亮
+    if (!containerRef.current?.contains(e.relatedTarget as Node)) {
+      setIsDragOver(false);
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+    let successCount = 0, failCount = 0;
+    for (const file of files) {
+      try {
+        await fsApi.uploadFile(file, '');
+        successCount++;
+      } catch (err: any) {
+        failCount++;
+      }
+    }
+    await refreshTreeKeepState();
+    if (failCount === 0) showToast(`已上传 ${successCount} 个文件`, 'success');
+    else showToast(`上传完成：${successCount} 成功，${failCount} 失败`, 'error');
+  };
+
+  // 处理文件选择后上传
+  const handleFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    let successCount = 0;
+    let failCount = 0;
+    for (const file of files) {
+      try {
+        await fsApi.uploadFile(file, uploadTargetDir);
+        successCount++;
+      } catch (err: any) {
+        failCount++;
+        console.error(`Upload failed for ${file.name}:`, err);
+      }
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    await refreshTreeKeepState(uploadTargetDir || undefined);
+    if (failCount === 0) {
+      showToast(`已上传 ${successCount} 个文件`, 'success');
+    } else {
+      showToast(`上传完成：${successCount} 成功，${failCount} 失败`, 'error');
+    }
   };
 
   useEffect(() => {
@@ -694,15 +876,71 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
 
   // 自定义节点渲染
   const NodeRenderer = ({ node, style, dragHandle }: any) => {
-    const { Icon, color } = node.data.type === 'dir' 
+    const { Icon, color } = node.data.type === 'dir'
       ? { Icon: node.isOpen ? FolderOpen : Folder, color: 'text-yellow-500 dark:text-yellow-400' }
       : getFileIcon(node.data.name);
 
-    const handleClick = async () => {
+    const isSelected = selectedPaths.has(node.data.path);
+
+    const handleClick = (e: React.MouseEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl+Click：切换选中，不需要区分双击
+        e.preventDefault();
+        setSelectedPaths(prev => {
+          const next = new Set(prev);
+          if (next.has(node.data.path)) next.delete(node.data.path);
+          else next.add(node.data.path);
+          return next;
+        });
+        lastClickedPath.current = node.data.path;
+        return;
+      }
+
+      if (e.shiftKey && lastClickedPath.current) {
+        // Shift+Click：范围选中
+        e.preventDefault();
+        const flatIds = treeRef.current ? treeRef.current.visibleNodes.map((n: any) => n.data.path) : [];
+        const lastIdx = flatIds.indexOf(lastClickedPath.current);
+        const curIdx = flatIds.indexOf(node.data.path);
+        if (lastIdx !== -1 && curIdx !== -1) {
+          const [from, to] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+          setSelectedPaths(new Set(flatIds.slice(from, to + 1)));
+        }
+        return;
+      }
+
+      // 普通单击：用定时器延迟，等待是否有双击
+      const existingTimer = clickTimersRef.current.get(node.data.path);
+      if (existingTimer) {
+        // 第二次点击到来，取消单击定时器（双击会由 onDoubleClick 处理）
+        clearTimeout(existingTimer);
+        clickTimersRef.current.delete(node.data.path);
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        clickTimersRef.current.delete(node.data.path);
+        // 确认是单击：选中，文件夹切换展开
+        setSelectedPaths(new Set([node.data.path]));
+        lastClickedPath.current = node.data.path;
+        if (node.data.type === 'dir') {
+          node.toggle();
+        }
+      }, 250);
+      clickTimersRef.current.set(node.data.path, timer);
+    };
+
+    const handleDoubleClick = (e: React.MouseEvent) => {
+      e.preventDefault();
+      const existingTimer = clickTimersRef.current.get(node.data.path);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        clickTimersRef.current.delete(node.data.path);
+      }
       if (node.data.type === 'file') {
         handleFileOpen(node.data);
       } else {
-        // 先切换状态
+        // 文件夹双击也切换展开（与单击一致，但跳过延迟）
         node.toggle();
       }
     };
@@ -711,19 +949,26 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
       <div
         ref={dragHandle}
         style={style}
-        className={`group flex items-center justify-between px-2 py-0.5 rounded-md cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors border border-transparent hover:border-blue-100 dark:hover:border-blue-800/30 ${
-          node.isSelected ? 'bg-blue-100 dark:bg-blue-900/30' : ''
+        className={`group flex items-center justify-between px-2 py-0.5 rounded-md cursor-pointer transition-colors border border-transparent ${
+          isSelected
+            ? 'bg-blue-100 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800/50'
+            : 'hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:border-blue-100 dark:hover:border-blue-800/30'
         }`}
         onClick={handleClick}
-        onContextMenu={(e) => handleContextMenu(e, node)}
+        onDoubleClick={handleDoubleClick}
+        onContextMenu={(e) => {
+          // 右键时如果点击的节点不在选中集合里，重置选中
+          if (!selectedPaths.has(node.data.path)) {
+            setSelectedPaths(new Set());
+          }
+          handleContextMenu(e, node);
+        }}
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">
           {node.data.type === 'dir' ? (
-            <ChevronRight 
-              size={12} 
-              className={`shrink-0 text-slate-400 transition-transform ${
-                node.isOpen ? 'rotate-90' : ''
-              }`}
+            <ChevronRight
+              size={12}
+              className={`shrink-0 text-slate-400 transition-transform ${node.isOpen ? 'rotate-90' : ''}`}
             />
           ) : (
             <span className="w-[12px] shrink-0" />
@@ -791,14 +1036,24 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
       {/* Tree View */}
       <div 
         ref={containerRef}
-        className="flex-1 overflow-hidden"
+        className={`flex-1 overflow-hidden relative transition-colors ${isDragOver ? 'bg-blue-50 dark:bg-blue-900/20 ring-2 ring-inset ring-blue-400' : ''}`}
         onContextMenu={(e) => {
           if ((e.target as HTMLElement).closest('[role="treeitem"]')) {
             return;
           }
           handleContextMenu(e, null);
         }}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
       >
+        {isDragOver && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+            <div className="bg-blue-500/90 text-white text-xs px-3 py-1.5 rounded-lg shadow-lg">
+              松开以上传文件
+            </div>
+          </div>
+        )}
         {error && (
           <div className="p-4 text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-md m-2">
             {error}
@@ -916,13 +1171,23 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
                 <span>{contextMenu.node.data.type === 'dir' ? '复制文件夹' : '复制文件'}</span>
               </button>
               
-              {clipboard && contextMenu.node.data.type === 'dir' && (
+              {clipboard && (
                 <button
                   onClick={handlePaste}
                   className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
                 >
                   <Clipboard size={14} />
-                  <span>粘贴到此文件夹</span>
+                  <span>{contextMenu.node.data.type === 'dir' ? '粘贴到此文件夹' : '粘贴到同级目录'}</span>
+                </button>
+              )}
+
+              {sysClipboardPaths.length > 0 && (
+                <button
+                  onClick={handlePasteClick}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                >
+                  <Clipboard size={14} />
+                  <span>粘贴文件</span>
                 </button>
               )}
               
@@ -971,6 +1236,22 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
                     <FolderPlus size={14} />
                     <span>新建文件夹</span>
                   </button>
+                  <button
+                    onClick={handleUploadClick}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                  >
+                    <FileImage size={14} />
+                    <span>上传本地文件...</span>
+                  </button>
+                  {sysClipboardPaths.length > 0 && (
+                    <button
+                      onClick={handlePasteClick}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                    >
+                      <Clipboard size={14} />
+                      <span>粘贴文件</span>
+                    </button>
+                  )}
                 </>
               )}
               
@@ -985,14 +1266,24 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
               </button>
               
               <div className="h-px bg-slate-200 dark:bg-slate-700 my-0.5" />
-              
-              <button
-                onClick={handleDeleteClick}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-              >
-                <Trash2 size={14} />
-                <span>删除</span>
-              </button>
+
+              {selectedPaths.size > 1 ? (
+                <button
+                  onClick={handleBatchDelete}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                >
+                  <Trash2 size={14} />
+                  <span>删除</span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleDeleteClick}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                >
+                  <Trash2 size={14} />
+                  <span>删除</span>
+                </button>
+              )}
             </>
           ) : (
             <>
@@ -1013,8 +1304,28 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
                 <FolderPlus size={14} />
                 <span>新建文件夹</span>
               </button>
+
+              {/* 上传本地文件 */}
+              <button
+                onClick={handleUploadClick}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+              >
+                <FileImage size={14} />
+                <span>上传本地文件...</span>
+              </button>
+
+              {/* 有系统剪贴板文件时才显示粘贴 */}
+              {sysClipboardPaths.length > 0 && (
+                <button
+                  onClick={handlePasteClick}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                >
+                  <Clipboard size={14} />
+                  <span>粘贴文件</span>
+                </button>
+              )}
               
-              {/* 粘贴（如果有剪贴板内容） */}
+              {/* 粘贴（如果有 workspace 内部剪贴板内容） */}
               {clipboard && (
                 <>
                   <div className="h-px bg-slate-200 dark:bg-slate-700 my-0.5" />
@@ -1221,6 +1532,15 @@ export default function FileExplorer({ onClose }: FileExplorerProps) {
           </div>
         </div>
       )}
+
+      {/* Hidden file input for upload */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileInputChange}
+      />
 
       {/* Toast Notification */}
       {toast && (

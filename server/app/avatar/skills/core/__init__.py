@@ -5,10 +5,11 @@
 1. python.run   - 计算沙箱
 2. fs.*         - 文件系统边界（文本优先，20MB限制，路径白名单）
 3. net.*        - 网络边界（安全双轨：net.get 文本直读 / net.download 落盘）
-4. browser.run  - 浏览器执行器（Playwright，per-task context 隔离，artifact-first）
-5. state.*      - 短期状态（task/session/user scope）
-6. memory.*     - 长期记忆（向量库）
-7. approval.*   - 人工审批（幂等协议）
+4. web.search   - 开放世界搜索（Tavily / DuckDuckGo fallback）
+5. browser.run  - 浏览器执行器（Playwright，per-task context 隔离，artifact-first）
+6. state.*      - 短期状态（task/session/user scope）
+7. memory.*     - 长期记忆（向量库）
+8. approval.*   - 人工审批（幂等协议）
 """
 
 from .python import PythonRunSkill
@@ -21,6 +22,7 @@ from .fs import (
     FsCopySkill,
 )
 from .net import NetGetSkill, NetPostSkill, NetDownloadSkill
+from .web import WebSearchSkill
 from .browser import BrowserRunSkill
 from .state import StateSetSkill, StateGetSkill, StateDeleteSkill
 from .memory import MemoryStoreSkill, MemorySearchSkill, MemoryDeleteSkill
@@ -40,6 +42,8 @@ __all__ = [
     "NetGetSkill",
     "NetPostSkill",
     "NetDownloadSkill",
+    # Web 搜索
+    "WebSearchSkill",
     # 浏览器执行器
     "BrowserRunSkill",
     # 状态

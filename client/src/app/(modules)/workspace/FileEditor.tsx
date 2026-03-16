@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import Editor from "@monaco-editor/react";
-import { X, Loader2, GripHorizontal } from "lucide-react";
+import { X, Loader2, ZoomIn, ZoomOut, RotateCcw, RotateCw as RotateCwIcon, Copy, Scissors, Clipboard, WrapText, Search } from "lucide-react";
 import { fsApi } from "@/lib/api/filesystem";
 
 import { useWorkbenchStore } from "@/stores/workbenchStore";
@@ -16,22 +16,33 @@ interface FileEditorProps {
 
 export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditorProps) {
   const { setFileUnsaved, updateFileContent, fileContents } = useWorkbenchStore();
-  
+
+  // 判断是否为图片文件
+  const isImage = /\.(png|jpe?g|gif|bmp|svg|webp|ico)$/i.test(filePath);
+
+  // 图片预览状态
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
+  const [imageZoom, setImageZoom] = useState(1);
+  const [imageRotation, setImageRotation] = useState(0);
+
   // 优先使用 store 中的缓存内容（如果有），否则为空字符串（等待加载）
-  // 注意：初始加载逻辑需要调整，避免覆盖 store 中的脏数据
   const cachedContent = fileContents[filePath];
   const [content, setContent] = useState<string>(cachedContent || "");
   const [originalContent, setOriginalContent] = useState<string>("");
-  const [isLoading, setIsLoading] = useState(!cachedContent); // 如果有缓存，就不loading了
+  const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   
   // Toast state
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const editorRef = useRef<HTMLDivElement>(null);
-  
-  // 移除 size, position 等状态...
+  const monacoEditorRef = useRef<any>(null);
   const [mounted, setMounted] = useState(false);
+
+  // Custom context menu state
+  const [editorContextMenu, setEditorContextMenu] = useState<{ visible: boolean; x: number; y: number }>({
+    visible: false, x: 0, y: 0
+  });
 
   useEffect(() => {
     setMounted(true);
@@ -62,28 +73,22 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
 
   // 加载文件内容
   useEffect(() => {
-    // 如果已经有缓存内容（说明之前编辑过且未关闭），则不再重新读取文件，除非这是第一次挂载
-    // 但是，我们需要 originalContent 来判断 dirty 状态。
-    // 如果 store 中有内容，说明是"恢复现场"。此时 originalContent 应该怎么获取？
-    // 理想情况下，我们应该重新读取文件作为 originalContent，但使用 cachedContent 作为 currentContent。
-    
     const loadFile = async () => {
-      // 仅当没有缓存内容或者需要确认 originalContent 时才加载
-      // 实际上每次挂载都应该读取"磁盘上的内容"作为基准 (originalContent)
-      
       try {
-        if (!cachedContent) setIsLoading(true); // 只有没缓存时才显示 loading
-        
-        const fileContent = await fsApi.readFile(filePath);
-        setOriginalContent(fileContent);
-        
-        // 如果没有缓存内容（第一次打开），则使用文件内容
-        if (cachedContent === undefined) {
+        setIsLoading(true);
+
+        if (isImage) {
+          // 图片：加载 base64 数据
+          const { data_url } = await fsApi.readImage(filePath);
+          setImageDataUrl(data_url);
+        } else {
+          // 文本：读取内容
+          const fileContent = await fsApi.readFile(filePath);
+          setOriginalContent(fileContent);
+          if (cachedContent === undefined) {
             setContent(fileContent);
             updateFileContent(filePath, fileContent);
-        } else {
-            // 如果有缓存内容，保持缓存内容不变（即保留未保存的更改）
-            // 这里不需要 setContent，因为 useState 初始值已经设置了
+          }
         }
       } catch (error) {
         showToast(`无法读取文件: ${error}`, 'error');
@@ -94,7 +99,7 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
     };
     
     loadFile();
-  }, [filePath]); // 移除 cachedContent 依赖，防止死循环
+  }, [filePath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 实时更新 store 中的内容缓存
   const handleContentChange = (value: string | undefined) => {
@@ -116,8 +121,8 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
     }
   };
 
-  // 检测是否有未保存的更改
-  const hasUnsavedChanges = content !== originalContent;
+  // 检测是否有未保存的更改（图片文件不需要）
+  const hasUnsavedChanges = !isImage && content !== originalContent;
   
   // 同步未保存状态到 store
   useEffect(() => {
@@ -267,11 +272,74 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
         </div>
       )}
 
-        {/* Editor */}
+        {/* Editor / Image Preview */}
         <div className="flex-1 overflow-hidden">
           {isLoading ? (
             <div className="h-full flex items-center justify-center">
               <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
+            </div>
+          ) : isImage ? (
+            // 图片预览
+            <div
+              className="h-full flex flex-col items-center justify-center bg-slate-100 dark:bg-slate-900 overflow-auto relative"
+              onWheel={(e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? -0.1 : 0.1;
+                setImageZoom(z => Math.min(5, Math.max(0.1, parseFloat((z + delta).toFixed(2)))));
+              }}
+            >
+              {/* 缩放/旋转工具栏 */}
+              <div className="absolute top-3 right-3 flex items-center gap-1 bg-white/80 dark:bg-slate-800/80 backdrop-blur-sm rounded-lg px-2 py-1 shadow border border-slate-200 dark:border-slate-700 z-10">
+                <button
+                  onClick={() => setImageZoom(z => Math.max(0.1, parseFloat((z - 0.25).toFixed(2))))}
+                  className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors"
+                  title="缩小"
+                >
+                  <ZoomOut size={14} className="text-slate-600 dark:text-slate-300" />
+                </button>
+                <span className="text-xs text-slate-600 dark:text-slate-300 w-12 text-center">
+                  {Math.round(imageZoom * 100)}%
+                </span>
+                <button
+                  onClick={() => setImageZoom(z => Math.min(5, parseFloat((z + 0.25).toFixed(2))))}
+                  className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors"
+                  title="放大"
+                >
+                  <ZoomIn size={14} className="text-slate-600 dark:text-slate-300" />
+                </button>
+                <div className="w-px h-4 bg-slate-300 dark:bg-slate-600 mx-0.5" />
+                <button
+                  onClick={() => setImageRotation(r => r - 90)}
+                  className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors"
+                  title="逆时针旋转"
+                >
+                  <RotateCcw size={14} className="text-slate-600 dark:text-slate-300" />
+                </button>
+                <button
+                  onClick={() => setImageRotation(r => r + 90)}
+                  className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors"
+                  title="顺时针旋转"
+                >
+                  <RotateCwIcon size={14} className="text-slate-600 dark:text-slate-300" />
+                </button>
+                <div className="w-px h-4 bg-slate-300 dark:bg-slate-600 mx-0.5" />
+                <button
+                  onClick={() => { setImageZoom(1); setImageRotation(0); }}
+                  className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors"
+                  title="重置"
+                >
+                  <RotateCcw size={14} className="text-slate-600 dark:text-slate-300 opacity-50" />
+                </button>
+              </div>
+              {imageDataUrl && (
+                <img
+                  src={imageDataUrl}
+                  alt={fileName}
+                  style={{ transform: `rotate(${imageRotation}deg) scale(${imageZoom})`, transformOrigin: 'center center' }}
+                  className="max-w-none transition-transform duration-150 rounded shadow-md"
+                  draggable={false}
+                />
+              )}
             </div>
           ) : (
             <Editor
@@ -313,6 +381,7 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
                 });
               }}
               onMount={(editor, monaco) => {
+                monacoEditorRef.current = editor;
                 const isDark = document.documentElement.classList.contains('dark');
                 monaco.editor.setTheme(isDark ? 'intelliavatar-dark' : 'intelliavatar-light');
                 const observer = new MutationObserver(() => {
@@ -323,6 +392,14 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
                   attributes: true,
                   attributeFilter: ['class'],
                 });
+
+                // Disable native context menu and show custom one
+                editor.onContextMenu((e) => {
+                  e.event.preventDefault();
+                  e.event.stopPropagation();
+                  const { posx, posy } = e.event;
+                  setEditorContextMenu({ visible: true, x: posx, y: posy });
+                });
               }}
               options={{
                 fontSize: 14,
@@ -331,6 +408,7 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
                 automaticLayout: true,
                 tabSize: 2,
                 wordWrap: 'on',
+                contextmenu: false,
               }}
             />
           )}
@@ -343,10 +421,8 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
         "bg-slate-50 dark:bg-slate-900 text-slate-500 dark:text-slate-400",
       ].join(" ")}>
         <span>{filePath}</span>
-        <span className="font-mono uppercase">{getLanguage(filePath)}</span>
+        <span className="font-mono uppercase">{isImage ? 'IMAGE' : getLanguage(filePath)}</span>
       </div>
-      
-      {/* Resize Handle - 仅非嵌入模式显示 - 移除 */}{!isEmbedded && (<></>)}
 
       {/* 关闭确认对话框 */}
       {showCloseConfirm && (
@@ -397,6 +473,107 @@ export function FileEditor({ filePath, onClose, isEmbedded = false }: FileEditor
             </div>
           </div>
         </div>
+      )}
+
+      {/* Editor Custom Context Menu */}
+      {editorContextMenu.visible && mounted && createPortal(
+        <>
+          <div
+            className="fixed inset-0 z-[9998]"
+            onClick={() => setEditorContextMenu({ visible: false, x: 0, y: 0 })}
+            onContextMenu={(e) => { e.preventDefault(); setEditorContextMenu({ visible: false, x: 0, y: 0 }); }}
+          />
+          <div
+            className="fixed z-[9999] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl py-1 min-w-[180px]"
+            style={{ left: editorContextMenu.x, top: editorContextMenu.y }}
+          >
+            <button
+              onClick={() => {
+                monacoEditorRef.current?.trigger('keyboard', 'editor.action.clipboardCopyAction', null);
+                setEditorContextMenu({ visible: false, x: 0, y: 0 });
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            >
+              <Copy size={14} />
+              <span>复制</span>
+              <span className="ml-auto text-slate-400 dark:text-slate-500">Ctrl+C</span>
+            </button>
+            <button
+              onClick={() => {
+                monacoEditorRef.current?.trigger('keyboard', 'editor.action.clipboardCutAction', null);
+                setEditorContextMenu({ visible: false, x: 0, y: 0 });
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            >
+              <Scissors size={14} />
+              <span>剪切</span>
+              <span className="ml-auto text-slate-400 dark:text-slate-500">Ctrl+X</span>
+            </button>
+            <button
+              onClick={async () => {
+                try {
+                  const text = await navigator.clipboard.readText();
+                  const editor = monacoEditorRef.current;
+                  if (editor) {
+                    const selection = editor.getSelection();
+                    editor.executeEdits('paste', [{
+                      range: selection,
+                      text,
+                      forceMoveMarkers: true,
+                    }]);
+                    editor.focus();
+                  }
+                } catch {
+                  // fallback: trigger native paste
+                  monacoEditorRef.current?.trigger('keyboard', 'editor.action.clipboardPasteAction', null);
+                }
+                setEditorContextMenu({ visible: false, x: 0, y: 0 });
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            >
+              <Clipboard size={14} />
+              <span>粘贴</span>
+              <span className="ml-auto text-slate-400 dark:text-slate-500">Ctrl+V</span>
+            </button>
+            <div className="h-px bg-slate-200 dark:bg-slate-700 my-0.5" />
+            <button
+              onClick={() => {
+                monacoEditorRef.current?.trigger('keyboard', 'editor.action.selectAll', null);
+                setEditorContextMenu({ visible: false, x: 0, y: 0 });
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            >
+              <WrapText size={14} />
+              <span>全选</span>
+              <span className="ml-auto text-slate-400 dark:text-slate-500">Ctrl+A</span>
+            </button>
+            <button
+              onClick={() => {
+                monacoEditorRef.current?.trigger('keyboard', 'actions.find', null);
+                setEditorContextMenu({ visible: false, x: 0, y: 0 });
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            >
+              <Search size={14} />
+              <span>查找</span>
+              <span className="ml-auto text-slate-400 dark:text-slate-500">Ctrl+F</span>
+            </button>
+            <div className="h-px bg-slate-200 dark:bg-slate-700 my-0.5" />
+            <button
+              onClick={() => {
+                handleSave();
+                setEditorContextMenu({ visible: false, x: 0, y: 0 });
+              }}
+              disabled={!hasUnsavedChanges}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <X size={14} className="opacity-0" />
+              <span>保存</span>
+              <span className="ml-auto text-slate-400 dark:text-slate-500">Ctrl+S</span>
+            </button>
+          </div>
+        </>,
+        document.body
       )}
 
       {/* Toast Notification */}

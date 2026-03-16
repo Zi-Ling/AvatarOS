@@ -16,9 +16,9 @@ client/.next
 .idea
 .vscode
 
-# 本地配置（不打包进镜像）
+# Local config (not included in image)
 server/.env
 docker/.env
 
-# 大文件
+# Large files
 server/app/models

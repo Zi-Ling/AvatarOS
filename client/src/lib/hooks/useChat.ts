@@ -59,15 +59,16 @@ export function useChat() {
     }
   }, [storedSessionId, setSessionId]);
 
-  const handleSend = useCallback(async () => {
-    if (!inputValue.trim() && attachments.length === 0) return;
+  const handleSend = useCallback(async (overrideInput?: string) => {
+    const sendInput = overrideInput ?? inputValue;
+    if (!sendInput.trim() && attachments.length === 0) return;
 
     const currentSessionId = storedSessionId || SessionManager.getSessionId();
     if (!storedSessionId) {
       setSessionId(currentSessionId);
     }
 
-    const userInput = inputValue;
+    const userInput = sendInput;
     const userAttachments = [...attachments];
 
     const userMessage: Message = {
@@ -167,6 +168,10 @@ export function useChat() {
           }
         }
       }
+
+      // Stream finished normally — ensure isTyping is reset
+      setIsTyping(false);
+      setCanCancel(false);
     } catch (error: any) {
       console.error("Chat API error:", error);
       setCurrentTaskMessageId(null);
@@ -218,25 +223,20 @@ export function useChat() {
       });
     }
 
-    // 2. 取消活跃任务
+    // 2. 发送停止 intent — 不在前端自推暂停卡片
+    // 暂停卡片由 TaskEventListener 在收到后端 task.paused / task_status_changed(paused) 后推送
     if (activeTask && storedSessionId && socket) {
       setIsCancelling(true);
       socket.emit("cancel_task", {
         session_id: storedSessionId,
         task_id: activeTask.id,
       });
-      addMessage({
-        id: `cancel-${Date.now()}`,
-        role: "assistant",
-        content: language === "zh" ? "⏸️ 正在停止任务..." : "⏸️ Stopping task...",
-        timestamp: new Date().toISOString(),
-      });
     }
 
     // 3. 更新状态
     setCanCancel(false);
     setCurrentTaskMessageId(null);
-  }, [activeTask, storedSessionId, socket, language, setIsTyping, updateMessage, setIsCancelling, addMessage, setCanCancel, setCurrentTaskMessageId]);
+  }, [activeTask, storedSessionId, socket, setIsTyping, updateMessage, setIsCancelling, setCanCancel, setCurrentTaskMessageId]);
 
   const handleNewChatConfirm = useCallback(() => {
     clearChat();

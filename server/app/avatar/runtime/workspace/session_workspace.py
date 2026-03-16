@@ -135,20 +135,23 @@ class SessionWorkspace:
 
     def snapshot_workspace(self) -> Dict[str, float]:
         """
-        Return {relative_path: mtime} snapshot of all files under output/.
+        Return {relative_path: mtime} snapshot of all files under workspace root.
         ArtifactCollector uses before/after snapshot diff to find new/modified files.
-        Only scans output/, not input/artifacts/logs/tmp.
+        Scans entire root but skips system dirs (logs/, tmp/, artifacts/).
         """
         snapshot: Dict[str, float] = {}
-        scan_root = self.output_dir
-        if not scan_root.exists():
+        skip_dirs = {"logs", "tmp", "artifacts"}
+        if not self.root.exists():
             return snapshot
-        for p in scan_root.rglob("*"):
+        for p in self.root.rglob("*"):
             if not p.is_file():
                 continue
+            # Skip system directories
             try:
                 rel = p.relative_to(self.root)
             except ValueError:
+                continue
+            if rel.parts and rel.parts[0] in skip_dirs:
                 continue
             snapshot[str(rel)] = p.stat().st_mtime
         return snapshot
@@ -158,7 +161,8 @@ class SessionWorkspace:
         before: Dict[str, float],
     ) -> Dict[str, List[Path]]:
         """
-        Compare against before snapshot, return new and modified files in output/.
+        Compare against before snapshot, return new and modified files.
+        Scans entire workspace root (excluding system dirs).
 
         Returns:
             {"new": [...], "modified": [...]}
@@ -207,16 +211,19 @@ class SessionWorkspaceManager:
         self._sessions: Dict[str, SessionWorkspace] = {}
         logger.info(f"[SessionWorkspaceManager] base_path={self.base_path}")
 
-    def get_or_create(self, session_id: str) -> SessionWorkspace:
-        if session_id not in self._sessions:
-            root = self.base_path / session_id
-            ws = SessionWorkspace(session_id=session_id, root=root)
-            self._sessions[session_id] = ws
-            logger.info(f"[SessionWorkspaceManager] Created workspace for {session_id}: {root}")
-        return self._sessions[session_id]
+    def get_or_create(self, session_id: str) -> "SessionWorkspace":
+        # 清理 Windows 不允许的路径字符（冒号、斜杠等）
+        safe_id = session_id.replace(":", "-").replace("/", "-").replace("\\", "-")
+        if safe_id not in self._sessions:
+            root = self.base_path / safe_id
+            ws = SessionWorkspace(session_id=safe_id, root=root)
+            self._sessions[safe_id] = ws
+            logger.info(f"[SessionWorkspaceManager] Created workspace for {safe_id}: {root}")
+        return self._sessions[safe_id]
 
-    def get(self, session_id: str) -> Optional[SessionWorkspace]:
-        return self._sessions.get(session_id)
+    def get(self, session_id: str) -> Optional["SessionWorkspace"]:
+        safe_id = session_id.replace(":", "-").replace("/", "-").replace("\\", "-")
+        return self._sessions.get(safe_id)
 
     def cleanup(self, session_id: str, delete_files: bool = False):
         ws = self._sessions.pop(session_id, None)

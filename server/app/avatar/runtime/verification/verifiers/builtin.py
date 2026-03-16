@@ -172,6 +172,15 @@ class ImageOpenableVerifier(BaseVerifier):
                 reason=f"ImageOpenableVerifier skipped: target kind={target.kind}",
             )
 
+        # SVG is a vector format — Pillow cannot open it. Skip gracefully.
+        if target.mime_type == "image/svg+xml" or (
+            target.path and target.path.lower().endswith(".svg")
+        ):
+            return self._make_result(
+                target, VerificationStatus.SKIPPED,
+                reason="SVG is a vector format, not verifiable via PIL — skipped",
+            )
+
         # Optional dependency check
         try:
             from PIL import Image  # type: ignore

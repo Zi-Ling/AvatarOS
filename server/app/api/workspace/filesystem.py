@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, UploadFile, File as FastAPIFile
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from pydantic import BaseModel
@@ -26,6 +26,10 @@ class CopyRequest(BaseModel):
     src_path: str
     dst_path: str
 
+class CopyFromAbsoluteRequest(BaseModel):
+    src_absolute_path: str  # 外部绝对路径
+    dst_relative_path: str  # workspace 内相对路径
+
 class CreateFolderRequest(BaseModel):
     path: str
 
@@ -50,6 +54,37 @@ def _get_safe_path(path_str: str) -> Path:
         raise HTTPException(status_code=403, detail="Access denied: Path outside workspace")
         
     return target_path
+
+@router.get("/image")
+async def read_image(path: str = Query(..., description="Relative path to image file")):
+    """
+    Read image file and return as base64 data URL.
+    """
+    import base64
+    
+    try:
+        target_file = _get_safe_path(path)
+        
+        if not target_file.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        if not target_file.is_file():
+            raise HTTPException(status_code=400, detail="Path is not a file")
+        if target_file.stat().st_size > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+        
+        mime_type, _ = mimetypes.guess_type(target_file.name)
+        if not mime_type or not mime_type.startswith("image/"):
+            mime_type = "image/png"
+        
+        data = target_file.read_bytes()
+        b64 = base64.b64encode(data).decode("utf-8")
+        return {"data_url": f"data:{mime_type};base64,{b64}", "mime_type": mime_type}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/absolute-path")
 async def get_absolute_path(path: str = Query("", description="Relative path")):
@@ -201,13 +236,50 @@ async def reveal_in_explorer(path: str = Query("", description="Relative path to
         system_name = platform.system()
         
         if system_name == "Windows":
-            # Windows: explorer /select, "path"
-            # Only works for files. For dirs, just open it.
+            import ctypes
+            import time
             path_str = str(target_path).replace("/", "\\")
             if target_path.is_file():
-                subprocess.run(f'explorer /select,"{path_str}"', shell=True)
+                subprocess.Popen(f'explorer /select,"{path_str}"', shell=True)
             else:
-                os.startfile(path_str)
+                subprocess.Popen(f'explorer "{path_str}"', shell=True)
+            # explorer 是单实例程序，新进程会把请求转给已有实例后退出
+            # 需要等待资源管理器窗口出现后强制置顶
+            time.sleep(0.6)
+            try:
+                user32 = ctypes.windll.user32
+                target_name = target_path.name
+                found_hwnd = [0]
+
+                def _enum_cb(hwnd, _):
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buf = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buf, length + 1)
+                        title = buf.value
+                        # 资源管理器窗口标题通常是目录名或"文件资源管理器"
+                        if target_name in title or title in ("文件资源管理器", "File Explorer", target_path.name):
+                            found_hwnd[0] = hwnd
+                            return False  # 停止枚举
+                    return True
+
+                EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+                user32.EnumWindows(EnumProc(_enum_cb), 0)
+
+                if found_hwnd[0]:
+                    user32.ShowWindow(found_hwnd[0], 9)   # SW_RESTORE
+                    user32.SetForegroundWindow(found_hwnd[0])
+                else:
+                    # 找不到精确匹配时，尝试激活最近的资源管理器窗口
+                    shell_class = "CabinetWClass"
+                    hwnd = user32.FindWindowW(shell_class, None)
+                    if hwnd:
+                        user32.ShowWindow(hwnd, 9)
+                        user32.SetForegroundWindow(hwnd)
+            except Exception as e:
+                logger.debug(f"SetForegroundWindow failed (non-critical): {e}")
                 
         elif system_name == "Darwin": # macOS
             subprocess.run(["open", "-R", str(target_path)])
@@ -483,4 +555,92 @@ async def copy_file_or_dir(request: CopyRequest):
     except Exception as e:
         logger.error(f"Failed to copy: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to copy: {e}")
+
+
+@router.post("/copy-from-absolute")
+async def copy_from_absolute(request: CopyFromAbsoluteRequest):
+    """
+    Copy a file from an absolute path (outside workspace) into the workspace.
+    Only files are allowed (no directory traversal).
+    """
+    import shutil
+
+    try:
+        src_path = Path(request.src_absolute_path).resolve()
+
+        # Security: only allow files, not directories
+        if not src_path.exists():
+            raise HTTPException(status_code=404, detail="Source file not found")
+        if not src_path.is_file():
+            raise HTTPException(status_code=400, detail="Only files can be copied (not directories)")
+
+        # Determine destination
+        dst_path = _get_safe_path(request.dst_relative_path)
+
+        if dst_path.exists():
+            # 自动重命名：file.txt → file(1).txt → file(2).txt
+            stem = src_path.stem
+            suffix = src_path.suffix
+            counter = 1
+            while dst_path.exists():
+                dst_path = dst_path.parent / f"{stem}({counter}){suffix}"
+                counter += 1
+
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dst_path)
+        logger.info(f"Copied from absolute {src_path} to {dst_path}")
+
+        return {"success": True, "message": f"Copied {src_path.name} to workspace", "name": src_path.name}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to copy from absolute: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to copy: {e}")
+
+
+@router.post("/upload")
+async def upload_file(
+    file: UploadFile = FastAPIFile(...),
+    path: str = Query("", description="Target directory relative path")
+):
+    """
+    Upload a file into the workspace directory.
+    """
+    try:
+        target_dir = _get_safe_path(path)
+
+        if not target_dir.exists():
+            raise HTTPException(status_code=404, detail="Target directory not found")
+        if not target_dir.is_dir():
+            raise HTTPException(status_code=400, detail="Target path is not a directory")
+
+        # Sanitize filename
+        safe_name = Path(file.filename or "upload").name
+        if not safe_name or safe_name in ('.', '..'):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        dst_path = target_dir / safe_name
+
+        # Handle name collision: append suffix
+        if dst_path.exists():
+            stem = dst_path.stem
+            suffix = dst_path.suffix
+            counter = 1
+            while dst_path.exists():
+                dst_path = target_dir / f"{stem} ({counter}){suffix}"
+                counter += 1
+
+        content = await file.read()
+        dst_path.write_bytes(content)
+        logger.info(f"Uploaded file to {dst_path}")
+
+        rel_path = str(dst_path.relative_to(get_workspace_manager().get_workspace())).replace("\\", "/")
+        return {"success": True, "message": f"Uploaded {safe_name}", "path": rel_path, "name": dst_path.name}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to upload file: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload: {e}")
 
