@@ -163,22 +163,37 @@ export function MessageList({
 
           {/* ── Assistant message ── */}
           {message.role === "assistant" && (
-            <div className="group flex items-start gap-2 max-w-[80%] min-w-0">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-xs font-bold text-white shadow-sm">
-                AO
-              </div>
-              <div className="flex-1 min-w-0 space-y-1">
-                {/* system-style messages skip the bubble wrapper */}
-                {resolveKind(message) === "run" && resolveRunSubtype(message) === "cancelled" ? (
-                  <AssistantBubbleContent message={message} />
-                ) : (
-                  <div className={cn(
-                    "rounded-2xl rounded-tl-sm border px-3 py-2 shadow-sm dark:shadow-none",
-                    bubbleStyle(message)
-                  )}>
-                    <AssistantBubbleContent message={message} />
+            <div className="group max-w-[85%] min-w-0">
+              <div className="space-y-1">
+                {/* Animated agent indicator */}
+                {!(resolveKind(message) === "run" && resolveRunSubtype(message) === "cancelled") && resolveKind(message) !== "summary" && (
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span className="relative flex h-2 w-2">
+                      {message.isStreaming && (
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
+                      )}
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-gradient-to-br from-indigo-500 to-purple-500" />
+                    </span>
+                    <span className="text-[10px] font-medium text-slate-400 dark:text-slate-500">Avatar</span>
                   </div>
                 )}
+
+                {/* system-style messages skip the bubble wrapper */}
+                {(() => {
+                  const k = resolveKind(message);
+                  const st = resolveRunSubtype(message);
+                  if ((k === "run" && st === "cancelled") || k === "summary") {
+                    return <AssistantBubbleContent message={message} />;
+                  }
+                  return (
+                    <div className={cn(
+                      "rounded-2xl border px-3 py-2 shadow-sm dark:shadow-none",
+                      bubbleStyle(message)
+                    )}>
+                      <AssistantBubbleContent message={message} />
+                    </div>
+                  );
+                })()}
 
                 {shouldShowActions(message) && (
                   <MessageActions
@@ -199,8 +214,8 @@ export function MessageList({
 
           {/* ── User message ── */}
           {message.role === "user" && (
-            <div className="group flex flex-row items-start gap-2 max-w-[75%]">
-              <div className="flex-1 flex flex-col items-end space-y-2">
+            <div className="group max-w-[75%]">
+              <div className="flex flex-col items-end space-y-2">
                 {message.attachments && message.attachments.length > 0 && (
                   <div className="space-y-1">
                     {message.attachments.map((attachment) => (
@@ -220,7 +235,7 @@ export function MessageList({
                   </div>
                 )}
                 {message.content && (
-                  <div className="rounded-2xl rounded-tr-sm bg-gradient-to-r from-indigo-500 to-purple-600 px-3 py-2 text-white shadow-md shadow-indigo-500/20 dark:shadow-none">
+                  <div className="rounded-2xl bg-gradient-to-r from-indigo-500 to-purple-600 px-3 py-2 text-white shadow-md shadow-indigo-500/20 dark:shadow-none">
                     <MessageContent content={message.content} isUserMessage={true} />
                   </div>
                 )}
@@ -231,9 +246,6 @@ export function MessageList({
                   isAssistant={false}
                 />
               </div>
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 text-xs font-bold text-white shadow-sm">
-                U
-              </div>
             </div>
           )}
         </div>
@@ -241,11 +253,15 @@ export function MessageList({
 
       {isTyping && (
         <div className="flex justify-start">
-          <div className="flex items-start gap-3">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-xs font-bold text-white">
-              AO
+          <div className="space-y-1">
+            <div className="flex items-center gap-1.5 mb-0.5">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-gradient-to-br from-indigo-500 to-purple-500" />
+              </span>
+              <span className="text-[10px] font-medium text-slate-400 dark:text-slate-500">Avatar</span>
             </div>
-            <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-4 py-3">
+            <div className="flex items-center gap-2 rounded-2xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-4 py-3">
               <div className="flex gap-1">
                 <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 dark:bg-white/60 [animation-delay:0ms]" />
                 <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 dark:bg-white/60 [animation-delay:150ms]" />

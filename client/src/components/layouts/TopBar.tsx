@@ -68,27 +68,32 @@ export function TopBar({ isInspectorOpen = true, onToggleInspector, isRightPanel
          </div>
       </div>
 
-      {/* 右侧功能区域 */}
-      <div
-        className="flex items-center gap-3"
-        style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-      >
-        <div className="relative hidden md:block">
+      {/* 中间搜索框 — 只有 input 本身 no-drag，外层空白保持可拖拽 */}
+      <div className="flex-1 flex justify-center">
+        <div
+          className="relative hidden md:block"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+        >
           <input
             type="search"
             placeholder={language === "zh" ? "搜索任务..." : "Search tasks..."}
-            className="h-10 w-72 rounded-full border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-white/5 pl-10 pr-4 text-sm placeholder:text-slate-400 dark:placeholder:text-white/50 focus:border-indigo-400 focus:outline-none transition-colors"
+            className="h-10 w-80 rounded-full border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-white/5 pl-10 pr-4 text-sm placeholder:text-slate-400 dark:placeholder:text-white/50 focus:border-indigo-400 focus:outline-none transition-colors"
           />
           <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-xs text-slate-400 dark:text-white/60">
             ⌘K
           </span>
         </div>
+      </div>
+
+      {/* 右侧功能区域 — 每个按钮单独 no-drag，按钮间空隙保持可拖拽 */}
+      <div className="flex items-center gap-3">
 
         {/* Right Panel Toggle */}
         {onToggleRightPanel && (
            <button
              type="button"
              onClick={onToggleRightPanel}
+             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
              className={`flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 transition hover:border-slate-300 dark:hover:border-white/30 hover:bg-slate-100 dark:hover:bg-white/5 ${!isRightPanelOpen ? 'text-slate-400 dark:text-white/50' : 'text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/30'}`}
              title={isRightPanelOpen ? (language === 'zh' ? "隐藏侧边栏" : "Hide Sidebar") : (language === 'zh' ? "显示侧边栏" : "Show Sidebar")}
            >
@@ -102,6 +107,7 @@ export function TopBar({ isInspectorOpen = true, onToggleInspector, isRightPanel
         <button
           type="button"
           onClick={toggleLanguage}
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-white/80 transition hover:border-slate-300 dark:hover:border-white/30 hover:bg-slate-100 dark:hover:bg-white/5 font-medium text-xs"
           title="Switch Language"
         >
@@ -112,6 +118,7 @@ export function TopBar({ isInspectorOpen = true, onToggleInspector, isRightPanel
         <button
           type="button"
           onClick={toggleTheme}
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-white/80 transition hover:border-slate-300 dark:hover:border-white/30 hover:bg-slate-100 dark:hover:bg-white/5"
           title="Toggle Theme"
         >
@@ -129,7 +136,10 @@ export function TopBar({ isInspectorOpen = true, onToggleInspector, isRightPanel
         {/* 系统设置按钮已移至左侧栏底部 */}
 
         {/* Window Controls */}
-        <div className="flex items-center gap-1 ml-2 pl-2 border-l border-slate-200 dark:border-white/10">
+        <div
+          className="flex items-center gap-1 ml-2 pl-2 border-l border-slate-200 dark:border-white/10"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+        >
            <button 
              type="button"
              onClick={() => window.electronAPI?.minimizeWindow?.()}

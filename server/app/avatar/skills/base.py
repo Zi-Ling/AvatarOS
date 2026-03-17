@@ -52,6 +52,8 @@ class SkillSpec:
     - side_effects: 副作用声明（用于 executor 路由 + 审计）
     - risk_level: 安全等级（用于策略引擎）
     - aliases: 召回优化（fuzzy match + 向量搜索）
+    - code_params: 包含可执行代码的参数名集合。这些参数中的
+      step_N_output 引用由运行时变量注入处理，不创建 DataEdge。
     """
     name: str
     description: str
@@ -60,6 +62,7 @@ class SkillSpec:
     side_effects: Set[SideEffect] = field(default_factory=set)
     risk_level: SkillRiskLevel = SkillRiskLevel.SAFE
     aliases: List[str] = field(default_factory=list)
+    code_params: Set[str] = field(default_factory=set)
 
 
 class BaseSkill(ABC, Generic[InT, OutT]):

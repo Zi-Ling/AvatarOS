@@ -5,6 +5,7 @@ from .session_workspace import (
     init_session_workspace_manager,
     get_session_workspace_manager,
     CONTAINER_WORKSPACE_PATH,
+    CONTAINER_SESSION_PATH,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "init_session_workspace_manager",
     "get_session_workspace_manager",
     "CONTAINER_WORKSPACE_PATH",
+    "CONTAINER_SESSION_PATH",
 ]

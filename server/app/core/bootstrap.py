@@ -55,8 +55,21 @@ class AppBootstrap:
         self._init_log_aggregator(llm_logger)
         self._init_socket_bridge()
         self._init_scheduler()
+        self._init_long_task_runtime()
         self._init_socket_log_handler()
         self._init_fs_watcher()
+
+        # 长任务启动恢复（异步，不阻塞启动）
+        if hasattr(self.app.state, "startup_recovery"):
+            try:
+                report = await self.app.state.startup_recovery.recover_on_startup()
+                logger.info(
+                    f"  └─ 启动恢复完成: {report['total']} 个非终态会话, "
+                    f"{len(report['interrupted'])} 个被标记为 interrupted"
+                )
+            except Exception as e:
+                logger.warning(f"  └─ 启动恢复失败: {e}")
+
         logger.info("✅ 所有组件初始化完成")
 
     async def shutdown(self):
@@ -221,6 +234,90 @@ class AppBootstrap:
         from app.services.scheduler_service import scheduler_service
         scheduler_service.start(avatar_runtime=self.app.state.avatar_runtime)
         self._scheduler_started = True
+
+    def _init_long_task_runtime(self):
+        """初始化长任务运行时：组装所有 Manager 并注入 API 层。"""
+        logger.info("🔗 初始化长任务运行时...")
+
+        from app.services.task_session_store import TaskSessionStore
+        from app.services.step_state_store import StepStateStore
+        from app.services.plan_graph_store import PlanGraphStore
+        from app.services.artifact_store import ArtifactStore
+        from app.services.checkpoint_store import CheckpointStore
+        from app.avatar.runtime.graph.artifact_dep_graph import ArtifactDependencyGraph
+        from app.avatar.runtime.graph.managers.interrupt_manager import InterruptManager
+        from app.avatar.runtime.graph.managers.checkpoint_manager import CheckpointManager
+        from app.avatar.runtime.graph.managers.resume_manager import ResumeManager
+        from app.avatar.runtime.graph.managers.plan_merge_engine import PlanMergeEngine
+        from app.avatar.runtime.graph.managers.delivery_gate import DeliveryGate
+        from app.avatar.runtime.graph.managers.task_scheduler import TaskScheduler
+        from app.avatar.runtime.graph.managers.task_session_manager import TaskSessionManager
+        from app.avatar.runtime.graph.managers.startup_recovery import StartupRecovery
+
+        # Store 层都是静态方法类，直接使用
+        # 构建 Manager 依赖图（自底向上）
+        artifact_dep_graph = ArtifactDependencyGraph()
+        checkpoint_mgr = CheckpointManager(
+            checkpoint_store=CheckpointStore,
+            step_state_store=StepStateStore,
+            plan_graph_store=PlanGraphStore,
+        )
+        interrupt_mgr = InterruptManager(
+            task_session_store=TaskSessionStore,
+            step_state_store=StepStateStore,
+            checkpoint_manager=checkpoint_mgr,
+        )
+        resume_mgr = ResumeManager(
+            checkpoint_manager=checkpoint_mgr,
+            step_state_store=StepStateStore,
+            plan_graph_store=PlanGraphStore,
+            artifact_store=ArtifactStore,
+            task_session_store=TaskSessionStore,
+        )
+        plan_merge_engine = PlanMergeEngine(
+            plan_graph_store=PlanGraphStore,
+            checkpoint_manager=checkpoint_mgr,
+            step_state_store=StepStateStore,
+        )
+        delivery_gate = DeliveryGate(
+            artifact_dep_graph=artifact_dep_graph,
+            step_state_store=StepStateStore,
+        )
+        task_scheduler = TaskScheduler()
+
+        # 顶层编排器
+        task_session_mgr = TaskSessionManager(
+            task_session_store=TaskSessionStore,
+            task_scheduler=task_scheduler,
+            interrupt_manager=interrupt_mgr,
+            resume_manager=resume_mgr,
+            plan_merge_engine=plan_merge_engine,
+            checkpoint_manager=checkpoint_mgr,
+            delivery_gate=delivery_gate,
+        )
+
+        # 注入 API 层
+        from app.api.task_session import set_task_session_manager
+        from app.api.task_scheduler_api import set_scheduler
+        set_task_session_manager(task_session_mgr)
+        set_scheduler(task_scheduler)
+
+        # 保存到 app.state 供其他组件访问
+        self.app.state.task_session_manager = task_session_mgr
+        self.app.state.task_scheduler = task_scheduler
+        self.app.state.artifact_dep_graph = artifact_dep_graph
+
+        # 启动恢复流程
+        startup_recovery = StartupRecovery(
+            task_session_store=TaskSessionStore,
+            interrupt_manager=interrupt_mgr,
+            resume_manager=resume_mgr,
+        )
+        self.app.state.startup_recovery = startup_recovery
+
+        logger.info("  ├─ TaskSessionManager 就绪")
+        logger.info("  ├─ TaskScheduler 就绪 (long=1, simple=2)")
+        logger.info("  └─ 长任务运行时初始化完成")
 
     def _init_socket_log_handler(self):
         logger.info("📡 初始化 SocketLogHandler...")

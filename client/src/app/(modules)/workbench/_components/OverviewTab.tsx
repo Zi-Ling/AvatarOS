@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useCallback } from "react";
 import {
-  CheckCircle2, Clock, AlertTriangle, Zap, FileText, FolderOpen,
+  CheckCircle2, Clock, Zap, FileText, FolderOpen,
   Package, ExternalLink, XCircle, Loader2, Pause, Play, X, History,
 } from "lucide-react";
-import { historyApi, approvalApi, type SessionItem, type ArtifactRecord, type ApprovalHistoryRecord } from "@/lib/api/history";
+import { historyApi, type SessionItem, type ArtifactRecord } from "@/lib/api/history";
 import { scheduleApi } from "@/lib/api/schedule";
 import { artifactApi } from "@/lib/api/history";
 import { useSocket } from "@/components/providers/SocketProvider";
@@ -14,7 +14,6 @@ import { useWorkbenchStore } from "@/stores/workbenchStore";
 import { cancelTask, pauseTask, resumeTask } from "@/lib/api/task";
 import { deriveTaskControls } from "@/types/task";
 import { cn } from "@/lib/utils";
-import type { ApprovalRequest } from "@/types/chat";
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 
@@ -205,59 +204,6 @@ function ResultCard({ session, onClick }: { session: SessionItem; onClick?: () =
   );
 }
 
-function PendingApprovalCard({ req, onRespond }: { req: ApprovalRequest; onRespond: (id: string, approved: boolean) => void }) {
-  const [loading, setLoading] = useState(false);
-  const handle = async (approved: boolean) => {
-    setLoading(true);
-    await onRespond(req.request_id, approved);
-    setLoading(false);
-  };
-  return (
-    <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50">
-      <div className="flex items-start gap-2 mb-1.5">
-        <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
-        <div className="flex-1 min-w-0">
-          <p className="text-sm text-slate-700 dark:text-slate-200 leading-snug line-clamp-2">{req.message}</p>
-          <p className="text-[10px] font-mono text-slate-400 mt-0.5 truncate">{req.operation}</p>
-        </div>
-      </div>
-      <div className="flex gap-2">
-        <button onClick={() => handle(true)} disabled={loading}
-          className="flex-1 text-xs font-medium py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white transition-colors disabled:opacity-50">
-          批准
-        </button>
-        <button onClick={() => handle(false)} disabled={loading}
-          className="flex-1 text-xs font-medium py-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-red-100 dark:hover:bg-red-900/30 text-slate-600 dark:text-slate-300 hover:text-red-600 transition-colors disabled:opacity-50">
-          拒绝
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// 历史审批记录卡片（无待确认时的兜底）
-function ApprovalHistoryCard({ record }: { record: ApprovalHistoryRecord }) {
-  const approved = record.status === "approved";
-  return (
-    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800/60">
-      <div className="flex items-start gap-2">
-        {approved
-          ? <CheckCircle2 className="w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0" />
-          : <XCircle className="w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0" />
-        }
-        <div className="flex-1 min-w-0">
-          <p className="text-sm text-slate-500 dark:text-slate-400 leading-snug line-clamp-2">{record.message}</p>
-          <div className="flex items-center gap-2 mt-1">
-            <span className={`text-[11px] font-medium ${approved ? "text-slate-400" : "text-slate-400"}`}>
-              {approved ? "已批准" : "已拒绝"}
-            </span>
-            <span className="text-[11px] text-slate-400">{timeAgo(record.responded_at || record.created_at)}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function ArtifactCard({ artifact }: { artifact: ArtifactRecord }) {
   const Icon = fileIcon(artifact.filename);
@@ -288,23 +234,21 @@ function ArtifactCard({ artifact }: { artifact: ArtifactRecord }) {
 
 export function OverviewTab() {
   const { isConnected } = useSocket();
-  const { activeTask, controlStatus, setIsCancelling, pendingApprovals, removePendingApproval } = useTaskStore();
+  const { activeTask, controlStatus, setIsCancelling } = useTaskStore();
   const { setActiveTab } = useWorkbenchStore();
   const { canPause, canResume, canCancel } = deriveTaskControls(activeTask?.status as any ?? "executing", controlStatus);
 
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
-  const [approvalHistory, setApprovalHistory] = useState<ApprovalHistoryRecord[]>([]);
   const [nextSchedule, setNextSchedule] = useState<string>("--:--");
   const [loading, setLoading] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
-      const [sessionList, scheduleList, approvalList] = await Promise.allSettled([
+      const [sessionList, scheduleList] = await Promise.allSettled([
         historyApi.listSessions(50),
         scheduleApi.listSchedules(),
-        approvalApi.getHistory(undefined, 10),
       ]);
 
       if (sessionList.status === "fulfilled") {
@@ -320,10 +264,6 @@ export function OverviewTab() {
         });
         allArtifacts.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
         setArtifacts(allArtifacts.slice(0, 10));
-      }
-
-      if (approvalList.status === "fulfilled") {
-        setApprovalHistory(approvalList.value.records);
       }
 
       if (scheduleList.status === "fulfilled") {
@@ -386,16 +326,10 @@ export function OverviewTab() {
     finally { setIsActioning(false); }
   };
 
-  const handleApprovalRespond = async (id: string, approved: boolean) => {
-    await approvalApi.respond(id, approved);
-    removePendingApproval(id);
-  };
-
   const summary = (() => {
     const parts: string[] = [];
     if (todayCompleted > 0) parts.push(`今天已完成 ${todayCompleted} 项任务`);
     if (running.length > 0) parts.push(`${running.length} 项正在执行`);
-    if (pendingApprovals.length > 0) parts.push(`${pendingApprovals.length} 项等待确认`);
     return parts.length === 0 ? "系统待机中，随时准备执行任务。" : parts.join("，") + "。";
   })();
 
@@ -423,10 +357,6 @@ export function OverviewTab() {
               今日完成 <strong className="text-slate-700 dark:text-slate-200">{loading ? "…" : todayCompleted}</strong>
             </span>
             <span className="flex items-center gap-1">
-              <AlertTriangle className="w-3 h-3 text-amber-400" />
-              待确认 <strong className="text-slate-700 dark:text-slate-200">{pendingApprovals.length}</strong>
-            </span>
-            <span className="flex items-center gap-1">
               <Clock className="w-3 h-3 text-purple-400" />
               下次调度 <strong className="text-slate-700 dark:text-slate-200">{loading ? "…" : nextSchedule}</strong>
             </span>
@@ -438,7 +368,7 @@ export function OverviewTab() {
       {/* 内容区：三列独立滚动 + 底部最近交付固定 */}
       <div className="flex-1 overflow-hidden flex flex-col min-h-0">
         {/* 三列区域，各自独立滚动 */}
-        <div className="flex-1 min-h-0 px-5 pt-5 grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="flex-1 min-h-0 px-5 pt-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
 
           {/* 正在执行 / 最近执行 */}
           <div className="flex flex-col min-h-0">
@@ -458,34 +388,13 @@ export function OverviewTab() {
                       onPauseResume={activeTask?.id === s.id ? handlePauseResume : undefined}
                       onCancel={activeTask?.id === s.id ? handleCancel : undefined}
                       isActioning={isActioning}
-                      onClick={() => setActiveTab("active")}
+                      onClick={() => setActiveTab("logs")}
                     />
                   ))
                 : recentRan.length === 0
                   ? <EmptyState text="暂无执行记录" />
                   : recentRan.map(s => (
                       <RecentRunCard key={s.id} session={s} onClick={() => setActiveTab("history")} />
-                    ))
-              }
-            </div>
-          </div>
-
-          {/* 待确认 / 历史审批 */}
-          <div className="flex flex-col min-h-0">
-            {pendingApprovals.length > 0 ? (
-              <SectionHeader icon={AlertTriangle} title="待确认" count={pendingApprovals.length} />
-            ) : (
-              <SectionHeader icon={History} title="历史审批" subtitle="无待确认项" />
-            )}
-            <div className="flex-1 overflow-y-auto scrollbar-thin space-y-2 pr-0.5">
-              {pendingApprovals.length > 0
-                ? pendingApprovals.map(a => (
-                    <PendingApprovalCard key={a.request_id} req={a} onRespond={handleApprovalRespond} />
-                  ))
-                : approvalHistory.length === 0
-                  ? <EmptyState text="暂无审批记录" />
-                  : approvalHistory.slice(0, 5).map(r => (
-                      <ApprovalHistoryCard key={r.request_id} record={r} />
                     ))
               }
             </div>
@@ -513,9 +422,9 @@ export function OverviewTab() {
 
         {/* 最近交付：固定在底部，不被三列内容撑走 */}
         <div className="shrink-0 px-5 py-4 border-t border-slate-100 dark:border-slate-800">
-          <SectionHeader icon={Package} title="最近交付" count={artifacts.length} />
+          <SectionHeader icon={Package} title="最近生成" count={artifacts.length} />
           {artifacts.length === 0
-            ? <EmptyState text="暂无交付文件" />
+            ? <EmptyState text="暂无生成文件" />
             : <div className="flex gap-3 overflow-x-auto scrollbar-hide pb-1">{artifacts.map(a => <ArtifactCard key={a.artifact_id} artifact={a} />)}</div>
           }
         </div>

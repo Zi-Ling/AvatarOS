@@ -316,6 +316,7 @@ class AvatarMain:
                     planner=graph_planner,
                     runtime=graph_runtime,
                     guard=_guard,
+                    evolution_pipeline=self._init_evolution_pipeline(),
                 )
             except Exception as gc_err:
                 logger.warning(f"[AvatarMain] GraphController init failed: {gc_err}")
@@ -335,6 +336,84 @@ class AvatarMain:
         return asyncio.get_event_loop().run_until_complete(
             self._graph_controller.execute(user_request, mode="react")
         )
+
+    def _init_evolution_pipeline(self):
+        """
+        Initialize EvolutionPipeline if all dependencies are available.
+        Returns None on failure (non-blocking).
+        """
+        try:
+            from app.avatar.evolution.pipeline import EvolutionPipeline
+            from app.avatar.evolution.config import EvolutionConfig
+            from app.avatar.evolution.trace_collector import TraceCollector
+            from app.avatar.evolution.outcome_classifier import OutcomeClassifier
+            from app.avatar.evolution.cost_telemetry import CostTelemetryAggregator
+            from app.avatar.evolution.reflection_gating import ReflectionGating
+            from app.db.database import engine as db_engine
+
+            config = EvolutionConfig()
+            trace_collector = TraceCollector(db_engine=db_engine, config=config)
+            outcome_classifier = OutcomeClassifier()
+            cost_aggregator = CostTelemetryAggregator()
+            reflection_gating = ReflectionGating(config=config)
+
+            # Phase 2 components (optional)
+            reflection_engine = None
+            learning_store = None
+            audit_logger = None
+            try:
+                from app.avatar.evolution.reflection_engine import ReflectionEngine
+                from app.avatar.evolution.learning_store import LearningStore
+                from app.avatar.evolution.audit_logger import EvolutionAuditLogger
+                reflection_engine = ReflectionEngine(
+                    llm_factory=self.llm_client,
+                    config=config,
+                )
+                learning_store = LearningStore(db_engine=db_engine, config=config)
+                audit_logger = EvolutionAuditLogger()
+            except Exception:
+                logger.debug("[AvatarMain] Evolution phase 2 components not available, running phase 1 only")
+
+            # Phase 3 components (optional)
+            validation_gate = None
+            promotion_manager = None
+            rollback_manager = None
+            try:
+                from app.avatar.evolution.validation_gate import ValidationGate
+                from app.avatar.evolution.promotion_manager import PromotionManager
+                from app.avatar.evolution.rollback_manager import RollbackManager as EvolutionRollbackManager
+                validation_gate = ValidationGate(config=config, learning_store=learning_store)
+                promotion_manager = PromotionManager(
+                    config=config,
+                    db_engine=db_engine,
+                    learning_store=learning_store,
+                )
+                rollback_manager = EvolutionRollbackManager(
+                    promotion_manager=promotion_manager,
+                    learning_store=learning_store,
+                    audit_logger=audit_logger,
+                )
+            except Exception:
+                logger.debug("[AvatarMain] Evolution phase 3 components not available, running phase 2 only")
+
+            pipeline = EvolutionPipeline(
+                trace_collector=trace_collector,
+                outcome_classifier=outcome_classifier,
+                cost_aggregator=cost_aggregator,
+                reflection_gating=reflection_gating,
+                config=config,
+                reflection_engine=reflection_engine,
+                learning_store=learning_store,
+                audit_logger=audit_logger,
+                validation_gate=validation_gate,
+                promotion_manager=promotion_manager,
+                rollback_manager=rollback_manager,
+            )
+            logger.info(f"[AvatarMain] EvolutionPipeline initialized (phase={pipeline.phase})")
+            return pipeline
+        except Exception as e:
+            logger.debug(f"[AvatarMain] EvolutionPipeline init skipped: {e}")
+            return None
 
     async def run_intent(self, intent: IntentSpec, task_mode: str = "one_shot", control_handle=None, on_graph_created=None) -> RunRecord:
         # Backup metadata (TaskStore/DB serialization might strip non-standard fields)

@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 # Container fixed mount point
 CONTAINER_WORKSPACE_PATH = "/workspace"
 
+# Session workspace mount point (used when user workspace is also mounted)
+CONTAINER_SESSION_PATH = "/session"
+
 # ---------------------------------------------------------------------------
 # Directory constants
 # ---------------------------------------------------------------------------
@@ -111,6 +114,17 @@ class SessionWorkspace:
     def get_docker_volumes(self) -> Dict[str, Dict[str, str]]:
         cfg = self.get_mount_config()
         return {cfg.host_path: {"bind": cfg.container_path, "mode": cfg.mode}}
+
+    def get_docker_volumes_dual(self, user_workspace: str) -> Dict[str, Dict[str, str]]:
+        """双挂载模式：session workspace → /session, user workspace → /workspace。
+        
+        LLM 代码的 cwd 是 /workspace（用户工作目录），
+        上游节点输入文件在 /session/input/。
+        """
+        return {
+            str(self.root.resolve()): {"bind": CONTAINER_SESSION_PATH, "mode": "rw"},
+            user_workspace: {"bind": CONTAINER_WORKSPACE_PATH, "mode": "rw"},
+        }
 
     # ------------------------------------------------------------------
     # stdout / stderr writing (separated into logs/)

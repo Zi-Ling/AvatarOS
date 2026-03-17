@@ -16,6 +16,11 @@ from .knowledge.document_kb import DocumentKnowledgeBase
 
 import logging
 
+# 延迟导入避免循环依赖
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..evolution.pipeline import EvolutionPipeline, PipelineResult
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +55,7 @@ class LearningManager:
         self._modules: Dict[str, LearningModule] = {}
         self._config = config or LearningManagerConfig()
         self._memory_manager = memory_manager
+        self._evolution_pipeline: Optional["EvolutionPipeline"] = None
         
         # 初始化文档知识库（Learning 层的业务模块）
         self._document_kb: Optional[DocumentKnowledgeBase] = None
@@ -303,3 +309,65 @@ class LearningManager:
     def has_document_kb(self) -> bool:
         """检查文档知识库是否可用"""
         return self._document_kb is not None
+
+    # =========================================================================
+    # Evolution Pipeline 集成（自演化运行时）
+    # =========================================================================
+
+    def set_evolution_pipeline(self, pipeline: "EvolutionPipeline") -> None:
+        """注入 EvolutionPipeline 实例。"""
+        self._evolution_pipeline = pipeline
+        logger.info(f"[LearningManager] evolution pipeline set (phase={pipeline.phase})")
+
+    async def on_task_finished_v2(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        goal: str,
+        task_type: str,
+        sub_goals: Optional[List[Any]] = None,
+        decision_basis: str = "",
+        extra: Optional[dict] = None,
+    ) -> Optional["PipelineResult"]:
+        """
+        任务完成后的演化 pipeline 入口（在线模式）。
+        编排 Trace → Outcome → Cost → Gating → Reflection → Store。
+        无 pipeline 时静默返回 None（向后兼容）。
+        """
+        if not self._evolution_pipeline:
+            return None
+        try:
+            from ..evolution.outcome_classifier import SubGoalResult
+            goals = sub_goals or []
+            return await self._evolution_pipeline.on_task_finished_v2(
+                task_id=task_id,
+                session_id=session_id,
+                goal=goal,
+                task_type=task_type,
+                sub_goals=goals,
+                decision_basis=decision_basis,
+                extra=extra,
+            )
+        except Exception as exc:
+            logger.error(f"[LearningManager] evolution pipeline error: {exc}", exc_info=True)
+            return None
+
+    async def on_task_finished_v2_offline(
+        self,
+        traces: Optional[List[Any]] = None,
+    ) -> List[Any]:
+        """
+        离线学习模式入口。
+        对一批已完成的 trace 执行反思和候选生成。
+        无 pipeline 时返回空列表。
+        """
+        if not self._evolution_pipeline:
+            return []
+        try:
+            return await self._evolution_pipeline.on_task_finished_v2_offline(
+                traces=traces or [],
+            )
+        except Exception as exc:
+            logger.error(f"[LearningManager] offline pipeline error: {exc}", exc_info=True)
+            return []

@@ -7,6 +7,8 @@ import shutil
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, model_validator
 
+from charset_normalizer import from_bytes
+
 from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
@@ -16,6 +18,41 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE_MB = 20
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+
+def _detect_and_decode(raw: bytes, hint_encoding: str = "utf-8") -> tuple[str, str]:
+    """
+    Robust text decoding with automatic encoding detection fallback.
+
+    Strategy (same as major IDEs / cloud platforms):
+      1. Try the user-specified encoding first (fast path).
+      2. On failure, run charset_normalizer detection on the raw bytes.
+      3. If detection succeeds, decode with the detected encoding.
+      4. Last resort: decode with 'utf-8' errors='replace' so we never crash.
+
+    Returns (decoded_text, actual_encoding_used).
+    """
+    # 1. Fast path: try hint encoding
+    try:
+        return raw.decode(hint_encoding), hint_encoding
+    except (UnicodeDecodeError, LookupError):
+        pass
+
+    # 2. Detect with charset_normalizer
+    detection = from_bytes(raw)
+    best = detection.best()
+    if best is not None:
+        detected_enc = best.encoding
+        try:
+            return raw.decode(detected_enc), detected_enc
+        except (UnicodeDecodeError, LookupError):
+            pass
+
+    # 3. Last resort: lossy UTF-8 decode (replace bad bytes with U+FFFD)
+    logger.warning(
+        "[fs] All encoding detection failed, falling back to utf-8 with replacement characters"
+    )
+    return raw.decode("utf-8", errors="replace"), "utf-8(lossy)"
 
 
 # ── fs.read ───────────────────────────────────────────────────────────────────
@@ -70,13 +107,17 @@ class FsReadSkill(BaseSkill[FsReadInput, FsReadOutput]):
         if size > MAX_FILE_SIZE_BYTES:
             return False, f"File too large: {size / 1024 / 1024:.1f}MB", None, 0
         try:
+            raw = target.read_bytes()
             if item.mode == "binary":
-                content = target.read_bytes().hex()
+                content = raw.hex()
             else:
-                content = target.read_text(encoding=item.encoding)
+                content, actual_enc = _detect_and_decode(raw, item.encoding)
+                if actual_enc != item.encoding:
+                    logger.info(
+                        "[fs.read] %s: requested=%s, detected=%s",
+                        item.path, item.encoding, actual_enc,
+                    )
             return True, f"Read {size} bytes", content, size
-        except UnicodeDecodeError as e:
-            return False, f"Encoding error: {e}", None, 0
         except Exception as e:
             return False, str(e), None, 0
 
@@ -101,10 +142,18 @@ class FsReadSkill(BaseSkill[FsReadInput, FsReadOutput]):
                 else:
                     failed.append(f"{item.path}: {msg}")
             if failed:
+                # Partial success: if some files were read successfully, report
+                # success=True so that CircuitBreaker / Planner don't treat this
+                # as a total failure.  The error details are preserved in message
+                # for Planner to see and potentially retry the missing files.
+                has_any_success = bool(contents)
                 return FsReadOutput(
-                    success=False,
-                    message=f"Batch read partial failure: {'; '.join(failed)}",
-                    path="",
+                    success=has_any_success,
+                    message=(
+                        f"Read {len(contents)}/{len(contents)+len(failed)} files. "
+                        f"Failed: {'; '.join(failed)}"
+                    ),
+                    path=", ".join(contents.keys()) if contents else "",
                     output=contents if contents else None,
                     contents=contents if contents else None,
                 )
@@ -190,7 +239,9 @@ class FsWriteSkill(BaseSkill[FsWriteInput, FsWriteOutput]):
                 hex_str = "".join(item.content.split())
                 content_bytes = bytes.fromhex(hex_str)
             else:
-                content_bytes = item.content.encode(item.encoding)
+                # 强制 UTF-8 写入，避免 Windows 默认编码 (GBK/CP936) 导致后续读取失败
+                write_encoding = "utf-8"
+                content_bytes = item.content.encode(write_encoding)
 
             if len(content_bytes) > MAX_FILE_SIZE_BYTES:
                 return False, f"Content too large for {item.path}", 0
@@ -202,13 +253,13 @@ class FsWriteSkill(BaseSkill[FsWriteInput, FsWriteOutput]):
                     with open(target, "ab") as f:
                         f.write(content_bytes)
                 else:
-                    with open(target, "a", encoding=item.encoding) as f:
+                    with open(target, "a", encoding="utf-8") as f:
                         f.write(item.content)
             else:
                 if item.mode == "binary":
                     target.write_bytes(content_bytes)
                 else:
-                    target.write_text(item.content, encoding=item.encoding)
+                    target.write_text(item.content, encoding="utf-8")
 
             return True, str(target), len(content_bytes)
         except Exception as e:

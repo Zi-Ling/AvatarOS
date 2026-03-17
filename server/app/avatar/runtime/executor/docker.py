@@ -157,12 +157,30 @@ class DockerExecutor(SkillExecutor):
         code = input_data.code
 
         # 从 context 获取 workspace 挂载配置
+        # Dual-mount 策略：
+        #   session_root   → /session   (rw)  — 框架文件: input/, output/, logs/
+        #   user_workspace → /workspace (rw)  — LLM 代码 cwd，文件直接落在用户目录
+        # 当 user_workspace 不可用时，退回单挂载（session → /workspace）
         workspace_volumes = None
         base_path_str = None
+        user_workspace_str = None
         if hasattr(context, "extra") and context.extra.get("workspace") is not None:
-            workspace_volumes = context.extra["workspace"].get_docker_volumes()
-            # base_path 用 workspace output_dir，让文件落到可扫描目录
-            base_path_str = str(context.extra["workspace"].output_dir)
+            _session_ws = context.extra["workspace"]
+            # 尝试获取 user_workspace
+            if hasattr(context, "base_path") and context.base_path is not None:
+                _ubp = str(context.base_path.resolve()) if hasattr(context.base_path, "resolve") else str(context.base_path)
+                user_workspace_str = _ubp
+                # Dual-mount: session → /session, user_workspace → /workspace
+                workspace_volumes = _session_ws.get_docker_volumes_dual(_ubp)
+                base_path_str = str(_session_ws.output_dir)
+                logger.debug(
+                    f"[DockerExecutor] Dual-mount: session={_session_ws.root} → /session, "
+                    f"user_workspace={_ubp} → /workspace"
+                )
+            else:
+                # 无 user_workspace，退回单挂载
+                workspace_volumes = _session_ws.get_docker_volumes()
+                base_path_str = str(_session_ws.output_dir)
         elif hasattr(context, "base_path") and context.base_path is not None:
             # fallback：没有 SessionWorkspace 时，把 base_path 挂到容器 /workspace
             _bp = str(context.base_path.resolve()) if hasattr(context.base_path, "resolve") else str(context.base_path)
@@ -171,7 +189,11 @@ class DockerExecutor(SkillExecutor):
             logger.debug(f"[DockerExecutor] No SessionWorkspace, fallback mount base_path={_bp} → /workspace")
         
         try:
-            result_dict = await self._run_python_in_container(code, workspace_volumes, base_path=base_path_str)
+            result_dict = await self._run_python_in_container(
+                code, workspace_volumes,
+                base_path=base_path_str,
+                user_workspace=user_workspace_str,
+            )
             logger.debug(f"[DockerExecutor] Success: {api_name}")
             output_model = skill.spec.output_model
             return output_model(**result_dict)
@@ -185,7 +207,7 @@ class DockerExecutor(SkillExecutor):
                 stderr=str(e)
             )
     
-    async def _run_python_in_container(self, code: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None) -> dict:
+    async def _run_python_in_container(self, code: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None, user_workspace: Optional[str] = None) -> dict:
         """在 Docker 容器中执行 Python 代码"""
         import docker
         
@@ -202,6 +224,7 @@ class DockerExecutor(SkillExecutor):
                     tmpdir,
                     workspace_volumes,
                     base_path,
+                    user_workspace,
                 )
                 return result
             except docker.errors.ContainerError as e:
@@ -225,13 +248,13 @@ class DockerExecutor(SkillExecutor):
                     "variables": {},
                 }
     
-    def _run_container_sync(self, tmpdir: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None) -> dict:
+    def _run_container_sync(self, tmpdir: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None, user_workspace: Optional[str] = None) -> dict:
         """同步运行容器（在线程池中执行）"""
         # 容器池里的容器创建时没有挂载 workspace volumes，
         # 如果有 workspace_volumes 必须走 _run_without_pool（新建容器并挂载）
         if self.use_pool and self._pool and not workspace_volumes:
             return self._run_with_pool(tmpdir, base_path=base_path)
-        return self._run_without_pool(tmpdir, workspace_volumes)
+        return self._run_without_pool(tmpdir, workspace_volumes, base_path=base_path, user_workspace=user_workspace)
     
     def _run_with_pool(self, tmpdir: str, base_path: Optional[str] = None) -> dict:
         """使用容器池执行，自动适配 Docker/Podman"""
@@ -247,10 +270,19 @@ class DockerExecutor(SkillExecutor):
             with open(code_file, "r", encoding="utf-8") as f:
                 code = f.read()
 
+            # 确保 /workspace 目录存在（pool 容器创建时没有 volume mount）
+            exec_run_in_container(
+                container,
+                cmd=["mkdir", "-p", "/workspace"],
+                workdir="/",
+                demux=False,
+                use_podman=self._is_podman,
+            )
+
             exit_code, output = exec_run_in_container(
                 container,
                 cmd=["python", "-c", code],
-                workdir="/",
+                workdir="/workspace",
                 demux=True,
                 use_podman=self._is_podman,
             )
@@ -284,6 +316,32 @@ class DockerExecutor(SkillExecutor):
                         except Exception as cp_err:
                             logger.warning(f"[DockerExecutor] Failed to copy file from container: {cp_err}")
 
+                # 防御性检查：容器 exit_code=0 但 structured_output 包含 subprocess 失败
+                # 场景：LLM 生成的代码用 subprocess.run() 执行子进程，外层 python 成功但子进程失败
+                _subprocess_failed = False
+                if isinstance(structured_output, dict):
+                    _rc = structured_output.get("returncode")
+                    if isinstance(_rc, int) and _rc != 0:
+                        _subprocess_failed = True
+                        _sub_stderr = structured_output.get("stderr", "")
+                        logger.warning(
+                            f"[DockerExecutor] Container exit_code=0 but output.returncode={_rc}, "
+                            f"marking as failure. stderr={_sub_stderr!r}"
+                        )
+
+                if _subprocess_failed:
+                    _sub_stderr = structured_output.get("stderr", "")
+                    return {
+                        "success": False,
+                        "message": f"Subprocess exited with code {structured_output.get('returncode')}",
+                        "stdout": stdout,
+                        "stderr": stderr or _sub_stderr,
+                        "result": None,
+                        "output": structured_output,
+                        "variables": {},
+                        "file_path": None,
+                    }
+
                 return {
                     "success": True,
                     "message": "Execution completed",
@@ -311,7 +369,7 @@ class DockerExecutor(SkillExecutor):
         finally:
             self._pool.release(container, failed=exec_failed)
     
-    def _run_without_pool(self, tmpdir: str, workspace_volumes: Optional[dict] = None) -> dict:
+    def _run_without_pool(self, tmpdir: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None, user_workspace: Optional[str] = None) -> dict:
         """不使用容器池执行（创建新容器），支持 workspace 挂载。
         
         对 Docker Desktop 在 Windows 上的间歇性连接断开做重试容错。
@@ -324,7 +382,7 @@ class DockerExecutor(SkillExecutor):
         last_err: Optional[Exception] = None
         for attempt in range(_RETRIES):
             try:
-                return self._run_without_pool_once(tmpdir, workspace_volumes)
+                return self._run_without_pool_once(tmpdir, workspace_volumes, base_path=base_path, user_workspace=user_workspace)
             except _DOCKER_TRANSIENT_ERRORS as e:
                 last_err = e
                 if attempt < _RETRIES - 1:
@@ -341,16 +399,22 @@ class DockerExecutor(SkillExecutor):
             f"Docker execution failed after {_RETRIES} attempts due to connection errors: {last_err}"
         )
 
-    def _run_without_pool_once(self, tmpdir: str, workspace_volumes: Optional[dict] = None) -> dict:
-        """单次尝试：创建新容器并执行，支持 workspace 挂载"""
+    def _run_without_pool_once(self, tmpdir: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None, user_workspace: Optional[str] = None) -> dict:
+        """单次尝试：创建新容器并执行，支持 workspace 挂载。
+        
+        挂载策略：
+          session_root → /workspace (rw)  — 容器 cwd，LLM 代码读写都在这里
+          tmpdir → /script (ro)           — 脚本文件
+        
+        执行完成后，扫描 /workspace 下的新文件，复制到用户工作目录（user_workspace）。
+        这样 open('line_count.csv', 'w') 写到 /workspace/line_count.csv，
+        通过 volume mount 落在 session workspace 根目录，再被复制到用户工作目录。
+        """
         if workspace_volumes:
-            # workspace 模式：session root 挂到 /workspace，script.py 额外挂到 /script/script.py
-            # 这样容器内既能访问 /workspace/inputs/ 又能执行 /script/script.py
             volumes = dict(workspace_volumes)
             volumes[tmpdir] = {"bind": "/script", "mode": "ro"}
             command = ["python", "/script/script.py"]
         else:
-            # 基础模式：tmpdir 挂到 /workspace，执行 /workspace/script.py
             volumes = {tmpdir: {"bind": "/workspace", "mode": "ro"}}
             command = ["python", "/workspace/script.py"]
 
@@ -358,6 +422,7 @@ class DockerExecutor(SkillExecutor):
             image=self.image,
             command=command,
             volumes=volumes,
+            working_dir="/workspace",
             mem_limit=self.mem_limit,
             cpu_quota=self.cpu_quota,
             network_mode=self.network_mode,
@@ -379,15 +444,26 @@ class DockerExecutor(SkillExecutor):
             if exit_code == 0 and isinstance(structured_output, dict) and "__file__" in structured_output:
                 _file_path = structured_output["__file__"]
 
+            # 防御性检查：exit_code=0 但 structured_output 包含 subprocess 失败
+            _effective_success = exit_code == 0
+            if _effective_success and isinstance(structured_output, dict):
+                _rc = structured_output.get("returncode")
+                if isinstance(_rc, int) and _rc != 0:
+                    _effective_success = False
+                    logger.warning(
+                        f"[DockerExecutor] Container exit_code=0 but output.returncode={_rc}, "
+                        f"marking as failure"
+                    )
+
             return {
-                "success": exit_code == 0,
-                "message": "Execution completed" if exit_code == 0 else f"Container exited with code {exit_code}",
+                "success": _effective_success,
+                "message": "Execution completed" if _effective_success else f"Container exited with code {exit_code}" if exit_code != 0 else f"Subprocess exited with code {structured_output.get('returncode', '?')}",
                 "stdout": stdout,
                 "stderr": stderr,
-                "result": stdout.strip() if stdout.strip() and exit_code == 0 else None,
-                "output": structured_output if exit_code == 0 else stderr,
+                "result": stdout.strip() if stdout.strip() and _effective_success else None,
+                "output": structured_output if _effective_success else (structured_output if isinstance(structured_output, dict) else stderr),
                 "variables": {},
-                "file_path": _file_path,
+                "file_path": _file_path if _effective_success else None,
             }
         finally:
             try:

@@ -1,17 +1,14 @@
 "use client";
 
 import React, { useRef, useState, useEffect, useCallback } from "react";
-import { Workflow, Terminal, Wifi, WifiOff, History, LucideIcon, Code2, LayoutGrid, ChevronLeft, ChevronRight } from "lucide-react";
+import { Terminal, Wifi, WifiOff, History, LucideIcon, Code2, LayoutGrid, ChevronLeft, ChevronRight, Workflow } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/components/providers/SocketProvider";
-import { ActiveTaskView } from "./_components/ActiveTaskView";
 import { LogsView } from "./_components/LogsView";
 import { HistoryView } from "./_components/HistoryView";
 import { useTaskExecution } from "@/lib/hooks/useTaskExecution";
 import { useWorkbenchStore, type WorkbenchTab } from "@/stores/workbenchStore";
-import { useTaskStore } from "@/stores/taskStore";
-import { useChatStore } from "@/stores/chatStore";
 import { WorkbenchEditor } from "./_components/WorkbenchEditor";
 import { OverviewTab } from "./_components/OverviewTab";
 
@@ -26,9 +23,7 @@ interface TabConfig {
 export default function Workbench() {
   const { isConnected } = useSocket();
   const { activeTab, setActiveTab, openFiles } = useWorkbenchStore();
-  const { task, logs } = useTaskExecution();
-  const { pendingApprovals } = useTaskStore();
-  const { sessionId } = useChatStore();
+  const { logs } = useTaskExecution();
 
   // Tab bar scroll state
   const tabScrollRef = useRef<HTMLDivElement>(null);
@@ -65,22 +60,12 @@ export default function Workbench() {
       icon: LayoutGrid,
       color: "text-slate-500",
     },
-    {
-      id: "active",
-      label: "Active Task",
-      icon: Workflow,
-      badge: pendingApprovals.length > 0
-        ? `⏸ ${pendingApprovals.length}`
-        : task?.status === "executing" ? "●" : undefined,
-      color: "text-indigo-500",
-    },
     { id: "editor", label: "Editor", icon: Code2, badge: openFiles.length > 0 ? openFiles.length : undefined, color: "text-orange-500" },
     { id: "logs", label: "Logs", icon: Terminal, badge: logs.length > 0 ? logs.length : undefined, color: "text-blue-500" },
     {
       id: "history",
       label: "History",
       icon: History,
-      badge: pendingApprovals.length > 0 ? pendingApprovals.length : undefined,
       color: "text-purple-500",
     },
   ];
@@ -180,23 +165,6 @@ export default function Workbench() {
               className="absolute inset-0"
             >
               {activeTab === "overview" && <OverviewTab />}
-              {activeTab === "active" && (
-                <div className="absolute inset-0 p-0">
-                  {task ? (
-                    <ActiveTaskView task={task} />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center h-full text-slate-400 text-sm gap-3">
-                      <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
-                        <Workflow className="w-8 h-8 opacity-20 text-slate-500" />
-                      </div>
-                      <div className="flex flex-col items-center gap-1">
-                        <span className="font-medium text-slate-500 dark:text-slate-400">No Active Task</span>
-                        <span className="text-xs text-slate-400">Waiting for instructions...</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
               {activeTab === "logs" && <LogsView logs={logs} />}
               {activeTab === "history" && <HistoryView />}
             </motion.div>

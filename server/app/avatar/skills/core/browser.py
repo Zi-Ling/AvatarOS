@@ -262,6 +262,7 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
         side_effects={SideEffect.NETWORK, SideEffect.FS, SideEffect.BROWSER},
         risk_level=SkillRiskLevel.EXECUTE,
         aliases=["browser_run", "playwright_run", "web_automation"],
+        code_params={"script"},
     )
 
     async def run(self, ctx: SkillContext, params: BrowserRunInput) -> BrowserRunOutput:

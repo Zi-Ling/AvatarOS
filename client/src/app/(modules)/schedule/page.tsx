@@ -36,7 +36,7 @@ export default function SchedulePage() {
     
     try {
       // 1. Fetch Schedules (Future) - 带错误处理
-      let schedules = [];
+      let schedules: Awaited<ReturnType<typeof scheduleApi.listSchedules>> = [];
       let schedulesError = false;
       try {
         schedules = await scheduleApi.listSchedules();
@@ -60,7 +60,7 @@ export default function SchedulePage() {
         
         return {
           id: s.id,
-          type: 'future',
+          type: 'future' as const,
           // 显示可读的日期时间 (如 "12月1日 09:00")
           timestamp: s.next_run_at 
             ? nextRunDate.toLocaleString('zh-CN', { 
@@ -74,7 +74,7 @@ export default function SchedulePage() {
           rawDate: nextRunDate,
           title: s.name,
           description: s.intent_spec.goal,
-          status: s.is_active ? 'pending' : 'failed',
+          status: s.is_active ? 'pending' as const : 'failed' as const,
           meta: `Cron: ${s.cron_expression}`, // Cron 表达式作为技术细节
           isActive: s.is_active, // 新增：是否激活
         };

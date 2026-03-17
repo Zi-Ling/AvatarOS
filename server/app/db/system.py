@@ -32,6 +32,11 @@ class ExecutionSession(SQLModel, table=True):
         index=True,
     )
 
+    # ── 长任务关联 ──────────────────────────────────────────────────
+    task_session_id: Optional[str] = Field(default=None, index=True)  # 关联 TaskSession
+    execution_type: Optional[str] = Field(default=None)
+    # initial / resume / post_merge / post_rollback
+
     # ── 业务身份锚点 ──────────────────────────────────────────────────
     run_id: Optional[str] = Field(default=None, index=True)          # 对应 runs.id
     task_id: Optional[str] = Field(default=None, index=True)         # 对应 tasks.id

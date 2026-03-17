@@ -304,7 +304,7 @@ export function ChatInput({
                 /* 发送按钮 */
                 <button
                   type="button"
-                  onClick={handleSend}
+                  onClick={() => handleSend()}
                   disabled={(!inputValue.trim() && attachments.length === 0) || isRecording || isTranscribing}
                   className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-r from-indigo-500 to-purple-600 text-white transition hover:shadow-lg hover:shadow-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed"
                   title={t.common?.confirm || "Send"}

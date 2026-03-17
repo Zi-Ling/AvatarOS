@@ -204,6 +204,8 @@ class GraphExecutor:
                             "ImportError",
                             "SyntaxError",
                             "IndentationError",
+                            "No such file or directory",
+                            "FileNotFoundError",
                         )
                         retryable = not any(pat in stderr for pat in _ENV_ERROR_PATTERNS)
                 raise ExecutionError(msg, retryable=retryable)
@@ -396,6 +398,11 @@ class GraphExecutor:
 
         return resolved
 
+    # Fallback priority for resolving primary output field.
+    # Must stay in sync with GraphController._PRIMARY_OUTPUT_FIELDS and
+    # _inject_node_outputs_into_code value extraction chain.
+    _PRIMARY_OUTPUT_FALLBACKS = ("output", "result", "content", "stdout")
+
     def _resolve_single_edge(
         self,
         graph: 'ExecutionGraph',
@@ -411,28 +418,52 @@ class GraphExecutor:
                 f"Source node '{edge.source_node}' not completed (status: {source_node.status.value})"
             )
 
-        if context:
-            node_outputs = context.get_node_output(edge.source_node)
-            if node_outputs and edge.source_field in node_outputs:
-                value = node_outputs[edge.source_field]
-            elif edge.source_field in source_node.outputs:
-                value = source_node.outputs[edge.source_field]
-            else:
-                raise ParameterResolutionError(
-                    f"Field '{edge.source_field}' not found in '{edge.source_node}' outputs. "
-                    f"Available: {list(source_node.outputs.keys())}"
-                )
-        else:
-            if edge.source_field not in source_node.outputs:
-                raise ParameterResolutionError(
-                    f"Field '{edge.source_field}' not found in '{edge.source_node}' outputs"
-                )
-            value = source_node.outputs[edge.source_field]
+        value = self._lookup_field(source_node, edge.source_field, context)
 
         if edge.transformer_name:
             value = self._apply_transformer(edge.transformer_name, value, edge)
 
         return value
+
+    def _lookup_field(
+        self,
+        source_node: 'StepNode',
+        source_field: str,
+        context: Optional['ExecutionContext'] = None,
+    ) -> Any:
+        """
+        Look up *source_field* in the source node's outputs.
+
+        If the exact field is missing, try the standard fallback chain
+        (output → result → content → stdout) so that AutoEdges created
+        before the source node ran can still resolve correctly.
+        """
+        # Build the unified outputs dict (context takes precedence)
+        outputs: Dict[str, Any] = {}
+        if context:
+            ctx_outputs = context.get_node_output(source_node.id)
+            if ctx_outputs:
+                outputs.update(ctx_outputs)
+        if not outputs:
+            outputs = source_node.outputs
+
+        # Fast path: exact match
+        if source_field in outputs:
+            return outputs[source_field]
+
+        # Fallback: walk priority chain
+        for candidate in self._PRIMARY_OUTPUT_FALLBACKS:
+            if candidate != source_field and candidate in outputs:
+                logger.warning(
+                    f"[EdgeResolve] '{source_field}' not in '{source_node.id}' outputs, "
+                    f"falling back to '{candidate}'"
+                )
+                return outputs[candidate]
+
+        raise ParameterResolutionError(
+            f"Field '{source_field}' not found in '{source_node.id}' outputs. "
+            f"Available: {list(outputs.keys())}"
+        )
 
     def _apply_transformer(self, transformer_name: str, value: Any, edge: 'DataEdge') -> Any:
         if transformer_name not in self.transformer_registry:
@@ -497,7 +528,9 @@ class GraphExecutor:
         base_path = self._get_base_path()
 
         # python.run: inject upstream node outputs as variables
-        if skill_name == "python.run" and context is not None:
+        # Uses SkillSpec.code_params to identify code-bearing parameters
+        _code_params = getattr(skill_cls.spec, "code_params", set()) if hasattr(skill_cls, "spec") else set()
+        if _code_params and context is not None:
             params = self._inject_node_outputs_into_code(params, context)
             # Sanitize host paths in LLM-generated code: replace D:\Temp\IA\... with /workspace/...
             # This prevents SyntaxError from unescaped backslashes in Windows paths
@@ -671,6 +704,10 @@ class GraphExecutor:
         """
         Replace host machine absolute paths in python.run code with container paths.
         Prevents SyntaxError from unescaped backslashes in Windows paths like D:\\Temp\\IA\\file.svg.
+        
+        Dual-mount aware:
+          - user workspace paths → /workspace/...
+          - session workspace paths → /session/...
         """
         code = params.get("code", "")
         if not code:
@@ -680,29 +717,50 @@ class GraphExecutor:
         if not base_path:
             return params
 
-        from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH
-        workspace_root = str(Path(base_path).resolve())
-
-        # Build both forward-slash and backslash variants
-        root_fwd = workspace_root.replace("\\", "/").rstrip("/")
-        root_back = workspace_root.replace("/", "\\").rstrip("\\")
-
+        from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH, CONTAINER_SESSION_PATH
         import re as _re
 
-        def _replace(m: _re.Match) -> str:
-            full = m.group(0)
-            normalized = full.replace("\\", "/")
-            if normalized.startswith(root_fwd):
-                rel = normalized[len(root_fwd):].lstrip("/")
-                return f"{CONTAINER_WORKSPACE_PATH}/{rel}" if rel else CONTAINER_WORKSPACE_PATH
-            return full
+        # 收集需要替换的路径映射：(host_root, container_mount)
+        # 注意：session workspace 路径更长，必须先匹配（避免被 user workspace 前缀吃掉）
+        path_mappings = []
 
-        escaped_fwd = _re.escape(root_fwd)
-        escaped_back = _re.escape(root_back)
-        pattern = f"({escaped_fwd}|{escaped_back})[^\\s\"'\\)\\]]*"
-        new_code = _re.sub(pattern, _replace, code)
+        # Session workspace → /session
+        _effective_ws = getattr(self, "workspace", None)
+        if _effective_ws is not None and hasattr(_effective_ws, "root"):
+            session_root = str(Path(_effective_ws.root).resolve())
+            session_fwd = session_root.replace("\\", "/").rstrip("/")
+            session_back = session_root.replace("/", "\\").rstrip("\\")
+            path_mappings.append((session_fwd, session_back, CONTAINER_SESSION_PATH))
 
-        if new_code != code:
+        # User workspace → /workspace
+        workspace_root = str(Path(base_path).resolve())
+        root_fwd = workspace_root.replace("\\", "/").rstrip("/")
+        root_back = workspace_root.replace("/", "\\").rstrip("\\")
+        path_mappings.append((root_fwd, root_back, CONTAINER_WORKSPACE_PATH))
+
+        changed = False
+        new_code = code
+        for fwd, back, mount in path_mappings:
+            escaped_fwd = _re.escape(fwd)
+            escaped_back = _re.escape(back)
+            pattern = f"({escaped_fwd}|{escaped_back})[^\\s\"'\\)\\]]*"
+
+            def _make_replacer(prefix_fwd, mount_path):
+                def _replace(m):
+                    full = m.group(0)
+                    normalized = full.replace("\\", "/")
+                    if normalized.startswith(prefix_fwd):
+                        rel = normalized[len(prefix_fwd):].lstrip("/")
+                        return f"{mount_path}/{rel}" if rel else mount_path
+                    return full
+                return _replace
+
+            result = _re.sub(pattern, _make_replacer(fwd, mount), new_code)
+            if result != new_code:
+                changed = True
+                new_code = result
+
+        if changed:
             logger.debug("[GraphExecutor] Sanitized host paths in python.run code")
             return {**params, "code": new_code}
         return params
@@ -730,7 +788,7 @@ class GraphExecutor:
 
         文件路径产物（file_path 字段）直接映射为容器内路径，不再 JSON 化内容。
         """
-        from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH
+        from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH, CONTAINER_SESSION_PATH
 
         all_outputs = context.get_all_node_outputs()
         if not all_outputs:
@@ -740,6 +798,16 @@ class GraphExecutor:
         _effective_ws = getattr(context, "workspace", None) or self.workspace
         if _effective_ws is None:
             return self._inject_node_outputs_repr_fallback(params, context)
+
+        workspace_root = str(Path(_effective_ws.root).resolve())
+        inputs_dir = Path(_effective_ws.root) / "input"  # 使用标准 input/ 目录
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+
+        # 判断是否启用 dual-mount（有 user workspace 时 session 挂在 /session）
+        # 如果 user workspace 存在，input 文件在 /session/input/；否则在 /workspace/input/
+        _user_ws = self._get_base_path()
+        _has_user_ws = _user_ws is not None and str(_user_ws.resolve()) != workspace_root
+        _input_mount = CONTAINER_SESSION_PATH if _has_user_ws else CONTAINER_WORKSPACE_PATH
 
         workspace_root = str(Path(_effective_ws.root).resolve())
         inputs_dir = Path(_effective_ws.root) / "input"  # 使用标准 input/ 目录
@@ -776,15 +844,15 @@ class GraphExecutor:
                     file_path_str = outputs.get("file_path")
             if file_path_str:
                 _fp = str(file_path_str)
-                # 容器内路径（/workspace/...）：直接用，不走宿主机 Path.resolve()
-                if _fp.startswith("/workspace/") or _fp.startswith("/workspace\\"):
+                # 容器内路径（/workspace/... 或 /session/...）：直接用
+                if _fp.startswith("/workspace/") or _fp.startswith("/workspace\\") or _fp.startswith("/session/"):
                     container_path = _fp.replace("\\", "/")
                 else:
                     # 宿主机绝对路径：映射到容器内路径
                     host_path = str(Path(_fp).resolve())
                     if host_path.startswith(workspace_root):
                         rel = host_path[len(workspace_root):].lstrip("/\\").replace("\\", "/")
-                        container_path = f"{CONTAINER_WORKSPACE_PATH}/{rel}"
+                        container_path = f"{_input_mount}/{rel}"
                     else:
                         container_path = _fp.replace("\\", "/")
                 manifest[var_name] = {
@@ -798,7 +866,7 @@ class GraphExecutor:
             # 结构化数据：序列化为 JSON 文件
             json_filename = f"{var_name}.json"
             json_path = inputs_dir / json_filename
-            container_json_path = f"{CONTAINER_WORKSPACE_PATH}/input/{json_filename}"
+            container_json_path = f"{_input_mount}/input/{json_filename}"
 
             try:
                 with open(json_path, "w", encoding="utf-8") as f:
@@ -831,6 +899,10 @@ class GraphExecutor:
 
         injected_prefix = "import json\n" + "\n".join(load_lines) + "\n\n"
         original_code = params.get("code", "")
+        if isinstance(original_code, list):
+            original_code = "\n".join(str(line) for line in original_code)
+        elif not isinstance(original_code, str):
+            original_code = str(original_code)
         return {**params, "code": injected_prefix + self._output_helper_code() + original_code}
 
     # ------------------------------------------------------------------
@@ -845,6 +917,23 @@ class GraphExecutor:
         return (
             "import json as _json\n"
             "import os as _os\n"
+            # ── subprocess 拦截 ──
+            # LLM 偶尔无视 prompt 规则生成 subprocess 调用。
+            # Docker 容器里 subprocess 可用，但子进程路径不对会静默失败
+            # （外层 exit_code=0，真实 returncode 藏在 output 里）。
+            # 用 mock module 在 import 时就拦截，让错误立即暴露。
+            "import types as _types\n"
+            "_mock_subprocess = _types.ModuleType('subprocess')\n"
+            "def _blocked_subprocess(*a, **kw):\n"
+            "    raise RuntimeError('subprocess is blocked in sandbox. Write your logic directly in python.run code.')\n"
+            "_mock_subprocess.run = _blocked_subprocess\n"
+            "_mock_subprocess.Popen = _blocked_subprocess\n"
+            "_mock_subprocess.call = _blocked_subprocess\n"
+            "_mock_subprocess.check_output = _blocked_subprocess\n"
+            "_mock_subprocess.check_call = _blocked_subprocess\n"
+            "import sys as _sys\n"
+            "_sys.modules['subprocess'] = _mock_subprocess\n"
+            "\n"
             f"def _output(value):\n"
             f"    print('{marker}' + _json.dumps(value, ensure_ascii=False, default=str))\n"
             "\n"
@@ -875,6 +964,10 @@ class GraphExecutor:
     def _inject_output_helper(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """无上游输出时，仅注入 _output() helper"""
         original_code = params.get("code", "")
+        if isinstance(original_code, list):
+            original_code = "\n".join(str(line) for line in original_code)
+        elif not isinstance(original_code, str):
+            original_code = str(original_code)
         return {**params, "code": self._output_helper_code() + original_code}
 
     def _inject_node_outputs_repr_fallback(
@@ -901,6 +994,10 @@ class GraphExecutor:
 
         injected_prefix = "\n".join(lines) + "\n\n" if lines else ""
         original_code = params.get("code", "")
+        if isinstance(original_code, list):
+            original_code = "\n".join(str(line) for line in original_code)
+        elif not isinstance(original_code, str):
+            original_code = str(original_code)
         return {**params, "code": injected_prefix + self._output_helper_code() + original_code}
 
     async def _offload_large_outputs(

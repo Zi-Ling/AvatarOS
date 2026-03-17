@@ -38,6 +38,8 @@ from app.api import (
     settings_router, maintenance_router, schedule_router, workflow_router,
 )
 from app.api.log import logging_router
+from app.api.task_session import router as task_session_router
+from app.api.task_scheduler_api import router as task_scheduler_router
 from app.core.config import config
 from app.io.manager import SocketManager
 
@@ -98,6 +100,8 @@ for router in [
     settings_router, maintenance_router, schedule_router, workflow_router,
     # log
     logging_router,
+    # long-task runtime
+    task_session_router, task_scheduler_router,
 ]:
     fastapi_app.include_router(router)
 

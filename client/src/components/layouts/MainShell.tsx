@@ -96,7 +96,7 @@ export function MainShell({ children }: MainShellProps) {
                   className="bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-white/5"
                 >
                   <div className="h-full flex flex-col">
-                    {(activeTab === 'files' || activeTab === 'workspace') && (
+                    {(activeTab === 'workspace') && (
                       <div className="flex-1 flex flex-col h-full p-2">
                         <div className="text-sm font-medium text-slate-500 dark:text-slate-400 px-2 mb-2 uppercase">Workspace</div>
                         <FileExplorer />

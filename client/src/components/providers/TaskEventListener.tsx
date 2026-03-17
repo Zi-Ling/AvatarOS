@@ -8,6 +8,7 @@ import { useRunStore } from "@/stores/runStore";
 import { useWorkbenchStore } from "@/stores/workbenchStore";
 import type { Message, TaskStep, ApprovalRequest, RunSummaryData } from "@/types/chat";
 import type { RunStep } from "@/types/run";
+import type { NarrativeEvent } from "@/types/narrative";
 
 export function TaskEventListener() {
   const { socket } = useSocket();
@@ -17,7 +18,7 @@ export function TaskEventListener() {
     setControlStatus, setCurrentStepName, addPendingApproval, removePendingApproval,
     setAutoSwitchedForTask,
   } = useTaskStore();
-  const { createRun, updateRunStatus, setSteps, updateStep: updateRunStep, setActiveRunId } = useRunStore();
+  const { createRun, updateRunStatus, setSteps, updateStep: updateRunStep, setActiveRunId, pushNarrativeEvent } = useRunStore();
 
   useEffect(() => {
     if (!socket) return;
@@ -33,6 +34,39 @@ export function TaskEventListener() {
 
       if (type.startsWith("schedule.")) {
         window.dispatchEvent(new CustomEvent("schedule-updated", { detail: { type, payload } }));
+        return;
+      }
+
+      // ── Narrative update ─────────────────────────────────────────────
+      if (type === "narrative.update" && payload) {
+        try {
+          const narrativeEvent = payload as NarrativeEvent;
+          if (narrativeEvent.event_id && narrativeEvent.run_id && narrativeEvent.sequence !== undefined) {
+            pushNarrativeEvent(narrativeEvent.run_id, narrativeEvent);
+          } else {
+            console.warn("[TaskEventListener] Invalid narrative event payload:", payload);
+          }
+        } catch (e) {
+          console.warn("[TaskEventListener] Failed to process narrative event:", e);
+        }
+        return;
+      }
+
+      // ── Narrative replay (reconnection) ────────────────────────────────
+      if (type === "narrative.replay" && payload?.events) {
+        try {
+          const events = payload.events as NarrativeEvent[];
+          const runId = payload.run_id as string;
+          if (runId && Array.isArray(events)) {
+            for (const evt of events) {
+              if (evt.event_id && evt.run_id) {
+                pushNarrativeEvent(evt.run_id, evt);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("[TaskEventListener] Failed to process narrative replay:", e);
+        }
         return;
       }
 
@@ -96,7 +130,7 @@ export function TaskEventListener() {
 
         const { autoSwitchedForTask } = useTaskStore.getState();
         if (autoSwitchedForTask !== taskId) {
-          useWorkbenchStore.getState().setActiveTab("active");
+          useWorkbenchStore.getState().setActiveTab("overview");
           setAutoSwitchedForTask(taskId);
         }
 
@@ -139,7 +173,7 @@ export function TaskEventListener() {
 
         const { autoSwitchedForTask } = useTaskStore.getState();
         if (autoSwitchedForTask !== taskId) {
-          useWorkbenchStore.getState().setActiveTab("active");
+          useWorkbenchStore.getState().setActiveTab("overview");
           setAutoSwitchedForTask(taskId);
         }
 
@@ -375,12 +409,43 @@ export function TaskEventListener() {
     };
 
     socket.on("server_event", handleServerEvent);
-    return () => { socket.off("server_event", handleServerEvent); };
+
+    // ── Reconnection: request narrative replay for active runs ────────
+    const handleReconnect = () => {
+      try {
+        const { narrativeStates, activeRunId } = useRunStore.getState();
+
+        // Collect all runs that have narrative state
+        const runIds = Object.keys(narrativeStates);
+        if (activeRunId && !runIds.includes(activeRunId)) {
+          runIds.push(activeRunId);
+        }
+
+        for (const runId of runIds) {
+          const ns = narrativeStates[runId];
+          const afterSequence = ns?.lastSequence ?? -1;
+          socket.emit("request_narrative_replay", {
+            run_id: runId,
+            after_sequence: afterSequence,
+          });
+        }
+      } catch (e) {
+        // Replay failure is non-blocking — continue with existing RunStore data
+        console.warn("[TaskEventListener] Failed to request narrative replay:", e);
+      }
+    };
+
+    socket.on("connect", handleReconnect);
+
+    return () => {
+      socket.off("server_event", handleServerEvent);
+      socket.off("connect", handleReconnect);
+    };
   }, [
     socket, updateMessage, addMessage, setActiveTask, updateTaskStep, updateTaskStatus,
     addLog, setIsCancelling, setControlStatus, setCurrentStepName, addPendingApproval,
     removePendingApproval, setAutoSwitchedForTask, createRun, updateRunStatus, setSteps,
-    updateRunStep, setActiveRunId,
+    updateRunStep, setActiveRunId, pushNarrativeEvent,
   ]);
 
   return null;

@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   History, CheckCircle2, XCircle, Loader2, ChevronRight, Clock,
   Cpu, AlertCircle, Paperclip, Download, GitBranch, Layers,
-  ShieldAlert, DollarSign,
+  DollarSign,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -15,25 +15,21 @@ import {
 } from "@/lib/api/history";
 import { getSkillMeta } from "./StepPreview";
 import { LoadingSpinner, EmptyState } from "@/components/ui/StateViews";
-import { ApprovalView } from "./ApprovalView";
 import { CostView } from "./CostView";
 import { TraceViewer } from "./TraceViewer";
 import { useChatStore } from "@/stores/chatStore";
-import { useTaskStore } from "@/stores/taskStore";
 
-type HistorySubTab = "sessions" | "approval" | "cost" | "trace";
+type HistorySubTab = "sessions" | "cost" | "trace";
 
 // -----------------------------------------------------------------------
 // HistoryView root
 // -----------------------------------------------------------------------
 export function HistoryView() {
   const [subTab, setSubTab] = useState<HistorySubTab>("sessions");
-  const { pendingApprovals } = useTaskStore();
   const { sessionId } = useChatStore();
 
   const subTabs: { id: HistorySubTab; label: string; icon: React.ElementType; badge?: number }[] = [
     { id: "sessions", label: "Sessions", icon: History },
-    { id: "approval", label: "Approval", icon: ShieldAlert, badge: pendingApprovals.length > 0 ? pendingApprovals.length : undefined },
     { id: "cost", label: "Cost", icon: DollarSign },
     { id: "trace", label: "Trace", icon: GitBranch },
   ];
@@ -71,7 +67,6 @@ export function HistoryView() {
       {/* 子视图内容 */}
       <div className="flex-1 overflow-hidden">
         {subTab === "sessions" && <SessionsView />}
-        {subTab === "approval" && <ApprovalView />}
         {subTab === "cost" && <CostView />}
         {subTab === "trace" && <TraceViewer sessionId={sessionId ?? ""} />}
       </div>

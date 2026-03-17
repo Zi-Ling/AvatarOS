@@ -203,6 +203,80 @@ def _is_markup_content(text: str) -> bool:
     return False
 
 
+def _compress_structured_output(output: Any, step_index: int) -> Optional[str]:
+    """
+    Semantic-aware output compression for structured data.
+
+    Detects outputs that serve as "working sets" for subsequent planning steps
+    (file lists, batch results, search hits, artifact inventories, etc.) and
+    compresses them into a compact, path-preserving format instead of applying
+    the generic head+tail text truncation that destroys referenceability.
+
+    Supported shapes:
+      - list[dict]  (direct structured list, e.g. fs.list output)
+      - dict with a high-value list field (files/results/items/matches/artifacts/contents)
+
+    Returns a compressed string, or None if the output is not structured.
+    """
+    # ── Extract the list to compress ──────────────────────────────────────
+    items: Optional[List] = None
+
+    if isinstance(output, list) and output and isinstance(output[0], dict):
+        items = output
+    elif isinstance(output, dict):
+        # Look for a high-value list field inside the dict
+        _LIST_KEYS = ("files", "results", "items", "matches", "artifacts",
+                      "contents", "entries", "records", "paths")
+        for key in _LIST_KEYS:
+            val = output.get(key)
+            if isinstance(val, list) and val and isinstance(val[0], dict):
+                items = val
+                break
+
+    if not items:
+        return None
+
+    # ── Pick the most informative fields per item ─────────────────────────
+    # Priority order: identity fields first, then status/type, then size
+    _IDENTITY_KEYS = ("path", "name", "src", "dst", "id", "file_path", "url")
+    _META_KEYS = ("type", "is_dir", "status", "error", "success", "size")
+
+    # Determine which keys actually exist across items (sample first 5)
+    sample = items[:5]
+    available_identity = [k for k in _IDENTITY_KEYS if any(k in item for item in sample)]
+    available_meta = [k for k in _META_KEYS if any(k in item for item in sample)]
+
+    # If no identity keys found, fall back to None (use generic truncation)
+    if not available_identity:
+        return None
+
+    keys_to_show = available_identity + available_meta[:3]  # cap meta fields
+
+    # ── Compress each item into a single line ─────────────────────────────
+    MAX_ITEMS = 80  # show up to 80 items before truncating
+    compressed_lines = []
+    for item in items[:MAX_ITEMS]:
+        parts = []
+        for k in keys_to_show:
+            v = item.get(k)
+            if v is not None:
+                parts.append(f"{k}={v}")
+        compressed_lines.append("  " + ", ".join(parts))
+
+    total = len(items)
+    header = f"[{total} items, showing key fields]"
+    if total > MAX_ITEMS:
+        compressed_lines.append(f"  ... [{total - MAX_ITEMS} more items omitted]")
+
+    result = header + "\n" + "\n".join(compressed_lines)
+
+    # Final safety: if compressed form is still huge (>3000 chars), do head+tail
+    if len(result) > 3000:
+        result = result[:2000] + f"\n  ... [truncated, {total} items total]\n" + result[-800:]
+
+    return result
+
+
 def _format_history(task: Task, workspace_root: Optional[str] = None) -> str:
     if not task.steps:
         return "(No steps executed yet)"
@@ -213,23 +287,28 @@ def _format_history(task: Task, workspace_root: Optional[str] = None) -> str:
         result_str = ""
         if step.result:
             if step.result.success:
-                out_preview = str(step.result.output)
-                # binary-like payload（hex/base64/低语义密度）：只展示长度，不展示内容
-                # 防止 LLM 把截断后含脏字符的字符串内联进下游 skill 参数
+                raw_output = step.result.output
+                out_preview = str(raw_output)
+
+                # binary-like payload: show length only
                 if _is_binary_like_payload(out_preview):
                     out_preview = f"[binary payload, {len(out_preview)} chars — use step_{i+1}_output variable, do NOT inline this value]"
                 elif _is_markup_content(out_preview):
-                    # XML/SVG/HTML markup: show only a brief hint, force LLM to use variable
                     tag_hint = out_preview[:80].replace('\n', ' ')
                     out_preview = f"[markup content, {len(out_preview)} chars, starts with: {tag_hint}... — use step_{i+1}_output variable, do NOT inline]"
-                elif len(out_preview) > 600:
-                    # 普通长输出：首尾保留策略
-                    out_preview = out_preview[:250] + "\n... [中间省略] ...\n" + out_preview[-300:]
-                # 路径脱敏：把宿主机路径替换成容器路径，防止 Planner 硬编码 Windows 路径
+                else:
+                    # Semantic-aware compression for structured outputs
+                    # (file lists, batch results, search hits, etc.)
+                    compressed = _compress_structured_output(raw_output, i)
+                    if compressed is not None:
+                        out_preview = compressed
+                    elif len(out_preview) > 600:
+                        # Generic long text: head+tail truncation
+                        out_preview = out_preview[:250] + "\n... [中间省略] ...\n" + out_preview[-300:]
+
                 out_preview = _sanitize_host_paths(out_preview, workspace_root)
                 result_str = f"Output: {out_preview}"
             else:
-                # 优化 1: 错误信息也使用首尾保留（针对 Traceback）
                 error_msg = str(step.result.error)
                 if len(error_msg) > 600:
                     error_msg = error_msg[:200] + "\n... [中间省略] ...\n" + error_msg[-400:]
@@ -288,15 +367,26 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
     lines.append("Latest successful outputs:")
     # 只展示最近 3 个成功步骤的输出摘要
     for step_num, step in successful_steps[-3:]:
-        out = str(step.result.output) if step.result.output else "(no output)"
+        raw_out = step.result.output
+        out = str(raw_out) if raw_out else "(no output)"
         out = _sanitize_host_paths(out, workspace_root)
         # binary-like payload：只展示长度
         if _is_binary_like_payload(out):
             out = f"[binary payload, {len(out)} chars]"
         elif _is_markup_content(out):
             out = f"[markup content, {len(out)} chars — use step_{step_num}_output variable]"
-        elif len(out) > 300:
-            out = out[:250] + "...[truncated]"
+        else:
+            # Try structured compression first
+            compressed = _compress_structured_output(raw_out, step_num - 1)
+            if compressed is not None:
+                # In summary, show a shorter version (first 15 items max)
+                comp_lines = compressed.split("\n")
+                if len(comp_lines) > 17:  # header + 15 items + omitted
+                    out = "\n".join(comp_lines[:16]) + f"\n  ... [see step_{step_num} output for full list]"
+                else:
+                    out = compressed
+            elif len(out) > 300:
+                out = out[:250] + "...[truncated]"
         lines.append(f"  step_{step_num} ({step.skill_name}): {out}")
     lines.append("")
 

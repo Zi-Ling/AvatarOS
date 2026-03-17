@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from app.avatar.runtime.graph.planner.graph_planner import GraphPlanner
     from app.avatar.runtime.graph.runtime.graph_runtime import GraphRuntime, ExecutionResult
     from app.avatar.runtime.graph.guard.planner_guard import PlannerGuard
+    from app.avatar.runtime.graph.events.task_event_stream import TaskEventStream
+    from app.avatar.evolution.pipeline import EvolutionPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,31 @@ class ExecutionMode(str, Enum):
     """Graph execution mode"""
     REACT = "react"
     DAG = "dag"
+
+
+class _LongTaskContext:
+    """
+    长任务运行时上下文，封装所有长任务相关的 store/manager 引用。
+    仅在 env_context 中包含 task_session_id 时激活。
+    """
+
+    def __init__(self, task_session_id: str, event_stream: Optional['TaskEventStream'] = None):
+        self.task_session_id = task_session_id
+        self.event_stream = event_stream
+        self.graph_version = 0
+        self.step_count_since_checkpoint = 0
+        self.patch_count_since_snapshot = 0
+        self.checkpoint_interval = 5  # 每 N 步创建 routine checkpoint
+        self.snapshot_interval = 20   # 每 N 个 patch 保存 snapshot
+
+    @staticmethod
+    def from_env(env_context: dict) -> Optional['_LongTaskContext']:
+        """从 env_context 中提取长任务上下文，无 task_session_id 则返回 None。"""
+        tsid = env_context.get("task_session_id")
+        if not tsid:
+            return None
+        event_stream = env_context.get("_task_event_stream")
+        return _LongTaskContext(tsid, event_stream)
 
 
 class GraphController:
@@ -57,6 +84,7 @@ class GraphController:
         max_planner_calls: Optional[int] = None,
         max_planner_cost: Optional[float] = None,
         max_execution_cost: Optional[float] = None,
+        evolution_pipeline: Optional['EvolutionPipeline'] = None,
     ):
         self.planner = planner
         self.runtime = runtime
@@ -67,6 +95,7 @@ class GraphController:
         self.max_planner_calls = max_planner_calls
         self.max_planner_cost = max_planner_cost
         self.max_execution_cost = max_execution_cost
+        self._evolution_pipeline = evolution_pipeline
 
         self._active_graphs: Dict[str, asyncio.Task] = {}
         self._graph_semaphore = asyncio.Semaphore(max_concurrent_graphs)
@@ -220,21 +249,43 @@ class GraphController:
         sub_goals = self._goal_tracker.decompose_goal(intent)
         logger.info(f"[GoalTracker] Decomposed '{intent}' into {len(sub_goals)} sub-goals: {sub_goals}")
 
-        # ── NarrativeManager ────────────────────────────────────────────
-        _narrative_manager = None
+        # ── Long-task runtime context ───────────────────────────────────
+        _lt_ctx = _LongTaskContext.from_env(env_context)
+
+        # ── NarrativeManager (with fallback degradation) ──────────────
+        _narrative_manager: Any  # NarrativeManager | FallbackNarrativeManager
         try:
-            from app.avatar.runtime.narrative.execution_narrative import NarrativeManager
+            from app.avatar.runtime.narrative.execution_narrative import NarrativeManager as _NM
+            from app.avatar.runtime.narrative.narrative_mapper import NarrativeMapper as _NMapper
             from app.io.manager import SocketManager
             _socket_mgr = SocketManager.get_instance()
-            _narrative_manager = NarrativeManager(
+            _nm_mapper = _NMapper()
+            _narrative_manager = _NM(
                 session_id=_session_id or _exec_session_id,
                 task_id=str(graph.id),
                 goal=intent,
-                sub_goals=sub_goals,
+                mapper=_nm_mapper,
                 socket_manager=_socket_mgr,
+                sub_goals=sub_goals,
             )
         except Exception as _nm_err:
-            logger.debug(f"[GraphController] NarrativeManager init skipped: {_nm_err}")
+            logger.warning(f"[GraphController] NarrativeManager init failed, using fallback: {_nm_err}")
+            try:
+                from app.avatar.runtime.narrative.execution_narrative import FallbackNarrativeManager as _FNM
+                from app.io.manager import SocketManager
+                _socket_mgr = SocketManager.get_instance()
+                _narrative_manager = _FNM(
+                    session_id=_session_id or _exec_session_id,
+                    task_id=str(graph.id),
+                    socket_manager=_socket_mgr,
+                )
+            except Exception as _fb_err:
+                logger.warning(f"[GraphController] FallbackNarrativeManager init also failed: {_fb_err}")
+                from app.avatar.runtime.narrative.execution_narrative import FallbackNarrativeManager as _FNM
+                _narrative_manager = _FNM(
+                    session_id=_session_id or _exec_session_id,
+                    task_id=str(graph.id),
+                )
 
         # ── Per-task state reset ────────────────────────────────────────
         planner_invocations = 0
@@ -251,6 +302,21 @@ class GraphController:
         _result_status = "unknown"
         _error_message: Optional[str] = None
         _final_result: Optional['ExecutionResult'] = None
+        _verification_passed = False  # Set True when VerificationGate verdict=PASS
+
+        # ── Evolution trace (if pipeline wired) ─────────────────────────
+        _evo_trace_id: Optional[str] = None
+        if self._evolution_pipeline:
+            try:
+                _evo_trace = self._evolution_pipeline._trace_collector.create_trace(
+                    task_id=str(graph.id),
+                    session_id=_session_id or _exec_session_id,
+                    goal=intent,
+                    task_type=env_context.get("task_type", "unknown"),
+                )
+                _evo_trace_id = _evo_trace.trace_id
+            except Exception as _evo_err:
+                logger.debug(f"[GraphController] Evolution trace creation failed: {_evo_err}")
 
         try:
             while True:
@@ -262,6 +328,9 @@ class GraphController:
                     _lifecycle_status = "cancelled"
                     _result_status = "cancelled"
                     _error_message = "Task cancelled by user"
+                    # Long-task: save final snapshot on cancel
+                    if _lt_ctx is not None:
+                        self._lt_save_snapshot(_lt_ctx, graph, "pre_cancel")
                     _final_result = self._make_error_result(graph, error_message=_error_message)
                     return _final_result
 
@@ -370,6 +439,32 @@ class GraphController:
                         continue
 
                     # ── Verification Gate ───────────────────────────────
+                    # Long-task: run DeliveryGate before verification
+                    if _lt_ctx is not None:
+                        _dg_result = await self._lt_run_delivery_gate(_lt_ctx)
+                        if _dg_result and not _dg_result.get("passed", True):
+                            logger.warning(
+                                f"[DeliveryGate] Not passed: {_dg_result.get('reasons')}"
+                            )
+                            env_context = dict(env_context)
+                            env_context["delivery_gate_reasons"] = _dg_result.get("reasons", [])
+                            env_context["goal_tracker_hint"] = (
+                                f"Delivery gate check failed: {_dg_result.get('reasons')}. "
+                                f"Please address these issues before finishing."
+                            )
+                            continue
+
+                    # ── Narrative: verification events ───────────────────
+                    from app.avatar.runtime.narrative.models import TranslationContext as _TC
+                    try:
+                        await _narrative_manager.on_event(
+                            "verification.start",
+                            step_id="__run__",
+                            context=_TC(),
+                        )
+                    except Exception as _ne:
+                        logger.debug(f"[GraphController] Narrative verification.start failed: {_ne}")
+
                     _gate_result = await self._run_verification_gate(
                         intent=intent, graph=graph, workspace=_workspace,
                         env_context=env_context,
@@ -377,19 +472,42 @@ class GraphController:
                         task_context=None,
                     )
 
-                    if _narrative_manager is not None:
-                        try:
-                            if _gate_result == "break_pass":
-                                await _narrative_manager.on_verdict("PASS")
-                            elif _gate_result == "break_partial":
-                                await _narrative_manager.on_verdict("partial_success")
-                            elif _gate_result in ("break_failed", "break_uncertain"):
-                                await _narrative_manager.on_verdict("FAIL")
-                            elif _gate_result == "continue":
-                                _hint = (env_context.get("verification_failed_hints") or ["正在重新分析失败原因"])[0]
-                                await _narrative_manager.on_repair_triggered(_hint)
-                        except Exception as _ne:
-                            logger.debug(f"[GraphController] NarrativeManager verdict failed: {_ne}")
+                    try:
+                        if _gate_result == "break_pass":
+                            await _narrative_manager.on_event(
+                                "verification.pass",
+                                step_id="__run__",
+                                context=_TC(),
+                            )
+                        elif _gate_result == "break_partial":
+                            await _narrative_manager.on_event(
+                                "verification.fail",
+                                step_id="__run__",
+                                context=_TC(reason="部分完成"),
+                            )
+                        elif _gate_result in ("break_failed", "break_uncertain"):
+                            await _narrative_manager.on_event(
+                                "verification.fail",
+                                step_id="__run__",
+                                context=_TC(reason="验证失败"),
+                            )
+                        elif _gate_result == "continue":
+                            await _narrative_manager.on_event(
+                                "verification.fail",
+                                step_id="__run__",
+                                context=_TC(reason="验证未通过，准备重试"),
+                            )
+                            _hint = (env_context.get("verification_failed_hints") or ["正在重新分析失败原因"])[0]
+                            await _narrative_manager.on_event(
+                                "retry.triggered",
+                                step_id="__run__",
+                                context=_TC(
+                                    reason=_hint,
+                                    retry_count=1,
+                                ),
+                            )
+                    except Exception as _ne:
+                        logger.debug(f"[GraphController] Narrative verification event failed: {_ne}")
 
                     if _gate_result == "continue":
                         env_context = dict(env_context)
@@ -416,6 +534,13 @@ class GraphController:
                         _result_status = "uncertain_terminal"
                         _final_result = self._make_error_result(graph, "Verification uncertain: high-risk task requires human review")
                         return _final_result
+
+                    # If VerificationGate returned break_pass (or was not invoked
+                    # but all sub-goals are covered), mark verification as passed
+                    # so the final status computation can override historical
+                    # node-level failures that were recovered from.
+                    if _gate_result == "break_pass":
+                        _verification_passed = True
 
                     logger.info("Planner returned FINISH -- all sub-goals covered")
                     break
@@ -464,7 +589,7 @@ class GraphController:
                     )
                     continue
 
-                self._apply_patch(patch, graph)
+                self._apply_patch(patch, graph, lt_ctx=_lt_ctx)
                 self._emit_plan_generated(graph, env_context)
 
                 # ── ParamBinder ─────────────────────────────────────────
@@ -487,27 +612,124 @@ class GraphController:
 
                 await _lifecycle.on_execution_started()
 
+                # ── Narrative: step.start for pending nodes ─────────────
+                from app.avatar.runtime.narrative.models import TranslationContext as _TC
+                _pending_node_ids: set = set()
+                for _n in graph.nodes.values():
+                    if _n.status == NodeStatus.PENDING:
+                        _pending_node_ids.add(_n.id)
+                        try:
+                            await _narrative_manager.on_event(
+                                "step.start",
+                                step_id=str(_n.id),
+                                context=_TC(
+                                    skill_name=_n.capability_name,
+                                    params_summary=self._summarize_params(_n.params),
+                                    semantic_label=self._get_semantic_label(_n),
+                                ),
+                            )
+                        except Exception as _ne:
+                            logger.debug(f"[GraphController] Narrative step.start failed: {_ne}")
+
                 # ── Execute ready nodes ─────────────────────────────────
                 result = await self.runtime.execute_ready_nodes(graph, context=_shared_context)
 
-                # NarrativeManager step update
-                if _narrative_manager is not None:
+                # ── Evolution: record completed/failed nodes as steps ───
+                if self._evolution_pipeline and _evo_trace_id:
                     try:
                         for _n in graph.nodes.values():
-                            if _n.status == NodeStatus.SUCCESS:
-                                _desc = _n.capability_name
-                                _oc = _n.metadata.get("output_contract") if _n.metadata else None
-                                if _oc is not None:
-                                    _label = (
-                                        getattr(_oc, "semantic_label", None)
-                                        if not isinstance(_oc, dict)
-                                        else _oc.get("semantic_label")
+                            if _n.status in (NodeStatus.SUCCESS, NodeStatus.FAILED):
+                                _node_meta = _n.metadata or {}
+                                if _node_meta.get("_evo_recorded"):
+                                    continue
+                                _step_status = "success" if _n.status == NodeStatus.SUCCESS else "failed"
+                                _step_output = _n.outputs if _n.status == NodeStatus.SUCCESS else None
+                                _step_error = _n.error_message if _n.status == NodeStatus.FAILED else None
+                                _step_duration = int(_node_meta.get("duration_ms", 0))
+                                self._evolution_pipeline._trace_collector.record_step(
+                                    trace_id=_evo_trace_id,
+                                    step_id=_n.id,
+                                    skill_name=_n.capability_name,
+                                    input_params=_n.params,
+                                    output=_step_output,
+                                    status=_step_status,
+                                    duration_ms=_step_duration,
+                                    error=_step_error,
+                                )
+                                _n.metadata = _node_meta
+                                _n.metadata["_evo_recorded"] = True
+                    except Exception as _evo_step_err:
+                        logger.debug(f"[GraphController] Evolution step recording failed: {_evo_step_err}")
+
+                # ── Long-task: persist step states + artifacts ──────────
+                if _lt_ctx is not None:
+                    await self._lt_persist_step_results(graph, _lt_ctx)
+
+                # ── Narrative: step.end / step.failed / artifact.created ───
+                try:
+                    for _n in graph.nodes.values():
+                        if _n.id not in _pending_node_ids:
+                            continue  # Only emit events for nodes we started this iteration
+                        if _n.status == NodeStatus.SUCCESS:
+                            await _narrative_manager.on_event(
+                                "step.end",
+                                step_id=str(_n.id),
+                                context=_TC(
+                                    skill_name=_n.capability_name,
+                                    output_summary=self._summarize_output(_n),
+                                    semantic_label=self._get_semantic_label(_n),
+                                ),
+                            )
+                            # Check for artifacts
+                            _oc = _n.metadata.get("output_contract") if _n.metadata else None
+                            if _oc is not None:
+                                _artifacts = _oc if isinstance(_oc, list) else [_oc]
+                                for _art in _artifacts:
+                                    _art_dict = _art if isinstance(_art, dict) else (
+                                        getattr(_art, "__dict__", {}) if hasattr(_art, "__dict__") else {}
                                     )
-                                    if _label:
-                                        _desc = _label
-                                await _narrative_manager.on_step_completed(_desc)
-                    except Exception as _ne:
-                        logger.debug(f"[GraphController] NarrativeManager step failed: {_ne}")
+                                    _art_path = _art_dict.get("path")
+                                    if _art_path:
+                                        _art_kind = _art_dict.get("kind", "file")
+                                        _art_label = _art_dict.get("semantic_label") or _art_path.rsplit("/", 1)[-1]
+                                        await _narrative_manager.on_event(
+                                            "artifact.created",
+                                            step_id=str(_n.id),
+                                            context=_TC(
+                                                artifact_type=_art_kind,
+                                                artifact_label=_art_label,
+                                            ),
+                                        )
+                        elif _n.status == NodeStatus.FAILED:
+                            await _narrative_manager.on_event(
+                                "step.failed",
+                                step_id=str(_n.id),
+                                context=_TC(
+                                    skill_name=_n.capability_name,
+                                    error_message=_n.error_message or "未知错误",
+                                    semantic_label=self._get_semantic_label(_n),
+                                ),
+                            )
+                            # Emit retry.triggered if the node can still retry
+                            if _n.can_retry():
+                                await _narrative_manager.on_event(
+                                    "retry.triggered",
+                                    step_id=str(_n.id),
+                                    context=_TC(
+                                        skill_name=_n.capability_name,
+                                        retry_count=_n.retry_count,
+                                        reason=_n.error_message or "执行失败",
+                                    ),
+                                )
+                except Exception as _ne:
+                    logger.debug(f"[GraphController] Narrative step events failed: {_ne}")
+
+                # ── Long-task: routine checkpoint every N steps ─────
+                if _lt_ctx is not None:
+                    _lt_ctx.step_count_since_checkpoint += 1
+                    if _lt_ctx.step_count_since_checkpoint >= _lt_ctx.checkpoint_interval:
+                        await self._lt_create_routine_checkpoint(_lt_ctx)
+                        _lt_ctx.step_count_since_checkpoint = 0
 
                 # ── Execution cost budget ───────────────────────────────
                 if self.max_execution_cost:
@@ -538,23 +760,11 @@ class GraphController:
                             f"[CircuitBreaker] {_consecutive_failures} consecutive failures — "
                             f"force-terminating"
                         )
-                        _any_success = any(
-                            n.status == NodeStatus.SUCCESS for n in graph.nodes.values()
+                        _error_message = (
+                            f"Circuit breaker: {_consecutive_failures} consecutive failures"
                         )
-                        if _any_success:
-                            from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
-                            _final_result = ExecutionResult(
-                                success=False, final_status="partial_success",
-                                completed_nodes=sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SUCCESS),
-                                failed_nodes=sum(1 for n in graph.nodes.values() if n.status == NodeStatus.FAILED),
-                                skipped_nodes=sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SKIPPED),
-                                graph=graph,
-                            )
-                            return _final_result
-                        else:
-                            _error_message = f"Circuit breaker: {_consecutive_failures} consecutive failures, no successes"
-                            _final_result = self._make_error_result(graph, error_message=_error_message)
-                            return _final_result
+                        _final_result = self._make_error_result(graph, error_message=_error_message)
+                        return _final_result
                 else:
                     _consecutive_failures = 0
 
@@ -581,10 +791,27 @@ class GraphController:
                     logger.debug("[ReAct] Node(s) succeeded, continuing loop for Planner FINISH decision")
 
             # ── FINISH: compute final result ────────────────────────────
+            # Long-task: save final snapshot
+            if _lt_ctx is not None:
+                self._lt_save_snapshot(_lt_ctx, graph, "final")
+
             completed = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SUCCESS)
             failed = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.FAILED)
             skipped = sum(1 for n in graph.nodes.values() if n.status == NodeStatus.SKIPPED)
             final_status = self.runtime._compute_graph_status(graph)
+
+            # ── Recovery override: VerificationGate PASS trumps historical failures ──
+            # When the ReAct loop recovered (e.g. step_1 failed, Planner retried
+            # with step_2 which succeeded, VerificationGate confirmed goal achieved),
+            # _compute_graph_status still sees the historical failed node and returns
+            # "failed". Override to "success" because the goal was verified as met.
+            if _verification_passed and final_status == "failed" and completed > 0:
+                logger.info(
+                    f"[GraphController] Recovery override: VerificationGate PASS with "
+                    f"{completed} succeeded / {failed} historically-failed node(s) "
+                    f"→ final_status overridden from 'failed' to 'success'"
+                )
+                final_status = "success"
 
             from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
             _final_result = ExecutionResult(
@@ -611,6 +838,28 @@ class GraphController:
                     _result_status = "failed"
 
             _ns = NodeStatus
+
+            # ── Narrative: task.completed / task.failed ──────────────────
+            try:
+                from app.avatar.runtime.narrative.models import TranslationContext as _TC
+                if _result_status in ("success", "partial_success"):
+                    await _narrative_manager.on_event(
+                        "task.completed",
+                        step_id="__run__",
+                        context=_TC(),
+                    )
+                elif _result_status in ("failed", "cancelled", "uncertain_terminal"):
+                    await _narrative_manager.on_event(
+                        "task.failed",
+                        step_id="__run__",
+                        context=_TC(
+                            reason=_error_message or "任务执行失败",
+                            error_message=_error_message,
+                        ),
+                    )
+            except Exception as _ne:
+                logger.debug(f"[GraphController] Narrative task lifecycle event failed: {_ne}")
+
             await _lifecycle.on_session_end(
                 lifecycle_status=_lifecycle_status,
                 result_status=_result_status,
@@ -619,6 +868,41 @@ class GraphController:
                 failed_nodes=sum(1 for n in graph.nodes.values() if n.status == _ns.FAILED),
                 error_message=_error_message,
             )
+
+            # ── Evolution pipeline (fire-and-forget) ────────────────────
+            if self._evolution_pipeline and _evo_trace_id:
+                try:
+                    # Build SubGoalResult list from GoalTracker sub_goals + graph
+                    from app.avatar.evolution.outcome_classifier import SubGoalResult
+                    _evo_sub_goals = []
+                    for sg in sub_goals:
+                        _covered = any(
+                            self._goal_tracker._node_covers(n, sg)
+                            for n in graph.nodes.values()
+                            if n.status == _ns.SUCCESS
+                        )
+                        _evo_sub_goals.append(SubGoalResult(
+                            name=sg,
+                            satisfied=_covered,
+                        ))
+
+                    _evo_decision = (
+                        f"final_status={_result_status}, "
+                        f"nodes={len(graph.nodes)}, "
+                        f"completed={sum(1 for n in graph.nodes.values() if n.status == _ns.SUCCESS)}, "
+                        f"failed={sum(1 for n in graph.nodes.values() if n.status == _ns.FAILED)}"
+                    )
+
+                    await self._evolution_pipeline.on_task_finished_v2(
+                        task_id=str(graph.id),
+                        session_id=_session_id or _exec_session_id,
+                        goal=intent,
+                        task_type=env_context.get("task_type", "unknown"),
+                        sub_goals=_evo_sub_goals,
+                        decision_basis=_evo_decision,
+                    )
+                except Exception as _evo_err:
+                    logger.debug(f"[GraphController] Evolution pipeline failed (non-blocking): {_evo_err}")
 
     # ── DAG mode ────────────────────────────────────────────────────────
 
@@ -634,49 +918,85 @@ class GraphController:
         max_planning_attempts = 3
         planning_attempt = 0
 
-        while planning_attempt < max_planning_attempts:
-            planning_attempt += 1
-            logger.info(f"Planning complete graph (DAG mode, attempt {planning_attempt}/{max_planning_attempts})")
-            patch = await self.planner.plan_complete_graph(intent, env_context)
+        # ── Evolution trace (if pipeline wired) ─────────────────────────
+        _evo_trace_id: Optional[str] = None
+        _session_id = env_context.get("session_id", "")
+        if self._evolution_pipeline:
+            try:
+                _evo_trace = self._evolution_pipeline._trace_collector.create_trace(
+                    task_id=env_context.get("task_id", "dag-unknown"),
+                    session_id=_session_id,
+                    goal=intent,
+                    task_type=env_context.get("task_type", "dag"),
+                )
+                _evo_trace_id = _evo_trace.trace_id
+            except Exception as _evo_err:
+                logger.debug(f"[GraphController] DAG evolution trace creation failed: {_evo_err}")
 
-            repair_result = DagRepairHelper.auto_repair_dag(patch)
-            if repair_result['repaired']:
-                logger.info(f"Auto-repaired DAG: {repair_result['repairs']}")
-                patch = repair_result['patch']
+        _final_result: Optional['ExecutionResult'] = None
+        try:
+            while planning_attempt < max_planning_attempts:
+                planning_attempt += 1
+                logger.info(f"Planning complete graph (DAG mode, attempt {planning_attempt}/{max_planning_attempts})")
+                patch = await self.planner.plan_complete_graph(intent, env_context)
 
-            if self.guard:
-                _empty_graph = ExecutionGraph(goal=intent, nodes={}, edges={})
-                validation = await self.guard.validate(patch, _empty_graph, context=env_context)
-                if not validation.approved:
-                    logger.error(f"Patch validation failed: {validation.violations}")
-                    if planning_attempt < max_planning_attempts:
-                        logger.warning(f"Requesting new plan (attempt {planning_attempt + 1})")
-                        continue
-                    from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-                    graph = ExecutionGraph(goal=intent, nodes={}, edges={})
-                    graph.status = GraphStatus.FAILED
-                    return self._make_error_result(
-                        graph,
-                        error_message=f"Validation failed after {max_planning_attempts} attempts: {validation.violations}"
-                    )
+                repair_result = DagRepairHelper.auto_repair_dag(patch)
+                if repair_result['repaired']:
+                    logger.info(f"Auto-repaired DAG: {repair_result['repairs']}")
+                    patch = repair_result['patch']
 
+                if self.guard:
+                    _empty_graph = ExecutionGraph(goal=intent, nodes={}, edges={})
+                    validation = await self.guard.validate(patch, _empty_graph, context=env_context)
+                    if not validation.approved:
+                        logger.error(f"Patch validation failed: {validation.violations}")
+                        if planning_attempt < max_planning_attempts:
+                            logger.warning(f"Requesting new plan (attempt {planning_attempt + 1})")
+                            continue
+                        from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                        graph = ExecutionGraph(goal=intent, nodes={}, edges={})
+                        graph.status = GraphStatus.FAILED
+                        _final_result = self._make_error_result(
+                            graph,
+                            error_message=f"Validation failed after {max_planning_attempts} attempts: {validation.violations}"
+                        )
+                        return _final_result
+
+                graph = ExecutionGraph(goal=intent, nodes={}, edges={})
+                self._apply_patch(patch, graph)
+                _final_result = await self.runtime.execute_graph(graph)
+                return _final_result
+
+            logger.error(f"Failed to plan valid DAG after {max_planning_attempts} attempts")
+            from app.avatar.runtime.graph.models.execution_graph import GraphStatus
             graph = ExecutionGraph(goal=intent, nodes={}, edges={})
-            self._apply_patch(patch, graph)
-            return await self.runtime.execute_graph(graph)
-
-        logger.error(f"Failed to plan valid DAG after {max_planning_attempts} attempts")
-        from app.avatar.runtime.graph.models.execution_graph import GraphStatus
-        graph = ExecutionGraph(goal=intent, nodes={}, edges={})
-        graph.status = GraphStatus.FAILED
-        return self._make_error_result(
-            graph, error_message=f"Failed to plan valid DAG after {max_planning_attempts} attempts"
-        )
+            graph.status = GraphStatus.FAILED
+            _final_result = self._make_error_result(
+                graph, error_message=f"Failed to plan valid DAG after {max_planning_attempts} attempts"
+            )
+            return _final_result
+        finally:
+            # ── Evolution pipeline (fire-and-forget) ────────────────────
+            if self._evolution_pipeline and _evo_trace_id and _final_result:
+                try:
+                    from app.avatar.evolution.outcome_classifier import SubGoalResult
+                    _evo_decision = f"dag_mode, final_status={_final_result.final_status}"
+                    await self._evolution_pipeline.on_task_finished_v2(
+                        task_id=env_context.get("task_id", "dag-unknown"),
+                        session_id=_session_id,
+                        goal=intent,
+                        task_type=env_context.get("task_type", "dag"),
+                        sub_goals=[SubGoalResult(name=intent, satisfied=_final_result.success)],
+                        decision_basis=_evo_decision,
+                    )
+                except Exception as _evo_err:
+                    logger.debug(f"[GraphController] DAG evolution pipeline failed (non-blocking): {_evo_err}")
 
     # ── Patch application ───────────────────────────────────────────────
 
     _STEP_REF_PATTERN = re.compile(r'step_(\d+)_output')
 
-    def _apply_patch(self, patch: 'GraphPatch', graph: 'ExecutionGraph') -> None:
+    def _apply_patch(self, patch: 'GraphPatch', graph: 'ExecutionGraph', lt_ctx: Optional['_LongTaskContext'] = None) -> None:
         from app.avatar.runtime.graph.models.graph_patch import PatchOperation
         for action in patch.actions:
             if action.operation == PatchOperation.ADD_NODE and action.node:
@@ -696,23 +1016,87 @@ class GraphController:
                     logger.debug(f"Removed edge: {action.edge_id}")
             elif action.operation == PatchOperation.FINISH:
                 logger.debug("FINISH operation in patch")
+
+            # Long-task: record each action as a PatchLogEntry
+            if lt_ctx is not None and action.operation != PatchOperation.FINISH:
+                lt_ctx.graph_version += 1
+                self._lt_record_patch(lt_ctx, action, graph)
+
         logger.info(
             f"Applied patch: {len(patch.actions)} actions, "
             f"graph now has {len(graph.nodes)} nodes, {len(graph.edges)} edges"
         )
 
+    # Ordered priority list for resolving the "primary output" field of a skill.
+    # Must stay in sync with _inject_node_outputs_into_code in GraphExecutor.
+    _PRIMARY_OUTPUT_FIELDS = ("output", "result", "content", "stdout")
+
+    @staticmethod
+    def _infer_primary_output_field(source_node: 'StepNode') -> str:
+        """
+        Infer the best source_field for an AutoEdge by inspecting the source
+        node's skill output_model via the registry.
+
+        Resolution order (first match wins):
+        1. Walk _PRIMARY_OUTPUT_FIELDS against the skill's output_model fields.
+        2. If the source node already has outputs (completed), walk the same
+           priority list against actual output keys.
+        3. Fallback to "output" (the most common convention).
+        """
+        # --- Phase 1: static schema inspection ---
+        try:
+            from app.avatar.skills.registry import skill_registry
+            skill_cls = skill_registry.get(source_node.capability_name)
+            if skill_cls is not None:
+                model_fields = set(skill_cls.spec.output_model.model_fields.keys())
+                for candidate in GraphController._PRIMARY_OUTPUT_FIELDS:
+                    if candidate in model_fields:
+                        return candidate
+        except Exception:
+            pass  # registry not ready or import issue — fall through
+
+        # --- Phase 2: runtime outputs (node already completed) ---
+        if source_node.outputs:
+            for candidate in GraphController._PRIMARY_OUTPUT_FIELDS:
+                if candidate in source_node.outputs:
+                    return candidate
+
+        # --- Phase 3: convention fallback ---
+        return "output"
+
     def _inject_implicit_edges(self, node: 'StepNode', graph: 'ExecutionGraph') -> None:
-        """Scan node params for step_N_output references and add data edges."""
+        """Scan node params for step_N_output references and add data edges.
+
+        Parameters listed in the target skill's ``SkillSpec.code_params`` are
+        skipped because they contain executable code where ``step_N_output``
+        tokens are variable names injected at runtime (by
+        ``_inject_node_outputs_into_code``), not template placeholders for
+        DataEdge substitution.
+        """
         if not node.params:
             return
         try:
             from app.avatar.runtime.graph.models.data_edge import DataEdge
+
+            # Determine which params are code-bearing via skill metadata
+            skip_params: set = set()
+            try:
+                from app.avatar.skills.registry import skill_registry
+                skill_cls = skill_registry.get(node.capability_name)
+                if skill_cls is not None:
+                    skip_params = skill_cls.spec.code_params
+            except Exception:
+                pass
+
             for param_name, param_value in node.params.items():
+                if param_name in skip_params:
+                    continue
                 if not isinstance(param_value, str):
                     continue
                 for match in self._STEP_REF_PATTERN.finditer(param_value):
                     source_node_id = f"step_{match.group(1)}"
-                    if source_node_id not in graph.nodes:
+                    source_node = graph.nodes.get(source_node_id)
+                    if source_node is None:
                         continue
                     existing = any(
                         e.source_node == source_node_id and
@@ -722,14 +1106,15 @@ class GraphController:
                     )
                     if existing:
                         continue
+                    source_field = self._infer_primary_output_field(source_node)
                     edge = DataEdge(
                         source_node=source_node_id,
-                        source_field="output",
+                        source_field=source_field,
                         target_node=node.id,
                         target_param=param_name,
                     )
                     graph.add_edge(edge)
-                    logger.info(f"[AutoEdge] {source_node_id} → {node.id}.{param_name}")
+                    logger.info(f"[AutoEdge] {source_node_id} → {node.id}.{param_name} (field={source_field})")
         except Exception as e:
             logger.debug(f"[AutoEdge] Failed for {node.id}: {e}")
 
@@ -766,6 +1151,67 @@ class GraphController:
             self.runtime.event_bus.publish(event)
         except Exception as e:
             logger.warning(f"[GraphController] Failed to emit plan.generated: {e}")
+
+    # ── Narrative helper functions ──────────────────────────────────────
+
+    @staticmethod
+    def _summarize_params(params: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Summarize node params into a short string for narrative context.
+
+        Extracts the most meaningful parameter (file paths, queries, etc.)
+        and returns a concise summary.  Returns None when params are empty.
+        """
+        if not params:
+            return None
+        # Priority: look for common meaningful keys
+        for key in ("file", "path", "filename", "file_path", "url", "query", "code_path", "target"):
+            val = params.get(key)
+            if val and isinstance(val, str):
+                # Extract basename for paths
+                if "/" in val or "\\" in val:
+                    return val.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                return val[:60]
+        # Fallback: first string value
+        for val in params.values():
+            if isinstance(val, str) and val.strip():
+                return val[:60]
+        return None
+
+    @staticmethod
+    def _summarize_output(node: Any) -> Optional[str]:
+        """Summarize node outputs into a short string for narrative context."""
+        if not node.outputs:
+            return None
+        # Look for common output keys
+        for key in ("result", "summary", "output", "content", "message"):
+            val = node.outputs.get(key)
+            if val and isinstance(val, str):
+                return val[:80]
+        # Fallback: first string value
+        for val in node.outputs.values():
+            if isinstance(val, str) and val.strip():
+                return val[:80]
+        return None
+
+    @staticmethod
+    def _get_semantic_label(node: Any) -> Optional[str]:
+        """Extract semantic_label from node metadata/output_contract."""
+        if not node.metadata:
+            return None
+        # Check output_contract for semantic_label
+        oc = node.metadata.get("output_contract")
+        if oc is not None:
+            if isinstance(oc, dict):
+                label = oc.get("semantic_label")
+            else:
+                label = getattr(oc, "semantic_label", None)
+            if label:
+                return str(label)
+        # Check description in metadata
+        desc = node.metadata.get("description")
+        if desc and isinstance(desc, str):
+            return desc
+        return None
 
     # ── Verification gate ───────────────────────────────────────────────
 
@@ -899,3 +1345,178 @@ class GraphController:
     def get_planner_usage(self) -> Dict[str, Any]:
         """Get current planner usage statistics."""
         return self._budget.get_usage()
+
+    # ── Long-task runtime helpers ───────────────────────────────────────
+
+    async def _lt_persist_step_results(
+        self, graph: 'ExecutionGraph', lt_ctx: '_LongTaskContext'
+    ) -> None:
+        """
+        持久化步骤执行结果到 StepStateStore + ArtifactStore。
+
+        有产物分支：注册产物 → 建立依赖 → stale 传播 → 更新步骤状态
+        无产物分支：仅更新步骤状态和 side_effect_summary
+        """
+        try:
+            from app.services.step_state_store import StepStateStore
+            from app.services.artifact_store import ArtifactStore
+            from app.avatar.runtime.graph.models.step_node import NodeStatus
+            from app.db.long_task_models import StepState
+            import json
+            import hashlib
+
+            for node in graph.nodes.values():
+                if node.status not in (NodeStatus.SUCCESS, NodeStatus.FAILED):
+                    continue
+
+                # Check if already persisted (avoid double-write)
+                existing = StepStateStore.get(str(node.id))
+                if existing and existing.status == node.status.value:
+                    continue
+
+                # Build StepState record
+                step_state = StepState(
+                    id=str(node.id),
+                    task_session_id=lt_ctx.task_session_id,
+                    graph_version=lt_ctx.graph_version,
+                    status=node.status.value,
+                    capability_name=node.capability_name,
+                    input_snapshot_json=json.dumps(node.params, ensure_ascii=False) if node.params else None,
+                    output_json=json.dumps(node.result, ensure_ascii=False) if hasattr(node, 'result') and node.result else None,
+                )
+                StepStateStore.upsert(step_state)
+
+                # Artifact registration (有产物分支)
+                if node.status == NodeStatus.SUCCESS:
+                    output_contract = node.metadata.get("output_contract") if node.metadata else None
+                    if output_contract:
+                        artifacts = output_contract if isinstance(output_contract, list) else [output_contract]
+                        for art in artifacts:
+                            if isinstance(art, dict) and art.get("path"):
+                                content = json.dumps(art, ensure_ascii=False)
+                                content_hash = hashlib.sha256(content.encode()).hexdigest()
+                                ArtifactStore.register_artifact(
+                                    task_session_id=lt_ctx.task_session_id,
+                                    artifact_path=art["path"],
+                                    artifact_kind=art.get("kind", "file"),
+                                    producer_step_id=str(node.id),
+                                    content_hash=content_hash,
+                                    size=len(content),
+                                    mtime=0.0,
+                                )
+                    # else: 无产物分支 — 仅步骤状态已更新
+
+        except Exception as e:
+            logger.warning(f"[GraphController] Long-task step persist failed: {e}")
+
+    async def _lt_create_routine_checkpoint(self, lt_ctx: '_LongTaskContext') -> None:
+        """创建 routine 级别 checkpoint。"""
+        try:
+            from app.services.checkpoint_store import CheckpointStore
+            from app.services.step_state_store import StepStateStore
+            from app.services.plan_graph_store import PlanGraphStore
+            from app.avatar.runtime.graph.managers.checkpoint_manager import CheckpointManager
+
+            cp_mgr = CheckpointManager(
+                CheckpointStore, StepStateStore, PlanGraphStore,
+                event_stream=lt_ctx.event_stream,
+            )
+            await cp_mgr.create_checkpoint(
+                task_session_id=lt_ctx.task_session_id,
+                importance="routine",
+                reason=f"periodic:step_count",
+            )
+        except Exception as e:
+            logger.warning(f"[GraphController] Routine checkpoint failed (non-fatal): {e}")
+
+    def _lt_record_patch(
+        self, lt_ctx: '_LongTaskContext', action, graph: 'ExecutionGraph'
+    ) -> None:
+        """记录 PatchLogEntry 并在达到阈值时保存 snapshot。"""
+        try:
+            from app.services.plan_graph_store import PlanGraphStore
+            import json
+
+            operation = action.operation.value if hasattr(action.operation, 'value') else str(action.operation)
+            params = {}
+            if action.node:
+                params["node_id"] = str(action.node.id)
+                params["capability"] = action.node.capability_name
+            elif action.node_id:
+                params["node_id"] = action.node_id
+            elif action.edge:
+                params["source"] = action.edge.source_node
+                params["target"] = action.edge.target_node
+
+            PlanGraphStore.append_patch(
+                task_session_id=lt_ctx.task_session_id,
+                graph_version=lt_ctx.graph_version,
+                operation=operation,
+                operation_params_json=json.dumps(params, ensure_ascii=False),
+                change_reason="initial_plan",
+                change_source="planner",
+            )
+
+            # Periodic snapshot + initial plan snapshot
+            lt_ctx.patch_count_since_snapshot += 1
+            if lt_ctx.graph_version == 1:
+                # First patch — save initial plan snapshot
+                self._lt_save_snapshot(lt_ctx, graph, "initial_plan")
+                lt_ctx.patch_count_since_snapshot = 0
+            elif lt_ctx.patch_count_since_snapshot >= lt_ctx.snapshot_interval:
+                self._lt_save_snapshot(lt_ctx, graph, "periodic")
+                lt_ctx.patch_count_since_snapshot = 0
+
+        except Exception as e:
+            logger.warning(f"[GraphController] Patch log recording failed: {e}")
+
+    def _lt_save_snapshot(
+        self, lt_ctx: '_LongTaskContext', graph: 'ExecutionGraph', reason: str
+    ) -> None:
+        """保存 PlanGraphSnapshot。"""
+        try:
+            from app.services.plan_graph_store import PlanGraphStore
+            import json
+
+            graph_data = {
+                "goal": graph.goal,
+                "nodes": {
+                    nid: {
+                        "id": str(n.id),
+                        "capability_name": n.capability_name,
+                        "status": n.status.value if hasattr(n.status, 'value') else str(n.status),
+                        "params": n.params,
+                    }
+                    for nid, n in graph.nodes.items()
+                },
+                "edges": {
+                    eid: {
+                        "source": e.source_node,
+                        "target": e.target_node,
+                    }
+                    for eid, e in graph.edges.items()
+                },
+            }
+            PlanGraphStore.save_snapshot(
+                task_session_id=lt_ctx.task_session_id,
+                graph_version=lt_ctx.graph_version,
+                graph_json=json.dumps(graph_data, ensure_ascii=False),
+                snapshot_reason=reason,
+                change_source="system",
+            )
+        except Exception as e:
+            logger.warning(f"[GraphController] Snapshot save failed: {e}")
+
+    async def _lt_run_delivery_gate(self, lt_ctx: '_LongTaskContext') -> Optional[dict]:
+        """运行 DeliveryGate 检查。"""
+        try:
+            from app.avatar.runtime.graph.managers.delivery_gate import DeliveryGate
+            from app.avatar.runtime.graph.artifact_dep_graph import ArtifactDependencyGraph
+            from app.services.step_state_store import StepStateStore
+
+            dep_graph = ArtifactDependencyGraph(event_stream=lt_ctx.event_stream)
+            gate = DeliveryGate(dep_graph, StepStateStore, event_stream=lt_ctx.event_stream)
+            return await gate.evaluate(lt_ctx.task_session_id)
+        except Exception as e:
+            logger.warning(f"[GraphController] DeliveryGate check failed: {e}")
+            return None

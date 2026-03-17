@@ -44,6 +44,7 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
         side_effects={SideEffect.EXEC},
         risk_level=SkillRiskLevel.EXECUTE,
         aliases=["run_python", "execute_python", "python"],
+        code_params={"code"},
     )
 
     async def run(self, ctx: SkillContext, params: PythonRunInput) -> PythonRunOutput:

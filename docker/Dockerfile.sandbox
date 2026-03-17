@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm2 libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
     libatspi2.0-0 libwayland-client0 libxshmfence1 \
-    fonts-noto-cjk fonts-liberation \
+    fontconfig fonts-dejavu-core fonts-noto-cjk fonts-liberation \
     ca-certificates wget xdg-utils \
     tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
     unrar-free file \
@@ -42,6 +42,13 @@ RUN pip install --no-cache-dir \
     python-dateutil rapidfuzz unidecode \
     sqlalchemy duckdb \
     pyxlsb jsonschema tenacity defusedxml cairosvg aiofiles
+
+# ── Font Cache ───────────────────────────────────────────────────────
+# Pre-warm fontconfig + matplotlib font cache at build time.
+# This prevents matplotlib from calling subprocess.check_output(['fc-list'])
+# at runtime, which would hit the subprocess mock in the sandbox.
+RUN fc-cache -f \
+    && python -c "import matplotlib.font_manager; matplotlib.font_manager._load_fontmanager(try_read_cache=False)"
 
 # Install Chromium (chromium only, saves space)
 RUN playwright install chromium
