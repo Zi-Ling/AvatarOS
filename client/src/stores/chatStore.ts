@@ -51,9 +51,16 @@ export const useChatStore = create<ChatState>()(
       })),
       
       updateMessage: (id, updates) => set((state) => ({
-        messages: state.messages.map((msg) => 
-          msg.id === id ? { ...msg, ...updates } : msg
-        )
+        messages: state.messages.map((msg) => {
+          if (msg.id !== id) return msg;
+          // GUARD: never overwrite a run_block message's kind/subtype —
+          // the execution block must remain visible even after completion.
+          if (msg.kind === "run" && msg.subtype === "block") {
+            const { kind: _k, subtype: _s, messageType: _mt, ...safeUpdates } = updates as any;
+            return { ...msg, ...safeUpdates };
+          }
+          return { ...msg, ...updates };
+        })
       })),
 
       setAttachments: (attachments) => set({ attachments }),
@@ -95,6 +102,11 @@ export const useChatStore = create<ChatState>()(
       onRehydrateStorage: () => (state) => {
         if (!state) return;
         state.messages = state.messages.map((m) => {
+          // Fix: messages that were incorrectly overwritten from run_block to summary
+          // These have a runId (proving they were execution blocks) but kind got changed to "summary"
+          if (m.runId && (m.kind === "summary" || m.messageType === "run_summary") && !m.id.startsWith("summary-")) {
+            return { ...m, kind: "run" as const, subtype: "block" as const, messageType: "run_block" as const };
+          }
           // Already migrated
           if (m.kind) return m;
           // Map legacy messageType → kind/subtype

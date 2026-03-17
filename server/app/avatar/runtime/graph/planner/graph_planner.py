@@ -202,16 +202,44 @@ class GraphPlanner:
                     or outputs.get("content")
                     or outputs
                 )
+                # Include output type metadata so planner knows the actual data shape
+                # when generating downstream code (prevents type mismatch errors)
+                _output_type = type(output_val).__name__
+                _output_contract = (node.metadata or {}).get("output_contract")
+                _type_hint = ""
+                if _output_contract:
+                    _vk = getattr(_output_contract, "value_kind", None)
+                    if _vk:
+                        _type_hint = f" [output_type={_vk.value if hasattr(_vk, 'value') else _vk}, python_type={_output_type}]"
+                    else:
+                        _type_hint = f" [python_type={_output_type}]"
+                else:
+                    _type_hint = f" [python_type={_output_type}]"
                 step.result = StepResult(
                     success=True,
                     output=output_val,
                 )
+                # Append type hint to description so planner sees it
+                if step.description:
+                    step.description = step.description + _type_hint
+                else:
+                    step.description = f"output{_type_hint}"
             elif node.status == NodeStatus.FAILED:
                 from app.avatar.planner.models import StepStatus, StepResult
                 step.status = StepStatus.FAILED
+                _err_msg = node.error_message or "Unknown error"
+                # Classify the error to help planner make better replan decisions
+                _err_classification = ""
+                _err_lower = _err_msg.lower()
+                if any(kw in _err_lower for kw in ("attributeerror", "typeerror", "keyerror")):
+                    _err_classification = " [error_type=type_mismatch: upstream output type does not match downstream code expectations. Check the actual python_type of upstream step outputs and adjust data access accordingly.]"
+                elif any(kw in _err_lower for kw in ("modulenotfounderror", "importerror")):
+                    _err_classification = " [error_type=missing_dependency]"
+                elif any(kw in _err_lower for kw in ("filenotfounderror", "no such file")):
+                    _err_classification = " [error_type=file_not_found]"
                 step.result = StepResult(
                     success=False,
-                    error=node.error_message or "Unknown error",
+                    error=_err_msg + _err_classification,
                 )
             elif node.status == NodeStatus.RUNNING:
                 from app.avatar.planner.models import StepStatus

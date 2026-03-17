@@ -98,7 +98,10 @@ class ComplexityAnalyzer:
             )
         
         # 3. 句子分段检测（按标点分割）
-        segments = re.split(r'[。；;，,]', text)
+        # Only split on strong separators (。；;) — commas (，,) are often used
+        # within a single coherent sentence in Chinese and should NOT trigger
+        # multi-step classification by themselves.
+        segments = re.split(r'[。；;]', text)
         segments = [s.strip() for s in segments if s.strip() and len(s.strip()) > 3]
         segment_count = len(segments)
         

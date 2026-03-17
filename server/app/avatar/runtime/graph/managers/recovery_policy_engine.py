@@ -23,11 +23,27 @@ logger = logging.getLogger(__name__)
 
 # 不可重试的错误关键词
 _NON_RETRYABLE_ERRORS = {
+    # Auth / permission errors
     "permission denied",
     "access denied",
     "authentication failed",
     "authorization failed",
     "quota exceeded",
+    # Deterministic Python runtime errors — retrying won't fix logic bugs
+    "attributeerror",
+    "typeerror",
+    "keyerror",
+    "valueerror",
+    "nameerror",
+    "indexerror",
+    "zerodivisionerror",
+    "unboundlocalerror",
+    "jsondecodeeerror",
+    "syntaxerror",
+    "indentationerror",
+    "modulenotfounderror",
+    "importerror",
+    "filenotfounderror",
 }
 
 

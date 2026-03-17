@@ -206,6 +206,19 @@ class GraphExecutor:
                             "IndentationError",
                             "No such file or directory",
                             "FileNotFoundError",
+                            # Deterministic runtime errors — retrying won't help
+                            "AttributeError",
+                            "TypeError",
+                            "KeyError",
+                            "ValueError",
+                            "NameError",
+                            "IndexError",
+                            "ZeroDivisionError",
+                            "UnboundLocalError",
+                            "JSONDecodeError",
+                            "UnicodeDecodeError",
+                            "PermissionError",
+                            "StopIteration",
                         )
                         retryable = not any(pat in stderr for pat in _ENV_ERROR_PATTERNS)
                 raise ExecutionError(msg, retryable=retryable)
@@ -832,6 +845,18 @@ class GraphExecutor:
                 or outputs.get("stdout")
                 or outputs
             )
+
+            # ── Normalize output to standard envelope ──
+            # If the extracted value is a plain string (e.g. from llm.fallback),
+            # wrap it in a dict so downstream code can always use dict access.
+            # This prevents AttributeError when code does .get() on a string.
+            _original_type = type(value).__name__
+            if isinstance(value, str):
+                value = {"result": value, "__type__": "text", "__original_type__": "str"}
+            elif isinstance(value, (int, float, bool)):
+                value = {"result": value, "__type__": "scalar", "__original_type__": _original_type}
+            elif isinstance(value, list):
+                value = {"result": value, "__type__": "list", "__original_type__": "list"}
 
             # 文件路径产物：直接映射容器内路径，不 JSON 化内容
             # 优先识别 _save_binary 输出的结构化对象 {"__file__": path}

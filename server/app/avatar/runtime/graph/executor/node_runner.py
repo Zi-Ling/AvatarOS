@@ -69,6 +69,9 @@ class NodeRunner:
         self.workspace = workspace
         self.artifact_collector = artifact_collector
         self.trace_store = trace_store
+        # Recovery policy engine for intelligent retry/escalation decisions
+        from app.avatar.runtime.graph.managers.recovery_policy_engine import RecoveryPolicyEngine
+        self._recovery_engine = RecoveryPolicyEngine()
         logger.info("NodeRunner initialized")
     
     def _persist_step_start(self, node: 'StepNode', run_id: str, step_index: int) -> Optional[str]:
@@ -286,6 +289,29 @@ class NodeRunner:
                 from app.avatar.runtime.graph.executor.graph_executor import ExecutionError
                 if isinstance(e, ExecutionError) and not e.retryable:
                     should_retry = False
+
+                # Consult RecoveryPolicyEngine for intelligent retry decisions
+                if should_retry:
+                    try:
+                        from types import SimpleNamespace
+                        _step_state = SimpleNamespace(
+                            id=node.id,
+                            status="failed",
+                            retry_count=node.retry_count,
+                            error_message=error_message,
+                            input_snapshot_json=None,
+                        )
+                        _decision = self._recovery_engine.decide_step_recovery(
+                            _step_state, max_retries=node.retry_policy.max_retries
+                        )
+                        if _decision == "escalate_to_replan":
+                            logger.info(
+                                f"[NodeRunner] RecoveryPolicy: escalate_to_replan for {node.id} "
+                                f"(error: {error_message[:120]})"
+                            )
+                            should_retry = False
+                    except Exception as _rpe:
+                        logger.warning(f"[NodeRunner] RecoveryPolicyEngine failed: {_rpe}")
 
                 if should_retry:
                     node.retry_count += 1

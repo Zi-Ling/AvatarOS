@@ -4,9 +4,7 @@ import { useRef, useEffect } from "react";
 import { MessageContent } from "./MessageContent";
 import { MessageActions } from "./MessageActions";
 import { AgentExecutionBlock } from "./AgentExecutionBlock";
-import { ApprovalCard } from "./ApprovalCard";
 import { RunSummaryCard } from "./RunSummaryCard";
-import { TaskPausedCard } from "./TaskPausedCard";
 import { cn } from "@/lib/utils";
 import { XCircle } from "lucide-react";
 import { resolveKind, resolveRunSubtype, type Message } from "@/types/chat";
@@ -21,6 +19,17 @@ interface MessageListProps {
   formatFileSize: (bytes: number) => string;
 }
 
+/** Check if a message should be hidden (consumed by AgentExecutionBlock inline) */
+function isInlinedMessage(message: Message): boolean {
+  const kind = resolveKind(message);
+  const subtype = resolveRunSubtype(message);
+  // Approval messages are now rendered inline inside AgentExecutionBlock
+  if (kind === "approval") return true;
+  // Paused cards are now rendered as part of the block header state
+  if (kind === "run" && subtype === "paused") return true;
+  return false;
+}
+
 /** Renders the inner content of an assistant message bubble */
 function AssistantBubbleContent({ message }: { message: Message }) {
   const kind = resolveKind(message);
@@ -30,15 +39,6 @@ function AssistantBubbleContent({ message }: { message: Message }) {
   if (kind === "run") {
     if (subtype === "block") {
       return <AgentExecutionBlock runId={message.runId!} />;
-    }
-    if (subtype === "paused") {
-      return (
-        <TaskPausedCard
-          runId={message.runId}
-          pausedAtStep={message.pausedAtStep}
-          pausedTotalSteps={message.pausedTotalSteps}
-        />
-      );
     }
     if (subtype === "cancelled") {
       return (
@@ -50,18 +50,6 @@ function AssistantBubbleContent({ message }: { message: Message }) {
     }
     // legacy task_progress without subtype
     if (message.runId) return <AgentExecutionBlock runId={message.runId} />;
-  }
-
-  // ── approval kind ────────────────────────────────────────────────────
-  if (kind === "approval") {
-    return message.approvalRequest ? (
-      <ApprovalCard
-        messageId={message.id}
-        request={message.approvalRequest}
-        status={message.approvalStatus ?? "pending"}
-        comment={message.approvalComment}
-      />
-    ) : null;
   }
 
   // ── summary kind ─────────────────────────────────────────────────────
@@ -92,16 +80,13 @@ function shouldShowActions(message: Message): boolean {
   const kind = resolveKind(message);
   const subtype = resolveRunSubtype(message);
   if (kind === "approval") return false;
-  if (kind === "run" && subtype !== undefined) return false; // paused/cancelled/block — no actions
+  if (kind === "run" && subtype !== undefined) return false;
   return true;
 }
 
 function bubbleStyle(message: Message): string {
   const kind = resolveKind(message);
   const subtype = resolveRunSubtype(message);
-  if (kind === "approval" || (kind === "run" && subtype === "paused")) {
-    return "border-amber-200 dark:border-amber-800/40 bg-amber-50/30 dark:bg-amber-950/10";
-  }
   if (kind === "run" && subtype === "block") {
     return "border-indigo-100 dark:border-indigo-900/40 bg-slate-50 dark:bg-slate-900/60";
   }
@@ -141,24 +126,25 @@ export function MessageList({
       prevLengthRef.current = messages.length;
       return;
     }
-    // New message added — auto-scroll and reset user-scrolled flag
     if (messages.length > prevLengthRef.current) {
       userScrolledUpRef.current = false;
       el.scrollTop = el.scrollHeight;
     }
-    // Streaming content update — keep scrolled to bottom unless user scrolled up
     if (!userScrolledUpRef.current) {
       el.scrollTop = el.scrollHeight;
     }
     prevLengthRef.current = messages.length;
   }, [messages, streamingContentLen, isTyping]);
 
+  // Filter out messages that are now rendered inline inside execution blocks
+  const visibleMessages = messages.filter((m) => !isInlinedMessage(m));
+
   return (
     <div
       ref={containerRef}
       className="flex-1 overflow-y-auto p-6 space-y-3 scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-white/10"
     >
-      {messages.map((message) => (
+      {visibleMessages.map((message) => (
         <div key={message.id} className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}>
 
           {/* ── Assistant message ── */}

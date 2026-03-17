@@ -98,6 +98,44 @@ export function TaskEventListener() {
       // ── 1. Plan generated ──────────────────────────────────────────────
       if (type === "plan.generated" && payload?.plan) {
         const plan = payload.plan;
+        const taskId = plan.id || currentTaskMessageId || "unknown_task";
+
+        // Check if a Run with this ID already exists in RunStore
+        const existingRun = useRunStore.getState().runs[taskId];
+        if (existingRun) {
+          // Run already exists — this is either a ReAct incremental plan or a
+          // duplicate from _emit_plan_and_steps. Merge any NEW steps into the
+          // existing Run without overwriting already-tracked step statuses.
+          const existingStepIds = new Set(existingRun.steps.map((s) => s.id));
+          const newSteps = (plan.steps ?? []).filter((s: any) => !existingStepIds.has(s.id));
+          if (newSteps.length > 0) {
+            const mappedNew: RunStep[] = newSteps.map((s: any) => ({
+              id: s.id, skill_name: s.skill || s.skill_name,
+              step_name: (s.skill || s.skill_name)?.split(".").pop() || "step",
+              description: s.description, status: mapStatus(s.status) as RunStep["status"],
+              order: existingRun.steps.length + (s.order || 0), params: s.params,
+            }));
+            const mergedSteps = [...existingRun.steps, ...mappedNew];
+            setSteps(taskId, mergedSteps);
+
+            // Also update TaskStore
+            const { activeTask } = useTaskStore.getState();
+            if (activeTask && activeTask.id === taskId) {
+              const newTaskSteps: TaskStep[] = newSteps.map((s: any) => ({
+                id: s.id, skill_name: s.skill || s.skill_name,
+                step_name: (s.skill || s.skill_name)?.split(".").pop() || "step",
+                description: s.description, status: mapStatus(s.status),
+                order: activeTask.steps.length + (s.order || 0), params: s.params,
+              }));
+              setActiveTask({
+                ...activeTask,
+                steps: [...activeTask.steps, ...newTaskSteps],
+              });
+            }
+          }
+          return;
+        }
+
         setIsTyping(false);
 
         const mappedSteps: TaskStep[] = (plan.steps ?? []).map((s: any) => ({
@@ -111,7 +149,6 @@ export function TaskEventListener() {
           depends_on: s.depends_on,
         }));
 
-        const taskId = plan.id || currentTaskMessageId || "unknown_task";
         const msgId = currentTaskMessageId ?? taskId;
 
         setActiveTask({
@@ -148,13 +185,20 @@ export function TaskEventListener() {
 
       // ── 1.5 Composite task decomposed ─────────────────────────────────
       if (type === "task.decomposed" && payload?.steps) {
+        const taskId = currentTaskMessageId || "unknown_task";
+
+        // GUARD: skip duplicate decomposition if Run already exists
+        const existingRun = useRunStore.getState().runs[taskId];
+        if (existingRun) {
+          return;
+        }
+
         setIsTyping(false);
         const mappedSteps: TaskStep[] = payload.steps.map((s: any, i: number) => ({
           id: s.id, skill_name: undefined as any,
           step_name: s.goal?.split(/[，,]/)[0]?.slice(0, 20) || `subtask-${i}`,
           description: s.goal, status: "pending" as const, order: i,
         }));
-        const taskId = currentTaskMessageId || "unknown_task";
         const msgId = currentTaskMessageId ?? taskId;
 
         setActiveTask({
@@ -236,10 +280,14 @@ export function TaskEventListener() {
       // ── 4. Step failed ─────────────────────────────────────────────────
       if ((type === "step.failed" || type === "subtask.failed") && (event.step_id || payload.subtask_id)) {
         const stepId = payload.subtask_id || event.step_id;
+        const errorMsg = payload.error_message || payload.error || payload.message || undefined;
         updateTaskStep(stepId, { status: "failed" });
         const { activeRunId } = useRunStore.getState();
         if (activeRunId) {
-          updateRunStep(activeRunId, stepId, { status: "failed", completedAt: new Date().toISOString() });
+          updateRunStep(activeRunId, stepId, {
+            status: "failed", completedAt: new Date().toISOString(),
+            ...(errorMsg ? { output_detail: typeof errorMsg === "string" ? errorMsg : JSON.stringify(errorMsg), details: typeof errorMsg === "string" ? errorMsg : JSON.stringify(errorMsg) } : {}),
+          });
           useRunStore.getState().setStepExpanded(activeRunId, stepId, true);
         }
       }
@@ -273,7 +321,16 @@ export function TaskEventListener() {
         useChatStore.getState().setCanCancel(false);
         const { activeRunId } = useRunStore.getState();
         if (activeRunId) {
-          updateRunStatus(activeRunId, failed ? "failed" : "completed");
+          // Update status AND set completedAt so InlineSummary can compute duration
+          const run = useRunStore.getState().runs[activeRunId];
+          if (run) {
+            useRunStore.setState((state) => ({
+              runs: {
+                ...state.runs,
+                [activeRunId]: { ...run, status: failed ? "failed" : "completed", completedAt: new Date().toISOString() },
+              },
+            }));
+          }
           setActiveRunId(null);
         }
         if (currentTaskMessageId) {
@@ -283,52 +340,73 @@ export function TaskEventListener() {
       }
 
       // ── 7. Task summary ────────────────────────────────────────────────
+      // The run_block message must NOT be overwritten — AgentExecutionBlock
+      // already renders an InlineSummary for terminal states using RunStore data.
+      // We only need to: (a) stop streaming on the block, (b) if the backend
+      // sent a finalAnswer / content, append it as a NEW summary message so
+      // the LLM's textual wrap-up appears below the execution block.
       if (type === "task.summary" && payload?.content) {
-        let targetId = currentTaskMessageId;
-        if (!targetId) {
+        let blockMsgId = currentTaskMessageId;
+        if (!blockMsgId) {
           const streamingMsg = messages.findLast((m) => m.role === "assistant" && m.isStreaming);
-          if (streamingMsg) targetId = streamingMsg.id;
-          else { const lastMsg = messages.findLast((m) => m.role === "assistant"); if (lastMsg) targetId = lastMsg.id; }
+          if (streamingMsg) blockMsgId = streamingMsg.id;
+          else { const lastMsg = messages.findLast((m) => m.role === "assistant"); if (lastMsg) blockMsgId = lastMsg.id; }
         }
-        if (targetId) {
-          let runSummary: RunSummaryData | undefined;
-          const backendSummary = payload.run_summary;
-          if (backendSummary) {
-            const { activeTask } = useTaskStore.getState();
-            const hadApproval = messages.some((m) => m.kind === "approval" || m.messageType === "approval");
+
+        // (a) Stop streaming on the run_block — do NOT change kind/subtype
+        if (blockMsgId) {
+          updateMessage(blockMsgId, { isStreaming: false });
+        }
+
+        // (b) Build runSummary data for the separate summary message
+        let runSummary: RunSummaryData | undefined;
+        const backendSummary = payload.run_summary;
+        if (backendSummary) {
+          const { activeTask } = useTaskStore.getState();
+          const hadApproval = messages.some((m) => m.kind === "approval" || m.messageType === "approval");
+          runSummary = {
+            taskId: activeTask?.id ?? blockMsgId ?? "unknown", goal: activeTask?.goal ?? "",
+            totalSteps: backendSummary.total_steps, completedSteps: backendSummary.completed_steps,
+            failedSteps: backendSummary.failed_steps, durationMs: backendSummary.duration_ms,
+            hadApproval, success: backendSummary.success ?? (backendSummary.failed_steps === 0),
+            terminalStatus: backendSummary.terminal_status,
+            finalAnswer: backendSummary.final_answer || undefined,
+            keyOutputs: (backendSummary.key_outputs ?? []).map((o: any) => ({
+              stepName: o.step_name, skillName: o.skill_name, summary: o.summary,
+              artifacts: o.artifacts ?? [],
+            })),
+          };
+        } else {
+          const { activeTask } = useTaskStore.getState();
+          if (activeTask) {
+            const completedSteps = activeTask.steps.filter((s) => s.status === "completed");
+            const failedSteps = activeTask.steps.filter((s) => s.status === "failed");
+            const startMs = activeTask.startTime ? new Date(activeTask.startTime).getTime() : Date.now();
             runSummary = {
-              taskId: activeTask?.id ?? targetId, goal: activeTask?.goal ?? "",
-              totalSteps: backendSummary.total_steps, completedSteps: backendSummary.completed_steps,
-              failedSteps: backendSummary.failed_steps, durationMs: backendSummary.duration_ms,
-              hadApproval, success: backendSummary.success ?? (backendSummary.failed_steps === 0),
-              terminalStatus: backendSummary.terminal_status,
-              finalAnswer: backendSummary.final_answer || undefined,
-              keyOutputs: (backendSummary.key_outputs ?? []).map((o: any) => ({
-                stepName: o.step_name, skillName: o.skill_name, summary: o.summary,
-                artifacts: o.artifacts ?? [],
+              taskId: activeTask.id, goal: activeTask.goal,
+              totalSteps: activeTask.steps.length, completedSteps: completedSteps.length,
+              failedSteps: failedSteps.length, durationMs: Date.now() - startMs,
+              hadApproval: messages.some((m) => m.kind === "approval" || m.messageType === "approval"),
+              success: failedSteps.length === 0,
+              keyOutputs: completedSteps.filter((s) => s.output_result).slice(-3).map((s) => ({
+                stepName: s.step_name, skillName: s.skill_name,
+                summary: typeof s.output_result === "string" ? s.output_result.slice(0, 120) : undefined,
               })),
             };
-          } else {
-            const { activeTask } = useTaskStore.getState();
-            if (activeTask) {
-              const completedSteps = activeTask.steps.filter((s) => s.status === "completed");
-              const failedSteps = activeTask.steps.filter((s) => s.status === "failed");
-              const startMs = activeTask.startTime ? new Date(activeTask.startTime).getTime() : Date.now();
-              runSummary = {
-                taskId: activeTask.id, goal: activeTask.goal,
-                totalSteps: activeTask.steps.length, completedSteps: completedSteps.length,
-                failedSteps: failedSteps.length, durationMs: Date.now() - startMs,
-                hadApproval: messages.some((m) => m.kind === "approval" || m.messageType === "approval"),
-                success: failedSteps.length === 0,
-                keyOutputs: completedSteps.filter((s) => s.output_result).slice(-3).map((s) => ({
-                  stepName: s.step_name, skillName: s.skill_name,
-                  summary: typeof s.output_result === "string" ? s.output_result.slice(0, 120) : undefined,
-                })),
-              };
-            }
           }
-          updateMessage(targetId, {
-            content: payload.content, isStreaming: false,
+        }
+
+        // (c) Append a NEW summary message (only if there's actual content to show)
+        const summaryContent = payload.content as string;
+        const hasFinalAnswer = runSummary?.finalAnswer;
+        const hasKeyOutputs = runSummary && runSummary.keyOutputs.length > 0;
+        if (summaryContent || hasFinalAnswer || hasKeyOutputs) {
+          addMessage({
+            id: `summary-${blockMsgId ?? Date.now()}`,
+            role: "assistant",
+            content: summaryContent || "",
+            timestamp: new Date().toISOString(),
+            isStreaming: false,
             kind: "summary",
             messageType: "run_summary",
             ...(runSummary !== undefined ? { runSummary } : {}),
@@ -347,14 +425,22 @@ export function TaskEventListener() {
         setControlStatus("cancelled");
         setCanCancel(false);
         const { activeRunId } = useRunStore.getState();
-        if (activeRunId) { updateRunStatus(activeRunId, "cancelled"); setActiveRunId(null); }
+        if (activeRunId) {
+          const run = useRunStore.getState().runs[activeRunId];
+          if (run) {
+            useRunStore.setState((state) => ({
+              runs: {
+                ...state.runs,
+                [activeRunId]: { ...run, status: "cancelled", completedAt: new Date().toISOString() },
+              },
+            }));
+          }
+          setActiveRunId(null);
+        }
         if (currentTaskMessageId) {
-          updateMessage(currentTaskMessageId, {
-            isStreaming: false,
-            kind: "run", subtype: "cancelled",
-            messageType: "task_cancelled",
-            content: payload?.message || "任务已取消",
-          });
+          // Do NOT overwrite kind/subtype — keep the run_block so AgentExecutionBlock
+          // stays visible with all steps + InlineSummary showing "已取消"
+          updateMessage(currentTaskMessageId, { isStreaming: false });
           setCurrentTaskMessageId(null);
         }
         setIsTyping(false);
@@ -367,21 +453,25 @@ export function TaskEventListener() {
         const { activeRunId } = useRunStore.getState();
         if (newStatus === "paused" && activeRunId) {
           updateRunStatus(activeRunId, "paused");
-          // Push paused card here — server confirmed paused state
-          _pushPausedCard(activeRunId, messages, addMessage);
         }
         if (newStatus === "running" && activeRunId) updateRunStatus(activeRunId, "executing");
         if (newStatus === "cancelled") {
           const { setCanCancel } = useChatStore.getState();
           updateTaskStatus("failed"); setIsCancelling(false); setCanCancel(false);
-          if (activeRunId) { updateRunStatus(activeRunId, "cancelled"); setActiveRunId(null); }
+          if (activeRunId) {
+            const run = useRunStore.getState().runs[activeRunId];
+            if (run) {
+              useRunStore.setState((state) => ({
+                runs: {
+                  ...state.runs,
+                  [activeRunId]: { ...run, status: "cancelled", completedAt: new Date().toISOString() },
+                },
+              }));
+            }
+            setActiveRunId(null);
+          }
           if (currentTaskMessageId) {
-            updateMessage(currentTaskMessageId, {
-              isStreaming: false,
-              kind: "run", subtype: "cancelled",
-              messageType: "task_cancelled",
-              content: "任务已取消",
-            });
+            updateMessage(currentTaskMessageId, { isStreaming: false });
             setCurrentTaskMessageId(null);
           }
           setIsTyping(false);
@@ -396,7 +486,6 @@ export function TaskEventListener() {
         const { activeRunId } = useRunStore.getState();
         if (activeRunId) {
           updateRunStatus(activeRunId, "paused");
-          _pushPausedCard(activeRunId, messages, addMessage);
         }
       }
 
@@ -451,33 +540,3 @@ export function TaskEventListener() {
   return null;
 }
 
-/** Push a task_paused card anchored to a specific runId */
-function _pushPausedCard(
-  runId: string,
-  messages: ReturnType<typeof useChatStore.getState>["messages"],
-  addMessage: (m: any) => void,
-) {
-  // Avoid duplicate paused cards for the same run
-  const alreadyExists = messages.some(
-    (m) => (m.kind === "run" && m.subtype === "paused" || m.messageType === "task_paused") && m.runId === runId
-  );
-  if (alreadyExists) return;
-
-  const { runs } = useRunStore.getState();
-  const run = runs[runId];
-  const pausedAtStep = run ? run.steps.filter((s) => s.status === "completed").length : undefined;
-  const pausedTotalSteps = run ? run.steps.length : undefined;
-
-  addMessage({
-    id: `paused-${runId}-${Date.now()}`,
-    role: "assistant",
-    content: "",
-    timestamp: new Date().toISOString(),
-    kind: "run",
-    subtype: "paused",
-    messageType: "task_paused", // legacy compat
-    runId,
-    pausedAtStep,
-    pausedTotalSteps,
-  });
-}
