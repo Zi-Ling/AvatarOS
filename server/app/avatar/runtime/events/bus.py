@@ -97,3 +97,106 @@ class EventBus:
                     self._websocket_broadcaster(event)
                 except Exception as e:
                     logger.error(f"Error in WebSocket broadcaster: {e}", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# EventBusV2 — inherits EventBus, delegates to EventBuffer / TriggerEngine /
+# EventSourceRegistry for backpressure, rule matching, and source management.
+#
+# Requirements: 4.1, 4.4, 4.8
+# ---------------------------------------------------------------------------
+
+from .buffer import EventBuffer
+from .trigger_engine import TriggerEngine
+from .event_source_registry import EventSourceRegistry
+from .types import AgentEvent, TriggerRule
+
+
+class EventBusV2(EventBus):
+    """Extended event bus with backpressure, trigger rules, and source management.
+
+    Inherits from EventBus to preserve subscribe() and WebSocket broadcasting.
+    Internal complexity is delegated to:
+      - EventBuffer: backpressure + priority buffering
+      - TriggerEngine: rule matching + cooldown + idempotency
+      - EventSourceRegistry: source registration + health + reconnection
+    """
+
+    def __init__(
+        self,
+        event_buffer: Optional[EventBuffer] = None,
+        trigger_engine: Optional[TriggerEngine] = None,
+        source_registry: Optional[EventSourceRegistry] = None,
+    ) -> None:
+        super().__init__()
+        self._buffer = event_buffer or EventBuffer()
+        self._trigger_engine = trigger_engine or TriggerEngine()
+        self._source_registry = source_registry or EventSourceRegistry()
+
+    # ── publish (sync, compatible with parent) ──
+
+    def publish(self, event: Event) -> None:
+        """Publish an event: parent broadcast + buffer to EventBuffer.
+
+        If *event* is an ``Event`` (legacy), it is broadcast via the parent
+        class.  If it is an ``AgentEvent`` (V2), it is also buffered for
+        ``drain_pending()``.  A plain ``Event`` is converted to an
+        ``AgentEvent`` before buffering so that the sense phase always
+        receives a uniform type.
+        """
+        # Parent handles WebSocket broadcasting and subscriber notification
+        super().publish(event)
+
+        # Buffer for AgentLoop._sense_phase()
+        if isinstance(event, AgentEvent):
+            self._buffer.enqueue(event)
+        else:
+            # Wrap legacy Event as AgentEvent for the buffer
+            agent_event = AgentEvent(
+                event_type=event.type.value if hasattr(event.type, "value") else str(event.type),
+                source=event.source,
+                timestamp=event.timestamp,
+                payload=dict(event.payload),
+                priority="medium",
+            )
+            self._buffer.enqueue(agent_event)
+
+    # ── drain (for AgentLoop._sense_phase()) ──
+
+    async def drain_pending(self) -> List[AgentEvent]:
+        """Return and clear all buffered events, highest priority first."""
+        return self._buffer.drain()
+
+    # ── source management proxies ──
+
+    def register_source(self, source: Any) -> None:
+        """Register an EventSource adapter."""
+        self._source_registry.register(source)
+
+    def unregister_source(self, source_id: str) -> None:
+        """Unregister an EventSource adapter."""
+        self._source_registry.unregister(source_id)
+
+    # ── trigger rule proxies ──
+
+    def add_trigger_rule(self, rule: TriggerRule) -> None:
+        """Register a TriggerRule."""
+        self._trigger_engine.add_rule(rule)
+
+    def remove_trigger_rule(self, rule_id: str) -> None:
+        """Unregister a TriggerRule."""
+        self._trigger_engine.remove_rule(rule_id)
+
+    def match_trigger_rules(self, event: AgentEvent) -> List[TriggerRule]:
+        """Return matching TriggerRules for *event* (cooldown-filtered)."""
+        return self._trigger_engine.match(event)
+
+    # ── health ──
+
+    def get_source_health(self) -> Dict[str, bool]:
+        """Return health status of all registered EventSources."""
+        return self._source_registry.get_health()
+
+    async def reconnect_degraded_sources(self) -> None:
+        """Attempt to reconnect degraded EventSources."""
+        await self._source_registry.reconnect_degraded()

@@ -6,9 +6,17 @@ Replaces string template syntax with explicit field references.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from pydantic import BaseModel, Field
 import hashlib
+
+if TYPE_CHECKING:
+    pass  # ParamBindingSpec imported below at runtime
+
+# ParamBindingSpec must be importable at runtime for Pydantic model_rebuild()
+# to resolve the forward reference in DataEdge.binding_spec.
+# types/schema.py has no circular dependencies on models/.
+from app.avatar.runtime.graph.types.schema import ParamBindingSpec  # noqa: F401
 
 
 def generate_edge_id(source_node: str, target_node: str, target_param: str) -> str:
@@ -57,6 +65,10 @@ class DataEdge(BaseModel):
     optional: bool = Field(
         default=False,
         description="Whether this dependency is optional (for failure propagation)"
+    )
+    binding_spec: Optional['ParamBindingSpec'] = Field(
+        default=None,
+        description="Explicit parameter binding specification for type validation"
     )
     
     def __init__(self, **data):

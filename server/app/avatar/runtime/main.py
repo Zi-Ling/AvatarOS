@@ -312,11 +312,43 @@ class AvatarMain:
                     approval_manager=get_approval_service(),
                 )
 
+                # ── complex-task-execution-quality 组件初始化 ──
+                _task_def_engine = None
+                _clarification_engine = None
+                _complexity_analyzer = None
+                _batch_plan_builder = None
+                _phased_planner = None
+                _collaboration_gate = None
+                try:
+                    from app.avatar.runtime.task.task_definition import TaskDefinitionEngine
+                    from app.avatar.runtime.task.clarification import ClarificationEngine
+                    from app.avatar.planner.composite.analyzer.complexity import ComplexityAnalyzer
+                    from app.avatar.runtime.graph.planner.batch_plan_builder import BatchPlanBuilder
+                    from app.avatar.runtime.task.phased_planner import PhasedPlanner
+                    from app.avatar.runtime.task.collaboration_gate import CollaborationGate
+
+                    _task_def_engine = TaskDefinitionEngine()
+                    _clarification_engine = ClarificationEngine()
+                    _complexity_analyzer = ComplexityAnalyzer(llm_client=self.llm_client)
+                    _batch_plan_builder = BatchPlanBuilder()
+                    _phased_planner = PhasedPlanner()
+                    _collaboration_gate = CollaborationGate()
+                    logger.info("[AvatarMain] Task understanding components ready "
+                                "(TaskDef/Clarification/Complexity/Batch/Phased/Collaboration)")
+                except Exception as tu_err:
+                    logger.warning(f"[AvatarMain] Task understanding components init failed: {tu_err}")
+
                 self._graph_controller = GraphController(
                     planner=graph_planner,
                     runtime=graph_runtime,
                     guard=_guard,
                     evolution_pipeline=self._init_evolution_pipeline(),
+                    task_def_engine=_task_def_engine,
+                    clarification_engine=_clarification_engine,
+                    complexity_analyzer=_complexity_analyzer,
+                    batch_plan_builder=_batch_plan_builder,
+                    phased_planner=_phased_planner,
+                    collaboration_gate=_collaboration_gate,
                 )
             except Exception as gc_err:
                 logger.warning(f"[AvatarMain] GraphController init failed: {gc_err}")
@@ -327,6 +359,19 @@ class AvatarMain:
             self._graph_controller = None
             self._agent_loop = None
 
+        # ── RuntimeKernel initialization (feature-flag protected) ──
+        self._runtime_kernel = None
+        self._runtime_kernel_enabled = False
+        try:
+            from .feature_flags import get_capability_registry
+            registry = get_capability_registry()
+            self._runtime_kernel_enabled = registry.is_available("runtime_kernel")
+            if self._runtime_kernel_enabled:
+                self._init_runtime_kernel()
+        except Exception as rk_err:
+            logger.debug(f"[AvatarMain] RuntimeKernel init skipped: {rk_err}")
+            self._runtime_kernel_enabled = False
+
     def handle_request(self, user_request: str) -> Any:
         if not self._graph_controller:
             raise RuntimeError("GraphController not initialized (missing LLM/TaskPlanner)")
@@ -336,6 +381,144 @@ class AvatarMain:
         return asyncio.get_event_loop().run_until_complete(
             self._graph_controller.execute(user_request, mode="react")
         )
+
+    def _init_runtime_kernel(self) -> None:
+        """Initialize RuntimeKernel and register all subsystems.
+
+        Only called when runtime_kernel feature flag is enabled.
+
+        Subsystems registered:
+        - graph_adapter (GraphControllerAdapter)
+        - environment_model (EnvironmentModel)
+        - event_bus_v2 (EventBusV2)
+        - memory_system (MemorySystem)
+        - self_monitor (SelfMonitor)
+        - policy_engine_v2 (PolicyEngineV2)
+        - action_plane (ActionPlane)
+        - collaboration_hub (CollaborationHub)
+        - task_scheduler (TaskScheduler)
+
+        AgentLoop.tick() drives: sense → schedule → execute → monitor → decide → apply
+
+        Requirements: 1.1, 1.2, 1.3, 1.4, 2.8, 6.7, 12.4, 12.6
+        """
+        try:
+            from .kernel.runtime_kernel import RuntimeKernel
+            from .kernel.agent_loop import AgentLoop
+            from .kernel.graph_controller_adapter import GraphControllerAdapter
+            from app.avatar.memory.environment_model import EnvironmentModel
+
+            self._runtime_kernel = RuntimeKernel()
+
+            # ── GraphControllerAdapter ──
+            adapter = None
+            if self._graph_controller is not None:
+                adapter = GraphControllerAdapter(graph_controller=self._graph_controller)
+                self._runtime_kernel.register_subsystem("graph_adapter", adapter)
+
+            # ── EnvironmentModel ──
+            env_model = EnvironmentModel(workspace_path=self.base_path)
+            self._runtime_kernel.register_subsystem("environment_model", env_model)
+
+            # ── EventBusV2 (sense phase event source) ──
+            event_bus_v2 = None
+            try:
+                from .events.event_bus_v2 import EventBusV2
+                event_bus_v2 = EventBusV2()
+                self._runtime_kernel.register_subsystem("event_bus_v2", event_bus_v2)
+            except Exception as e:
+                logger.debug("[AvatarMain] EventBusV2 init skipped: %s", e)
+
+            # ── MemorySystem ──
+            memory_system = None
+            try:
+                from app.avatar.memory.system import MemorySystem
+                memory_system = MemorySystem(memory_manager=self.memory_manager)
+                self._runtime_kernel.register_subsystem("memory_system", memory_system)
+            except Exception as e:
+                logger.debug("[AvatarMain] MemorySystem init skipped: %s", e)
+
+            # ── CollaborationHub ──
+            collaboration_hub = None
+            try:
+                from .collaboration.collaboration_hub import CollaborationHub
+                collaboration_hub = CollaborationHub()
+                self._runtime_kernel.register_subsystem("collaboration_hub", collaboration_hub)
+            except Exception as e:
+                logger.debug("[AvatarMain] CollaborationHub init skipped: %s", e)
+
+            # ── PolicyEngineV2 ──
+            policy_engine_v2 = None
+            try:
+                from .policy.policy_engine import PolicyEngineV2
+                policy_engine_v2 = PolicyEngineV2()
+                self._runtime_kernel.register_subsystem("policy_engine_v2", policy_engine_v2)
+            except Exception as e:
+                logger.debug("[AvatarMain] PolicyEngineV2 init skipped: %s", e)
+
+            # ── ActionPlane ──
+            try:
+                from .action_plane.action_plane import ActionPlane
+                action_plane = ActionPlane(
+                    policy_engine=policy_engine_v2,
+                    collaboration_hub=collaboration_hub,
+                )
+                self._runtime_kernel.register_subsystem("action_plane", action_plane)
+            except Exception as e:
+                logger.debug("[AvatarMain] ActionPlane init skipped: %s", e)
+
+            # ── SelfMonitor (monitor phase) ──
+            self_monitor = None
+            try:
+                from .selfmonitor.self_monitor import SelfMonitor
+                from .observability.debug_event_stream import get_debug_event_stream
+                self_monitor = SelfMonitor(
+                    debug_event_stream=get_debug_event_stream(),
+                )
+                self._runtime_kernel.register_subsystem("self_monitor", self_monitor)
+            except Exception as e:
+                logger.debug("[AvatarMain] SelfMonitor init skipped: %s", e)
+
+            # ── TaskScheduler (schedule phase) ──
+            task_scheduler = None
+            try:
+                from .scheduler.task_scheduler import TaskScheduler
+                from .agenda.work_queue import WorkQueue
+                from .agenda.agenda_manager import AgendaManager
+                work_queue = WorkQueue()
+                agenda_manager = AgendaManager()
+                task_scheduler = TaskScheduler(
+                    work_queue=work_queue,
+                    agenda_manager=agenda_manager,
+                )
+                self._runtime_kernel.register_subsystem("work_queue", work_queue)
+                self._runtime_kernel.register_subsystem("agenda_manager", agenda_manager)
+                self._runtime_kernel.register_subsystem("task_scheduler", task_scheduler)
+            except Exception as e:
+                logger.debug("[AvatarMain] TaskScheduler init skipped: %s", e)
+
+            # ── AgentLoop (heartbeat driver) ──
+            # tick() flow: sense → schedule → execute → monitor → decide → apply
+            self._runtime_agent_loop = AgentLoop(
+                kernel=self._runtime_kernel,
+                scheduler=task_scheduler,
+                monitor=self_monitor,
+                graph_adapter=adapter,
+                environment_model=env_model,
+            )
+
+            self._runtime_kernel.start()
+            logger.info("[AvatarMain] RuntimeKernel initialized with all subsystems")
+        except Exception as exc:
+            logger.warning(f"[AvatarMain] RuntimeKernel init failed: {exc}")
+            self._runtime_kernel = None
+            self._runtime_kernel_enabled = False
+
+    async def _legacy_execute(
+        self, intent: IntentSpec, task_mode: str, control_handle: Any, on_graph_created: Any
+    ) -> RunRecord:
+        """Preserve existing execution path for backward compatibility."""
+        return await self._run_intent_legacy(intent, task_mode, control_handle, on_graph_created)
 
     def _init_evolution_pipeline(self):
         """
@@ -451,10 +634,7 @@ class AvatarMain:
                 if resolved_inputs:
                     env_context["resolved_inputs"] = resolved_inputs
 
-                # P1: 简单任务 → 注入 fast-finish 信号，减少 Planner 调用次数
-                _is_complex = intent.metadata.get("is_complex", True)
-                if not _is_complex:
-                    env_context["simple_task_mode"] = True
+                # is_complex no longer gates budget — planner self-regulates
 
                 graph_result = await self._graph_controller.execute(
                     intent.goal, mode="react", env_context=env_context,
@@ -511,7 +691,7 @@ class AvatarMain:
             spec = skill_cls.spec
             skill_name = spec.name
 
-            # 获取参数 schema
+            # 获取参数 schema (input)
             params_schema = {}
             if spec.input_model:
                 try:
@@ -519,10 +699,20 @@ class AvatarMain:
                     params_schema = input_schema.get("properties", {})
                 except Exception as e:
                     logger.debug(f"Failed to get params schema for {skill_name}: {e}")
-            
+
+            # 获取输出 schema (output) — 让 Planner 知道返回字段名
+            output_schema = {}
+            if spec.output_model:
+                try:
+                    out_schema = spec.output_model.model_json_schema()
+                    output_schema = out_schema.get("properties", {})
+                except Exception as e:
+                    logger.debug(f"Failed to get output schema for {skill_name}: {e}")
+
             available_skills[skill_name] = {
                 "description": spec.description,
-                "params_schema": params_schema
+                "params_schema": params_schema,
+                "output_schema": output_schema,
             }
         
         # 注入运行时环境信息，让 Planner 生成正确的平台路径

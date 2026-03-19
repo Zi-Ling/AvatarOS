@@ -2,6 +2,11 @@
 BudgetGuard — Planner budget check, usage tracking, and default limits.
 
 Extracted from GraphController to keep budget logic self-contained.
+
+Design: A single unified budget for all tasks. The planner naturally uses
+fewer steps for simple tasks and more for complex ones — no pre-classification
+needed. This follows the industry-standard approach (OpenAI, Anthropic, Google)
+where the LLM itself decides how many steps to take.
 """
 
 from __future__ import annotations
@@ -20,17 +25,16 @@ class BudgetGuard:
 
     Two layers of budget:
     1. Explicit limits — caller-provided max_planner_tokens / max_planner_calls / max_planner_cost.
-    2. Effective defaults — if caller provides None, BudgetGuard applies conservative
-       defaults based on simple_task_mode flag.
+    2. Effective defaults — if caller provides None, BudgetGuard applies unified defaults.
 
     Usage is reset per-task via reset().
     """
 
-    # ── Conservative defaults (reviewer-agreed values) ──────────────────
-    DEFAULT_SIMPLE_CALLS = 5
-    DEFAULT_NORMAL_CALLS = 15
-    DEFAULT_SIMPLE_COST = 0.05
-    DEFAULT_NORMAL_COST = 0.20
+    # ── Unified defaults ────────────────────────────────────────────────
+    # Single budget for all tasks. The planner naturally self-regulates:
+    # simple tasks finish in 1-3 steps, complex tasks use more.
+    DEFAULT_MAX_CALLS = 15
+    DEFAULT_MAX_COST = 0.20
 
     def __init__(
         self,
@@ -38,7 +42,6 @@ class BudgetGuard:
         max_planner_tokens: Optional[int] = None,
         max_planner_calls: Optional[int] = None,
         max_planner_cost: Optional[float] = None,
-        simple_task_mode: bool = False,
     ):
         # Caller-provided explicit limits (may be None)
         self._explicit_tokens = max_planner_tokens
@@ -48,11 +51,11 @@ class BudgetGuard:
         # Effective limits (with defaults applied)
         self.effective_max_calls = (
             max_planner_calls if max_planner_calls is not None
-            else (self.DEFAULT_SIMPLE_CALLS if simple_task_mode else self.DEFAULT_NORMAL_CALLS)
+            else self.DEFAULT_MAX_CALLS
         )
         self.effective_max_cost = (
             max_planner_cost if max_planner_cost is not None
-            else (self.DEFAULT_SIMPLE_COST if simple_task_mode else self.DEFAULT_NORMAL_COST)
+            else self.DEFAULT_MAX_COST
         )
 
         # Accumulated usage — reset per task
@@ -64,16 +67,16 @@ class BudgetGuard:
 
     # ── Public API ──────────────────────────────────────────────────────
 
-    def reset(self, simple_task_mode: bool = False) -> None:
-        """Reset usage counters for a new task and recalculate effective limits."""
+    def reset(self) -> None:
+        """Reset usage counters for a new task."""
         self._usage = {'total_tokens': 0, 'total_calls': 0, 'total_cost': 0.0}
         self.effective_max_calls = (
             self._explicit_calls if self._explicit_calls is not None
-            else (self.DEFAULT_SIMPLE_CALLS if simple_task_mode else self.DEFAULT_NORMAL_CALLS)
+            else self.DEFAULT_MAX_CALLS
         )
         self.effective_max_cost = (
             self._explicit_cost if self._explicit_cost is not None
-            else (self.DEFAULT_SIMPLE_COST if simple_task_mode else self.DEFAULT_NORMAL_COST)
+            else self.DEFAULT_MAX_COST
         )
 
     def track(self, patch: 'GraphPatch') -> None:

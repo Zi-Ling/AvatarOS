@@ -300,6 +300,7 @@ def build_task_result_summary(
     goal: str,
     target_obj: dict = None,
     final_summary: str = None,
+    workspace_path: str = None,
 ) -> dict:
     """
     统一的任务结果摘要提炼器。
@@ -310,8 +311,10 @@ def build_task_result_summary(
         goal          - 本次任务目标
         status        - success | failed | partial
         output_type   - file | text | json | none
-        output_path   - 文件路径（如有）
-        output_value  - 核心输出值（截断至 500 字符）
+        output_path   - 文件路径（规范化为宿主机路径）
+        output_value  - 核心输出值（展示用，截断至 500 字符）
+        output_value_full - 小型值对象完整内容（≤2KB 时保留，否则为 None）
+        artifact_ref  - 大型内容的 artifact 引用（>2KB 时填充）
         summary       - 人类可读摘要（截断至 300 字符）
         updated_at    - ISO 时间戳
     """
@@ -321,7 +324,12 @@ def build_task_result_summary(
 
     output_path = ""
     output_value = ""
+    output_value_full = None
+    artifact_ref = None
     output_type = "none"
+
+    # 路径规范化：容器路径 → 宿主机路径
+    _ws_path = workspace_path or getattr(run_record, "workspace_path", None) or ""
 
     if target_obj and isinstance(target_obj, dict):
         # 1. 优先提取文件路径
@@ -330,6 +338,14 @@ def build_task_result_summary(
                 output_path = str(target_obj[path_key])
                 output_type = "file"
                 break
+
+        # 路径规范化
+        if output_path and _ws_path:
+            try:
+                from app.avatar.runtime.workspace.path_canonical import canonicalize_path
+                output_path = canonicalize_path(output_path, host_workspace=_ws_path)
+            except Exception:
+                pass
 
         # 2. 提取核心文本值（优先级：stdout > output > content > items > 整体 JSON）
         raw_value = None
@@ -353,7 +369,22 @@ def build_task_result_summary(
                 raw_str = str(raw_value)
                 output_type = "text" if output_type == "none" else output_type
 
-            # 截断至 500 字符，保留首尾
+            # 二分法：小型值对象 vs 大型内容对象
+            _VALUE_INLINE_LIMIT = 2048  # 2KB
+            if len(raw_str) <= _VALUE_INLINE_LIMIT:
+                # 小型值：完整保留，供跨轮绑定直接使用
+                output_value_full = raw_str
+            else:
+                # 大型内容：只保留 artifact 引用，不内联
+                # 尝试从 target_obj 提取 artifact_id
+                artifact_ref = (
+                    target_obj.get("__artifacts__", [None])[0]
+                    if isinstance(target_obj.get("__artifacts__"), list)
+                    and target_obj["__artifacts__"]
+                    else None
+                )
+
+            # 展示用截断（始终生成）
             if len(raw_str) > 500:
                 output_value = raw_str[:300] + "\n...[truncated]...\n" + raw_str[-150:]
             else:
@@ -373,6 +404,8 @@ def build_task_result_summary(
         "output_type": output_type,
         "output_path": output_path,
         "output_value": output_value,
+        "output_value_full": output_value_full,
+        "artifact_ref": artifact_ref,
         "summary": summary,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -465,7 +498,7 @@ async def execute_task(
         # Reference Resolution: 结构化指代消解，按优先级从 history 绑定引用对象
         # 不依赖正则/指代词，只要 history 有 assistant 消息就尝试绑定，confidence 决定是否使用
         resolver = _get_reference_resolver()
-        resolution = resolver.resolve(history or [])
+        resolution = resolver.resolve(history or [], goal=resolved_goal)
         if resolution.resolved and resolution.best and resolution.best.confidence >= 0.5:
             resolved_inputs = resolution.to_env_dict()
 
@@ -1020,16 +1053,23 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
         target_obj=target_obj,
         final_summary=final_content,
     )
+    _trs_meta = {
+        "message_type": "task_result",
+        "goal": task_result_summary["goal"],
+        "status": task_result_summary["status"],
+        "output_type": task_result_summary["output_type"],
+        "output_path": task_result_summary["output_path"],
+        "output_value": task_result_summary["output_value"],
+    }
+    # 小型值对象：完整保留供跨轮绑定
+    if task_result_summary.get("output_value_full"):
+        _trs_meta["output_value_full"] = task_result_summary["output_value_full"]
+    # 大型内容：只保留 artifact 引用
+    if task_result_summary.get("artifact_ref"):
+        _trs_meta["artifact_ref"] = task_result_summary["artifact_ref"]
     save_message_to_session(
         session_id, "assistant", final_content,
-        metadata={
-            "message_type": "task_result",
-            "goal": task_result_summary["goal"],
-            "status": task_result_summary["status"],
-            "output_type": task_result_summary["output_type"],
-            "output_path": task_result_summary["output_path"],
-            "output_value": task_result_summary["output_value"],
-        },
+        metadata=_trs_meta,
     )
 
     # ── 保存 last_output 到 SessionContext ───────────────────────────────────

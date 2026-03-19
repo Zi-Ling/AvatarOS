@@ -61,6 +61,7 @@ class ExecutionResult:
     error_message: Optional[str] = None
     is_stuck: bool = False
     graph: Optional[Any] = None  # ExecutionGraph, typed as Any to avoid circular import
+    summary: Optional[str] = None  # Human-readable result summary from AnswerSynthesizer
 
 
 class GraphRuntime:

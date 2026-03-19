@@ -211,6 +211,9 @@ class ContainerPool:
         """预创建容器 + 启动后台健康检查线程"""
         logger.info("[ContainerPool] Starting...")
 
+        # 清理上次遗留的孤儿容器
+        self._cleanup_orphan_containers()
+
         for i in range(self.pool_size):
             self._spawn_container(reason="initial warmup")
 
@@ -221,6 +224,26 @@ class ContainerPool:
         self._health_thread.start()
 
         logger.info(f"[ContainerPool] Started, pool_size={self.pool_size}")
+
+    def _cleanup_orphan_containers(self):
+        """启动时清理上次遗留的孤儿容器（按 label 过滤）"""
+        try:
+            orphans = self.client.containers.list(
+                all=True,
+                filters={"label": self.CONTAINER_LABEL},
+            )
+            if not orphans:
+                return
+            logger.info(f"[ContainerPool] Found {len(orphans)} orphan container(s), cleaning up...")
+            for c in orphans:
+                try:
+                    c.remove(force=True)
+                    logger.debug(f"[ContainerPool] Removed orphan {c.short_id}")
+                except Exception as e:
+                    logger.debug(f"[ContainerPool] Failed to remove orphan {c.short_id}: {e}")
+            logger.info(f"[ContainerPool] Orphan cleanup done")
+        except Exception as e:
+            logger.warning(f"[ContainerPool] Orphan cleanup failed: {e}")
 
     def shutdown(self):
         """停止健康检查线程，清理所有容器"""
@@ -531,6 +554,8 @@ class ContainerPool:
         t = threading.Thread(target=_create, daemon=True, name="ContainerPool-Spawn")
         t.start()
 
+    CONTAINER_LABEL = "ia.container-pool"  # 用于标识池容器，启动时清理孤儿
+
     def _create_raw_container(self) -> Any:
         """创建并启动一个 sleep infinity 容器"""
         kwargs = {
@@ -540,6 +565,7 @@ class ContainerPool:
             "cpu_quota":    self.cpu_quota,
             "network_mode": self.network_mode,
             "detach":       True,
+            "labels":       {self.CONTAINER_LABEL: "1"},
         }
         if self.runtime:
             kwargs["runtime"] = self.runtime

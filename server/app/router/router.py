@@ -18,7 +18,6 @@ from .classifier import IntentClassifier
 # Use string imports if needed to avoid circular deps, but here we import classes for type hinting
 from app.avatar.runtime.main import AvatarMain
 from app.avatar.intent.models import IntentSpec, IntentDomain, SafetyLevel
-from app.avatar.planner.composite.analyzer.complexity import ComplexityAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +58,6 @@ class AvatarRouter:
         self.logger = logger or create_default_router_logger()
         self.classifier = IntentClassifier(llm)
         self.intent_compiler = intent_compiler  # 可选的 IntentCompiler
-        
-        # [P1] 初始化ComplexityAnalyzer（用于复杂度判断）
-        self.complexity_analyzer = ComplexityAnalyzer()
 
     # ---- 新版核心 API（推荐） ----
 
@@ -124,8 +120,8 @@ class AvatarRouter:
         # === 新增：调用 IntentCompiler（智能决策） ===
         intent_spec = await self._extract_intent_if_needed(user_message, history)
 
-        # 技能选择交给 Planner/LLM，router 层直接放行
-        is_complex = self.complexity_analyzer.is_complex_task(user_message).is_complex
+        # Complexity pre-classification removed — planner self-regulates.
+        # is_complex kept True for backward compat (no downstream throttling).
 
         # 构造 RouteDecision
         decision = RouteDecision(
@@ -138,7 +134,7 @@ class AvatarRouter:
             relevance_score=1.0,
             top_skills=[],
             route_reason="llm_planner",
-            is_complex=is_complex,
+            is_complex=True,
             scored_skills=[],
         )
         

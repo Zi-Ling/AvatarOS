@@ -52,7 +52,16 @@ class PromptBuilder:
         parts = [self._system_instruction(), f"\n## Goal\n{goal}",
                  "\n## Available Skills", self._format_skills()]
         if context:
-            parts += ["\n## Context", json.dumps(context, indent=2)]
+            # Filter out non-serializable objects (e.g. skill_registry, callbacks)
+            _serializable = {}
+            for k, v in context.items():
+                try:
+                    json.dumps(v)
+                    _serializable[k] = v
+                except (TypeError, ValueError):
+                    pass
+            if _serializable:
+                parts += ["\n## Context", json.dumps(_serializable, indent=2)]
         parts.append(self._dag_instructions())
         return "\n".join(parts)
 

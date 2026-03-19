@@ -58,6 +58,20 @@ class SkillContext:
         if not path:
             raise ValueError("resolve_path: empty path provided")
 
+        # Map container virtual paths back to real host paths.
+        # Planner prompt shows workspace as /workspace (container mount point),
+        # but fs.list/fs.write etc. execute locally via ProcessExecutor.
+        from app.avatar.runtime.workspace.session_workspace import (
+            CONTAINER_WORKSPACE_PATH, CONTAINER_SESSION_PATH,
+        )
+        if path == CONTAINER_WORKSPACE_PATH or path == CONTAINER_WORKSPACE_PATH + "/":
+            if self.base_path:
+                return self.base_path
+        if path.startswith(CONTAINER_WORKSPACE_PATH + "/"):
+            rel = path[len(CONTAINER_WORKSPACE_PATH) + 1:]
+            if self.base_path:
+                return self.base_path / rel
+
         p = Path(path)
 
         # Absolute path → validate against workspace_root if set

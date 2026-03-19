@@ -11,6 +11,26 @@ from datetime import datetime, UTC
 from pydantic import BaseModel, Field
 
 
+class NodeType(str, Enum):
+    """Structural role of a node in the execution graph."""
+    STANDARD = "standard"
+    FAN_OUT = "fan_out"
+    FAN_IN = "fan_in"
+
+
+class AggregationType(str, Enum):
+    """Aggregation strategy for FanInNode results."""
+    CONCAT = "concat"
+    MERGE = "merge"
+    # REDUCE_CUSTOM = "reduce_custom"  # V2_PLANNED
+
+
+class BatchFailPolicy(str, Enum):
+    """Failure handling policy for batch (fan-out) execution."""
+    BEST_EFFORT = "best_effort"
+    FAIL_FAST = "fail_fast"
+
+
 class NodeStatus(str, Enum):
     """Node execution status"""
     PENDING = "pending"
@@ -60,6 +80,23 @@ class StepNode(BaseModel):
     outputs: Dict[str, Any] = Field(default_factory=dict, description="Execution outputs")
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata")
+    
+    # Deliverable coverage claim: which deliverable IDs this node intends to produce
+    intended_deliverables: List[str] = Field(default_factory=list, description="Deliverable IDs this node claims to produce")
+    
+    # Node type for fan-out/fan-in support
+    node_type: NodeType = Field(default=NodeType.STANDARD, description="Structural role")
+    # Fan-out specific
+    batch_fail_policy: BatchFailPolicy = Field(
+        default=BatchFailPolicy.BEST_EFFORT,
+        description="Failure policy for fan-out children",
+    )
+    fan_out_count: int = Field(default=0, description="Number of items to fan out")
+    # Fan-in specific
+    aggregation_type: AggregationType = Field(
+        default=AggregationType.CONCAT,
+        description="Aggregation strategy for fan-in",
+    )
     
     # Execution tracking
     start_time: Optional[datetime] = None

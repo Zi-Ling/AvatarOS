@@ -21,6 +21,7 @@ from app.avatar.evolution.models import (
     CostBaselineDB,
     CostTelemetry,
     ExecutionTrace,
+    FailureCategory,
     OutcomeRecord,
     OutcomeStatus,
 )
@@ -77,6 +78,16 @@ class ReflectionGating:
 
         # 条件 1：任务失败
         if outcome.status == OutcomeStatus.FAILED:
+            # P2 filter: 如果所有执行步骤都 SUCCESS 但最终 FAILED，
+            # 说明是验证基础设施 bug（如路径映射错误），不是策略失败。
+            # 跳过反思，避免学到错误的 "教训"。
+            if self._is_infra_verification_failure(trace, outcome):
+                logger.info(
+                    f"[ReflectionGating] skip: infra verification failure "
+                    f"(all steps succeeded but verification failed), type={task_type}"
+                )
+                self.update_baseline(task_type, cost)
+                return False
             logger.info(f"[ReflectionGating] trigger: failed task, type={task_type}")
             self.update_baseline(task_type, cost)
             return True
@@ -148,6 +159,30 @@ class ReflectionGating:
             elif step.status == "success" and saw_failure:
                 return True
         return False
+
+    def _is_infra_verification_failure(
+        self,
+        trace: ExecutionTrace,
+        outcome: OutcomeRecord,
+    ) -> bool:
+        """
+        检测基础设施验证失败：所有执行步骤都成功，但任务因 repair_exhausted 失败。
+        这通常是路径映射等基础设施 bug 导致验证器误判，不应触发反思学习。
+        """
+        if outcome.status != OutcomeStatus.FAILED:
+            return False
+        # 检查是否 repair_exhausted
+        is_repair_exhausted = (
+            outcome.failure_category == FailureCategory.VERIFICATION_FAIL
+            or "repair_exhausted" in (outcome.summary or "")
+        )
+        if not is_repair_exhausted:
+            return False
+        # 检查所有执行步骤是否都成功
+        if not trace.steps:
+            return False
+        all_success = all(s.status == "success" for s in trace.steps)
+        return all_success
 
     def _persist_baseline(self, baseline: CostBaseline) -> None:
         """持久化成本基线到数据库。"""

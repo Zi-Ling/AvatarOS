@@ -68,6 +68,34 @@ class RepairLoop:
         - Updates repair_state.is_repairing, current_attempt, repair_history
         - Writes "repair_triggered" event to StepTraceStore
         """
+        # ── Verifier mismatch detection ─────────────────────────────────
+        # If the verifier type doesn't match the target file extension,
+        # repairing the file content is futile. Short-circuit immediately.
+        mismatch_detected = self._detect_verifier_mismatch(failed_results)
+        if mismatch_detected:
+            logger.warning(
+                f"[RepairLoop] Verifier mismatch detected: {mismatch_detected}. "
+                f"Skipping repair — the verification plan is wrong, not the file."
+            )
+            attributions = self._build_attributions(failed_results, [])
+            for attr in attributions:
+                attr.strategy_exhausted = True
+            feedback = RepairFeedback(
+                failed_verifications=failed_results,
+                repair_hints=[
+                    f"Verifier mismatch: {mismatch_detected}. "
+                    f"The file content is likely correct but the wrong verifier was applied. "
+                    f"Do NOT modify the file. Re-evaluate the goal and select appropriate verifiers.",
+                ],
+                suggested_strategy="full_retry",
+                attributions=attributions,
+                affected_step_ids=[],
+                producer_step_ids=[],
+                context_patch={"repair_exhausted": True, "verifier_mismatch": True},
+            )
+            self._write_repair_event(session_id, feedback)
+            return feedback
+
         strategy = self._select_strategy(failed_results, repair_state)
         producer_step_ids = self._locate_producers(failed_results, graph)
         repair_hints = self._build_hints(failed_results, strategy)
@@ -143,6 +171,59 @@ class RepairLoop:
 
         self._write_repair_event(session_id, feedback)
         return feedback
+
+    # ------------------------------------------------------------------
+    # Verifier mismatch detection
+    # ------------------------------------------------------------------
+
+    # Map of verifier condition types to the file extensions they are valid for
+    _VERIFIER_VALID_EXTENSIONS: Dict[str, set] = {
+        "json_parseable": {".json"},
+        "csv_has_data": {".csv", ".tsv"},
+        "image_openable": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"},
+    }
+
+    def _detect_verifier_mismatch(
+        self, failed_results: List[VerificationResult]
+    ) -> Optional[str]:
+        """
+        Check if any failed verifier is fundamentally incompatible with the
+        target file extension. Returns a human-readable mismatch description
+        or None if no mismatch detected.
+        """
+        import re as _re
+
+        def _to_snake(name: str) -> str:
+            """Convert CamelCase verifier name to snake_case for matching."""
+            s = _re.sub(r'([A-Z])', r'_\1', name).lower().strip('_')
+            return s.replace('__', '_')
+
+        for result in failed_results:
+            if result.status != VerificationStatus.FAILED:
+                continue
+            verifier_name = (result.verifier_name or "").lower()
+            # Normalize: "JsonParseableVerifier" → "json_parseable_verifier"
+            verifier_snake = _to_snake(result.verifier_name or "")
+            target_path = result.target.path or ""
+            if not target_path:
+                continue
+
+            # Extract extension
+            dot = target_path.rfind(".")
+            if dot == -1:
+                continue
+            ext = target_path[dot:].lower().split("?")[0]
+
+            # Check each known verifier type
+            for condition_type, valid_exts in self._VERIFIER_VALID_EXTENSIONS.items():
+                # Match against both raw lowercase and snake_case normalized name
+                if (condition_type in verifier_name or condition_type in verifier_snake) and ext not in valid_exts:
+                    return (
+                        f"{condition_type} verifier applied to '{ext}' file "
+                        f"({target_path}), but it only makes sense for "
+                        f"{', '.join(sorted(valid_exts))}"
+                    )
+        return None
 
     # ------------------------------------------------------------------
     # Structured attribution (P0)

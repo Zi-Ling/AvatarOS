@@ -12,6 +12,7 @@ import re
 from typing import List, Optional
 
 from app.avatar.runtime.verification.models import (
+    DeliverableSpec,
     ExpectedArtifact,
     NormalizedGoal,
     RiskLevel,
@@ -73,10 +74,12 @@ _EXT_MAP = {
 _GOAL_TYPE_MAP = {
     "file_transform": frozenset({"convert", "transform", "resize", "compress", "encode", "decode"}),
     "report_gen":     frozenset({"report", "summarize", "summary", "generate report", "create report"}),
-    "data_analysis":  frozenset({"analyze", "analysis", "statistics", "count", "aggregate"}),
+    "data_analysis":  frozenset({"analyze", "analysis", "statistics", "count", "aggregate",
+                                 "统计", "分析", "计算"}),
     "file_write":     frozenset({"write", "save", "create file", "export", "generate file"}),
     "data_fetch":     frozenset({"fetch", "download", "get", "retrieve", "scrape"}),
-    "query":          frozenset({"query", "search", "find", "list", "show"}),
+    "query":          frozenset({"query", "search", "find", "list", "show",
+                                 "列出", "显示", "打印", "查看", "读取", "print", "display"}),
 }
 
 # path-like pattern
@@ -100,6 +103,7 @@ class GoalNormalizer:
         goal_type = self._infer_goal_type(goal_lower)
         verification_intents = self._infer_intents(artifacts, goal_lower)
         sub_goals = self._decompose_sub_goals(goal)
+        deliverables = self._build_deliverables(artifacts)
 
         # P3: DomainPack matching
         matched_domain_pack = self._match_domain_pack(goal_lower)
@@ -113,6 +117,7 @@ class GoalNormalizer:
             requires_human_approval=(risk_level == RiskLevel.HIGH),
             sub_goals=sub_goals,
             matched_domain_pack=matched_domain_pack,
+            deliverables=deliverables,
         )
 
     # ------------------------------------------------------------------
@@ -138,19 +143,68 @@ class GoalNormalizer:
                 required=True,
             ))
 
-        # 2. Extension mentions without full path
+        # 2. Extension mentions without full path — collect ALL mentioned formats
         if not artifacts:
+            seen_exts: set = set()
+            goal_lower = goal.lower()
+            # Semantic aliases: map variant names to canonical extension
+            _ALIASES = {"markdown": ".md", "text": ".txt", "excel": ".xlsx"}
+            for alias, canonical_ext in _ALIASES.items():
+                if re.search(rf'\b{re.escape(alias)}\b', goal_lower) and canonical_ext not in seen_exts:
+                    mime, _ = _EXT_MAP.get(canonical_ext, (None, None))
+                    if mime:
+                        seen_exts.add(canonical_ext)
+                        ext_bare = canonical_ext.lstrip(".")
+                        artifacts.append(ExpectedArtifact(
+                            label=f"output_{ext_bare}",
+                            mime_type=mime,
+                            path_hint=f"output/*{canonical_ext}",
+                            required=True,
+                        ))
             for ext, (mime, _) in _EXT_MAP.items():
-                if ext.lstrip(".") in goal.lower():
+                ext_bare = ext.lstrip(".")
+                # Word-boundary check: avoid matching "json" inside "jsonify" etc.
+                if re.search(rf'\b{re.escape(ext_bare)}\b', goal_lower) and ext not in seen_exts:
+                    seen_exts.add(ext)
                     artifacts.append(ExpectedArtifact(
-                        label=f"output_{ext.lstrip('.')}",
+                        label=f"output_{ext_bare}",
                         mime_type=mime,
                         path_hint=f"output/*{ext}",
                         required=True,
                     ))
-                    break  # one hint is enough for fallback
 
         return artifacts
+
+    # ── Deliverable generation ──────────────────────────────────────────
+
+    # Semantic role inference from extension
+    _EXT_ROLE_MAP = {
+        ".md": "report", ".txt": "export", ".json": "data_export",
+        ".csv": "data_export", ".xlsx": "data_export", ".xls": "data_export",
+        ".png": "chart", ".jpg": "image", ".jpeg": "image",
+        ".pdf": "document", ".html": "document", ".xml": "data_export",
+    }
+
+    def _build_deliverables(self, artifacts: List[ExpectedArtifact]) -> List[DeliverableSpec]:
+        """Generate DeliverableSpec list from extracted artifacts (one per format)."""
+        deliverables: List[DeliverableSpec] = []
+        seen_formats: set = set()
+        for i, art in enumerate(artifacts):
+            ext = self._get_ext(art.path_hint or "")
+            fmt = ext.lstrip(".") if ext else "unknown"
+            if fmt in seen_formats:
+                continue
+            seen_formats.add(fmt)
+            role = self._EXT_ROLE_MAP.get(ext)
+            deliverables.append(DeliverableSpec(
+                id=f"d{i + 1}",
+                format=fmt,
+                path_hint=art.path_hint,
+                semantic_role=role,
+                source_ref=art.label,
+                required=art.required,
+            ))
+        return deliverables
 
     def _infer_risk_level(self, goal_lower: str, artifacts: List[ExpectedArtifact]) -> RiskLevel:
         words = set(re.split(r'\W+', goal_lower))
@@ -169,10 +223,16 @@ class GoalNormalizer:
                     return gtype
         return "general"
 
+    # goal_type 值集合：不产生文件产物的任务类型
+    _NON_FILE_GOAL_TYPES = frozenset({"query", "data_analysis", "general"})
+
     def _infer_intents(self, artifacts: List[ExpectedArtifact], goal_lower: str) -> List[str]:
         intents: List[str] = []
         seen: set = set()
 
+        # Derive verification intents strictly from artifact extensions.
+        # This prevents mismatches like json_parseable being applied to .md files
+        # when the goal text happens to mention "json".
         for art in artifacts:
             ext = self._get_ext(art.path_hint or "")
             _, ctype = _EXT_MAP.get(ext, (None, None))
@@ -183,16 +243,14 @@ class GoalNormalizer:
                 intents.append("file_exists")
                 seen.add("file_exists")
 
-        # keyword-based intent hints
-        if "json" in goal_lower and "json_parseable" not in seen:
-            intents.append("json_parseable")
-        if any(w in goal_lower for w in ("image", "photo", "picture", "图片", "图像")) and "image_openable" not in seen:
-            intents.append("image_openable")
-        if "csv" in goal_lower and "csv_has_data" not in seen:
-            intents.append("csv_has_data")
-
         if not intents:
-            intents.append("file_exists")
+            # 对非文件产出型任务（列表/展示/分析/问答），不默认 file_exists
+            # 而是使用 execution_success，让验证层基于节点执行成功判定
+            goal_type = self._infer_goal_type(goal_lower)
+            if goal_type in self._NON_FILE_GOAL_TYPES:
+                intents.append("execution_success")
+            else:
+                intents.append("file_exists")
 
         return intents
 

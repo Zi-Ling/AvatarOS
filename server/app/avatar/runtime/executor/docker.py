@@ -250,14 +250,13 @@ class DockerExecutor(SkillExecutor):
     
     def _run_container_sync(self, tmpdir: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None, user_workspace: Optional[str] = None) -> dict:
         """同步运行容器（在线程池中执行）"""
-        # 容器池里的容器创建时没有挂载 workspace volumes，
-        # 如果有 workspace_volumes 必须走 _run_without_pool（新建容器并挂载）
-        if self.use_pool and self._pool and not workspace_volumes:
-            return self._run_with_pool(tmpdir, base_path=base_path)
+        if self.use_pool and self._pool:
+            return self._run_with_pool(tmpdir, workspace_volumes=workspace_volumes, base_path=base_path, user_workspace=user_workspace)
         return self._run_without_pool(tmpdir, workspace_volumes, base_path=base_path, user_workspace=user_workspace)
     
-    def _run_with_pool(self, tmpdir: str, base_path: Optional[str] = None) -> dict:
-        """使用容器池执行，自动适配 Docker/Podman"""
+    def _run_with_pool(self, tmpdir: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None, user_workspace: Optional[str] = None) -> dict:
+        """使用容器池执行，通过 docker cp 传输文件（不依赖 volume mount）"""
+        import tarfile, io
         from .container_pool import exec_run_in_container
 
         container = self._pool.acquire(timeout=self.timeout)
@@ -270,7 +269,7 @@ class DockerExecutor(SkillExecutor):
             with open(code_file, "r", encoding="utf-8") as f:
                 code = f.read()
 
-            # 确保 /workspace 目录存在（pool 容器创建时没有 volume mount）
+            # 确保 /workspace 目录存在
             exec_run_in_container(
                 container,
                 cmd=["mkdir", "-p", "/workspace"],
@@ -278,6 +277,30 @@ class DockerExecutor(SkillExecutor):
                 demux=False,
                 use_podman=self._is_podman,
             )
+
+            # 如果有 workspace_volumes，把宿主机文件 put_archive 到容器内
+            # workspace_volumes 格式: {host_path: {"bind": container_path, "mode": "rw"}}
+            if workspace_volumes:
+                for host_path, mount_cfg in workspace_volumes.items():
+                    container_path = mount_cfg["bind"]
+                    if not os.path.exists(host_path):
+                        continue
+                    exec_run_in_container(
+                        container,
+                        cmd=["mkdir", "-p", container_path],
+                        workdir="/",
+                        demux=False,
+                        use_podman=self._is_podman,
+                    )
+                    # 把 host_path 目录内容打包上传到容器
+                    if os.path.isdir(host_path):
+                        tar_buf = io.BytesIO()
+                        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+                            for item in os.listdir(host_path):
+                                full = os.path.join(host_path, item)
+                                tar.add(full, arcname=item)
+                        tar_buf.seek(0)
+                        container.put_archive(container_path, tar_buf)
 
             exit_code, output = exec_run_in_container(
                 container,
@@ -290,23 +313,36 @@ class DockerExecutor(SkillExecutor):
             stdout = output[0].decode("utf-8") if output[0] else ""
             stderr = output[1].decode("utf-8") if output[1] else ""
 
+            # 执行完成后，把容器 /workspace 下的新文件复制回宿主机
+            if workspace_volumes and user_workspace and os.path.isdir(user_workspace):
+                try:
+                    bits, _ = container.get_archive("/workspace/.")
+                    tar_bytes = b"".join(bits)
+                    with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tar:
+                        for member in tar.getmembers():
+                            # 跳过目录本身
+                            if member.isdir():
+                                continue
+                            # 去掉 tar 内的前缀 "./"
+                            member.name = member.name.lstrip("./")
+                            if not member.name:
+                                continue
+                            tar.extract(member, path=user_workspace)
+                except Exception as cp_err:
+                    logger.debug(f"[DockerExecutor] Pool copy-back from /workspace: {cp_err}")
+
             if exit_code == 0:
-                # 从 stdout 识别 __OUTPUT__: 标记行提取结构化输出
                 structured_output = _extract_output_from_stdout(stdout)
                 _file_path = None
                 if isinstance(structured_output, dict) and "__file__" in structured_output:
                     container_file_path = structured_output["__file__"]
                     _file_path = container_file_path
 
-                    # 把容器内生成的文件 docker cp 到宿主机 base_path
                     if base_path:
                         try:
-                            import tarfile, io
-                            # docker cp 用 get_archive API
                             bits, _ = container.get_archive(container_file_path)
                             tar_bytes = b"".join(bits)
                             with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tar:
-                                # 只提取文件名，放到 base_path 下
                                 for member in tar.getmembers():
                                     member.name = os.path.basename(member.name)
                                     tar.extract(member, path=base_path)
@@ -316,8 +352,6 @@ class DockerExecutor(SkillExecutor):
                         except Exception as cp_err:
                             logger.warning(f"[DockerExecutor] Failed to copy file from container: {cp_err}")
 
-                # 防御性检查：容器 exit_code=0 但 structured_output 包含 subprocess 失败
-                # 场景：LLM 生成的代码用 subprocess.run() 执行子进程，外层 python 成功但子进程失败
                 _subprocess_failed = False
                 if isinstance(structured_output, dict):
                     _rc = structured_output.get("returncode")
@@ -367,6 +401,18 @@ class DockerExecutor(SkillExecutor):
             exec_failed = True
             raise
         finally:
+            # 清理容器内 /workspace 残留文件，避免污染下次执行
+            try:
+                from .container_pool import exec_run_in_container as _exec
+                _exec(
+                    container,
+                    cmd=["sh", "-c", "rm -rf /workspace/* /workspace/.*  2>/dev/null || true"],
+                    workdir="/",
+                    demux=False,
+                    use_podman=self._is_podman,
+                )
+            except Exception:
+                pass
             self._pool.release(container, failed=exec_failed)
     
     def _run_without_pool(self, tmpdir: str, workspace_volumes: Optional[dict] = None, base_path: Optional[str] = None, user_workspace: Optional[str] = None) -> dict:

@@ -31,6 +31,28 @@ class ExpectedArtifact:
 
 
 @dataclass
+class DeliverableSpec:
+    """Static definition of a single deliverable (file/artifact) expected by the goal."""
+    id: str                                     # e.g. "d1", "d2"
+    format: str                                 # file extension without dot: "md", "txt", "json", ...
+    path_hint: Optional[str] = None             # e.g. "output/content.md"
+    semantic_role: Optional[str] = None         # e.g. "report", "summary", "export"
+    source_ref: Optional[str] = None            # which part of the goal this came from
+    required: bool = True
+
+
+@dataclass
+class DeliverableState:
+    """Runtime tracking state for a single deliverable (separate from static spec)."""
+    deliverable_id: str                         # matches DeliverableSpec.id
+    status: str = "pending"                     # "pending" | "satisfied" | "failed"
+    matched_path: Optional[str] = None          # actual file path produced
+    producing_step_id: Optional[str] = None     # node id that produced this
+    verification_passed: bool = False           # True only after verifier confirms
+    evidence: Optional[str] = None
+
+
+@dataclass
 class NormalizedGoal:
     original: str
     goal_type: str                              # "file_transform" | "report_gen" | "data_analysis" | ...
@@ -40,6 +62,7 @@ class NormalizedGoal:
     requires_human_approval: bool = False
     sub_goals: List[str] = field(default_factory=list)
     matched_domain_pack: Optional[str] = None  # P3: DomainPack.pack_id if matched
+    deliverables: List[DeliverableSpec] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +215,8 @@ class GoalCoverageSummary:
     total_count: int = 0
     coverage_ratio: float = 0.0
     last_updated_at: Optional[float] = None
+    deliverable_satisfied_count: int = 0
+    deliverable_total_count: int = 0
 
     @property
     def is_currently_covered(self) -> bool:
@@ -213,6 +238,8 @@ class GoalCoverageSummary:
             return f"[coverage] goal='{self.goal[:80]}' no sub-goals tracked"
 
         lines = [f"[coverage] {self.satisfied_count}/{self.total_count} sub-goals satisfied"]
+        if self.deliverable_total_count > 0:
+            lines[0] += f", {self.deliverable_satisfied_count}/{self.deliverable_total_count} deliverables"
         for sg in self.sub_goals:
             status = "✓" if sg.currently_satisfied else "✗"
             ev = f" ({sg.evidence})" if sg.evidence else ""

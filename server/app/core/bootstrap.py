@@ -101,9 +101,17 @@ class AppBootstrap:
         if hasattr(self.app.state, "avatar_runtime"):
             try:
                 await self.app.state.avatar_runtime.stop_cleanup()
-                logger.info("  └─ AvatarMain 已清理")
+                logger.info("  ├─ AvatarMain 已清理")
             except Exception as e:
-                logger.warning(f"  └─ AvatarMain 清理失败: {e}")
+                logger.warning(f"  ├─ AvatarMain 清理失败: {e}")
+
+        # 清理所有执行器（容器池 shutdown、移除容器）
+        try:
+            from app.avatar.runtime.executor.factory import ExecutorFactory
+            ExecutorFactory.cleanup_all()
+            logger.info("  └─ ExecutorFactory 已清理")
+        except Exception as e:
+            logger.warning(f"  └─ ExecutorFactory 清理失败: {e}")
 
     # ── 各组件初始化方法 ──
 
@@ -183,6 +191,15 @@ class AppBootstrap:
 
     def _init_runtime(self, llm_client):
         logger.info("🚀 初始化 Avatar 运行时...")
+
+        # Probe feature flags before AvatarMain init
+        try:
+            from app.avatar.runtime.feature_flags import probe_modules
+            probe_modules()
+            logger.info("  ✅ Feature flags probed")
+        except Exception as ff_err:
+            logger.warning(f"  ⚠️ Feature flags probe failed: {ff_err}")
+
         global _avatar_main_instance
         self.app.state.avatar_runtime = AvatarMain(
             base_path=config.avatar_workspace,

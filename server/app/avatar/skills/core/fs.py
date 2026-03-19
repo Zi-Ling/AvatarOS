@@ -96,6 +96,16 @@ class FsReadSkill(BaseSkill[FsReadInput, FsReadOutput]):
         aliases=["read_file", "file.read", "open_file", "fs.read_file"],
     )
 
+    # Binary file extensions that should NOT be read in text mode
+    _BINARY_EXTENSIONS = frozenset({
+        ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".ppt",
+        ".pdf", ".zip", ".tar", ".gz", ".7z", ".rar",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico",
+        ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
+        ".exe", ".dll", ".so", ".dylib", ".bin", ".dat",
+        ".sqlite", ".db", ".woff", ".woff2", ".ttf", ".otf",
+    })
+
     async def _read_one(self, ctx: SkillContext, item: FsReadItem) -> tuple[bool, str, Any, int]:
         """读单个文件，返回 (success, message, content, size)"""
         target = ctx.resolve_path(item.path)
@@ -103,6 +113,26 @@ class FsReadSkill(BaseSkill[FsReadInput, FsReadOutput]):
             return False, f"File not found: {item.path}", None, 0
         if not target.is_file():
             return False, f"Not a file: {item.path}", None, 0
+
+        # Guard: reject text-mode reads on known binary file types
+        ext = target.suffix.lower()
+        if item.mode == "text" and ext in self._BINARY_EXTENSIONS:
+            hint = {
+                ".xlsx": "Use python.run with `import pandas; df = pandas.read_excel('path')`",
+                ".xls":  "Use python.run with `import pandas; df = pandas.read_excel('path')`",
+                ".docx": "Use python.run with `import docx; doc = docx.Document('path')`",
+                ".pdf":  "Use python.run with `import PyPDF2` to extract text",
+                ".png":  "Use python.run with `from PIL import Image; img = Image.open('path')`",
+                ".jpg":  "Use python.run with `from PIL import Image; img = Image.open('path')`",
+                ".jpeg": "Use python.run with `from PIL import Image; img = Image.open('path')`",
+            }.get(ext, "Use python.run with an appropriate library to process this binary file")
+            return (
+                False,
+                f"Cannot read binary file '{item.path}' ({ext}) in text mode. {hint}",
+                None,
+                0,
+            )
+
         size = target.stat().st_size
         if size > MAX_FILE_SIZE_BYTES:
             return False, f"File too large: {size / 1024 / 1024:.1f}MB", None, 0
@@ -111,6 +141,28 @@ class FsReadSkill(BaseSkill[FsReadInput, FsReadOutput]):
             if item.mode == "binary":
                 content = raw.hex()
             else:
+                # Second-layer guard: detect binary via magic bytes even if
+                # extension was not in _BINARY_EXTENSIONS (e.g. unknown ext)
+                if len(raw) >= 4:
+                    _MAGIC = {
+                        b'\x89PNG': "PNG image",
+                        b'%PDF': "PDF document",
+                        b'PK\x03\x04': "ZIP-based file (xlsx/docx/pptx/zip)",
+                        b'\xff\xd8\xff': "JPEG image",
+                        b'GIF8': "GIF image",
+                        b'\x7fELF': "ELF binary",
+                        b'MZ': "Windows executable",
+                        b'Rar!': "RAR archive",
+                    }
+                    for sig, desc in _MAGIC.items():
+                        if raw[:len(sig)] == sig:
+                            return (
+                                False,
+                                f"Binary file detected ({desc}): '{item.path}'. "
+                                f"Use python.run with an appropriate library to process this file.",
+                                None,
+                                0,
+                            )
                 content, actual_enc = _detect_and_decode(raw, item.encoding)
                 if actual_enc != item.encoding:
                     logger.info(
@@ -387,8 +439,16 @@ class FsListSkill(BaseSkill[FsListInput, FsListOutput]):
         try:
             items, total_files, total_dirs = [], 0, 0
             iterator = target.rglob("*") if params.recursive else target.iterdir()
+            # Use workspace-root-relative paths so planner can directly
+            # construct /workspace/{item.path} without guessing.
+            rel_base = ctx.base_path if ctx.base_path else target
             for p in iterator:
-                item = FsListItem(name=p.name, path=str(p.relative_to(target)), is_dir=p.is_dir())
+                try:
+                    item_path = p.relative_to(rel_base).as_posix()
+                except ValueError:
+                    # Fallback: if path is outside workspace root, use target-relative
+                    item_path = p.relative_to(target).as_posix()
+                item = FsListItem(name=p.name, path=item_path, is_dir=p.is_dir())
                 if p.is_file():
                     try:
                         item.size = p.stat().st_size

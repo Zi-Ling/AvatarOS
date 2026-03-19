@@ -49,6 +49,8 @@ Rules for slots:
 - Only include a slot key if the value is clearly present in the user input as a literal path/filename
 - Do NOT infer or hallucinate slot values
 - Do NOT extract pronouns or references like "this file", "that poem", "它", "这首诗" as slot values
+- Short continuation phrases like "还有txt", "再来个json", "also txt", "and csv too" are NOT file paths — they mean "repeat the previous task in a different format". Leave slots empty for these.
+- Bare format names (txt, json, csv, md, xlsx, png) without a directory path are NOT file paths — they are format requests. Leave slots empty.
 
 Examples:
 
@@ -66,6 +68,15 @@ Output: {{"domain": "code", "safety_level": "read_only", "slots": {{}}}}
 
 User: "把 hello world 写入 output.txt"
 Output: {{"domain": "file", "safety_level": "modify", "slots": {{"file_path": "output.txt"}}}}
+
+User: "还有txt"
+Output: {{"domain": "file", "safety_level": "modify", "slots": {{}}}}
+
+User: "再来个json版本"
+Output: {{"domain": "file", "safety_level": "modify", "slots": {{}}}}
+
+User: "also save as csv"
+Output: {{"domain": "file", "safety_level": "modify", "slots": {{}}}}
 """
 
 
@@ -77,11 +88,65 @@ class IntentExtractor:
     def __init__(self, llm_client: Any):
         self.llm = llm_client
 
+    # ── Continuation detection (rule-based, pre-LLM) ──────────────────
+    _CONTINUATION_PATTERNS = re.compile(
+        r'^(?:还有|再来[个一]|also|再给我[一个]*|and\s+(?:also\s+)?(?:save|export|generate)?)\s*'
+        r'(txt|json|csv|md|markdown|xlsx|xls|pdf|png|jpg|html|xml|yaml)\s*(?:版本|格式|文件)?$',
+        re.IGNORECASE,
+    )
+    _FORMAT_ONLY = re.compile(
+        r'^(txt|json|csv|md|markdown|xlsx|xls|pdf|png|jpg|html|xml|yaml)\s*$',
+        re.IGNORECASE,
+    )
+
+    def _detect_continuation(self, user_request: str) -> Optional[IntentSpec]:
+        """
+        Rule-based detection for short continuation phrases like "还有txt",
+        "再来个json版本", "also csv". Returns an IntentSpec with
+        metadata.is_continuation=True and metadata.requested_format set,
+        or None if not a continuation.
+        """
+        text = user_request.strip()
+        if len(text) > 30:
+            return None
+
+        m = self._CONTINUATION_PATTERNS.match(text) or self._FORMAT_ONLY.match(text)
+        if not m:
+            return None
+
+        fmt = m.group(1).lower()
+        # Normalize aliases
+        if fmt == "markdown":
+            fmt = "md"
+        if fmt == "text":
+            fmt = "txt"
+
+        logger.info(f"[IntentExtractor] Continuation detected: format={fmt}")
+        return IntentSpec(
+            id=str(uuid.uuid4()),
+            goal=user_request,
+            intent_type="task",
+            domain=IntentDomain.FILE,
+            safety_level=SafetyLevel.MODIFY,
+            raw_user_input=user_request,
+            params={},  # No file_path — it's a format request, not a path
+            metadata={
+                "source": "continuation_detector",
+                "is_continuation": True,
+                "requested_format": fmt,
+            },
+        )
+
     async def extract(self, user_request: str, history: List[Dict[str, str]] = None) -> IntentSpec:
         """
         意图提取：分类（domain + safety_level）+ typed slots 提取。
         goal 保持原始用户输入，代词消解由 ReferenceResolver + Planner 负责。
         """
+        # Rule-based continuation detection (before LLM call)
+        continuation = self._detect_continuation(user_request)
+        if continuation is not None:
+            return continuation
+
         prompt = SIMPLIFIED_INTENT_PROMPT.format(user_input=user_request)
 
         try:

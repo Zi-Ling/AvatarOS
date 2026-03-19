@@ -31,8 +31,14 @@ class GoalTracker:
     """
 
     # ── Goal split pattern ──────────────────────────────────────────────
+    # Chinese text often uses punctuation (，、；) instead of spaces before
+    # conjunctions.  The boundary must support: "，然后", "并保存，然后",
+    # "A接着B" (zero-width CJK boundary), as well as whitespace-delimited English.
     _GOAL_SPLIT_PATTERN = re.compile(
-        r'\s+(?:并且?|然后|接着|之后|and then|then also|after that|additionally)\s+',
+        r'(?:[\s，,、;；。]+|(?<=[\u4e00-\u9fff])|(?<=\w))'  # leading: punct / after CJK / after word char
+        r'(?:并且|然后|接着|之后|完成后'                       # Chinese conjunctions (NOT bare 并/再 — too ambiguous)
+        r'|and\s+then|then\s+also|after\s+that|additionally)' # English conjunctions
+        r'(?:[\s，,、;；]+|(?=[\u4e00-\u9fff])|(?=\w))',      # trailing: punct / before CJK / before word char
         re.IGNORECASE,
     )
 
@@ -80,11 +86,54 @@ class GoalTracker:
 
     # ── Goal decomposition ──────────────────────────────────────────────
 
+    # ── Complex goal heuristic signals ────────────────────────────────
+    _HIGH_LEVEL_VERBS = re.compile(
+        r'翻译|生成|合并|统计|绘图|导出|保存|转换|下载|上传|发送|分析|创建|编写',
+    )
+    _OUTPUT_TYPE_PATTERN = re.compile(
+        r'\b(?:docx|pptx|xlsx|png|jpg|pdf|csv|json|txt|md|html|xml)\b',
+        re.IGNORECASE,
+    )
+
+    # ── Chinese conversational prefix stripping ───────────────────────
+    # User instructions often start with conversational filler that adds
+    # noise to sub-goal coverage matching (e.g. "老板说要中文的简历 你把原先的").
+    # We strip these prefixes AFTER splitting so each sub-goal is cleaner.
+    _CJK_PREFIX_PATTERN = re.compile(
+        r'^(?:老板说|老板要|他说|她说|你|帮我|请你?|我要|我想|把)'
+        r'(?:要|说|把|将|先|再|去)?'
+        r'(?:[\s，,、]*)'
+        r'(?:原先的?|之前的?|现有的?|那个)?'
+        r'[\s，,、]*',
+    )
+
     def decompose_goal(self, goal: str) -> List[str]:
         """Split goal into sub-goals. Single-clause goals return [goal]."""
         parts = self._GOAL_SPLIT_PATTERN.split(goal)
         sub_goals = [p.strip() for p in parts if p and p.strip()]
-        return sub_goals if len(sub_goals) > 1 else [goal]
+        result = sub_goals if len(sub_goals) > 1 else [goal]
+
+        # ── Strip conversational prefixes from each sub-goal (Fix 4) ────
+        if len(result) > 1:
+            cleaned = []
+            for sg in result:
+                stripped = self._CJK_PREFIX_PATTERN.sub('', sg).strip()
+                # Only use stripped version if it still has meaningful content
+                cleaned.append(stripped if len(stripped) >= 2 else sg)
+            result = cleaned
+
+        # ── Lightweight complex-goal detection (observe only) ───────────
+        if len(result) == 1:
+            verb_count = len(self._HIGH_LEVEL_VERBS.findall(goal))
+            output_types = set(self._OUTPUT_TYPE_PATTERN.findall(goal.lower()))
+            if verb_count >= 2 or len(output_types) >= 2:
+                logger.info(
+                    f"[GoalTracker] complex_goal_suspected=True "
+                    f"(verbs={verb_count}, output_types={output_types}) "
+                    f"but regex produced 1 segment — goal: {goal!r}"
+                )
+
+        return result
 
     # ── Sub-goal coverage ───────────────────────────────────────────────
 
@@ -110,6 +159,75 @@ class GoalTracker:
             if not any(self._node_covers(n, sg) for n in successful_nodes):
                 uncovered.append(sg)
         return uncovered
+
+    # ── Deliverable coverage (planning perspective) ─────────────────────
+
+    def get_unsatisfied_deliverables(
+        self,
+        deliverables: List[Any],
+        graph: 'ExecutionGraph',
+    ) -> List[Any]:
+        """
+        Return deliverables not yet produced by any succeeded node (planning perspective).
+
+        This is a lightweight check: a deliverable is considered "produced" if any
+        succeeded node wrote a file whose extension matches the deliverable format.
+        Final verification (verifier pass) is done by CompletionGate, not here.
+        """
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+
+        if not deliverables:
+            return []
+
+        successful_nodes = [
+            n for n in graph.nodes.values() if n.status == NodeStatus.SUCCESS
+        ]
+        if not successful_nodes:
+            return list(deliverables)
+
+        # Collect all output paths from succeeded nodes
+        produced_exts: Set[str] = set()
+        produced_paths: Set[str] = set()
+        for node in successful_nodes:
+            for v in (node.outputs or {}).values():
+                if isinstance(v, str) and "." in v:
+                    ext = v.rsplit(".", 1)[-1].lower()
+                    produced_exts.add(ext)
+                    produced_paths.add(v.lower())
+                elif isinstance(v, dict):
+                    path = v.get("path") or v.get("file_path") or ""
+                    if path and "." in path:
+                        ext = path.rsplit(".", 1)[-1].lower()
+                        produced_exts.add(ext)
+                        produced_paths.add(path.lower())
+                elif isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, dict):
+                            path = item.get("path") or item.get("file_path") or ""
+                            if path and "." in path:
+                                ext = path.rsplit(".", 1)[-1].lower()
+                                produced_exts.add(ext)
+                                produced_paths.add(path.lower())
+
+            # Also check output_contract in metadata
+            oc = (node.metadata or {}).get("output_contract")
+            if oc:
+                oc_list = oc if isinstance(oc, list) else [oc]
+                for item in oc_list:
+                    if isinstance(item, dict):
+                        p = item.get("path", "")
+                    else:
+                        p = getattr(item, "path", "")
+                    if p and "." in p:
+                        produced_exts.add(p.rsplit(".", 1)[-1].lower())
+                        produced_paths.add(p.lower())
+
+        unsatisfied = []
+        for d in deliverables:
+            fmt = d.format.lower()
+            if fmt not in produced_exts:
+                unsatisfied.append(d)
+        return unsatisfied
 
     def _node_covers(self, node: Any, sub_goal: str) -> bool:
         sg_lower = sub_goal.lower()
@@ -159,18 +277,42 @@ class GoalTracker:
            OR "answer-produced pattern" matches (web.search ok + llm.fallback ok).
         3. No CONTINUE signals (missing write, recent failure).
         4. For multi-step goals: at least 2 distinct skill types succeeded.
+
+        Hard override: if ALL expected deliverable formats have been produced
+        by succeeded nodes, short-circuit regardless of other conditions.
+        This prevents the Planner from adding unnecessary verification steps
+        after all files are already written.
         """
         from app.avatar.runtime.graph.models.step_node import NodeStatus
-
-        # Condition 1
-        uncovered = self.get_uncovered_sub_goals(sub_goals, graph)
-        if uncovered:
-            return None
 
         successful_nodes = [
             n for n in graph.nodes.values() if n.status == NodeStatus.SUCCESS
         ]
         if not successful_nodes:
+            return None
+
+        # ── Hard override: deliverable-level short-circuit ──────────────
+        # If all expected deliverable formats are produced, the task is done
+        # regardless of whether Planner has said FINISH. This is a hard
+        # constraint that doesn't depend on prompt engineering.
+        _ng = env_context.get("normalized_goal")
+        _deliverables = getattr(_ng, "deliverables", None) if _ng else None
+        if _deliverables:
+            unsatisfied = self.get_unsatisfied_deliverables(_deliverables, graph)
+            if not unsatisfied:
+                # Also require sub-goal coverage to avoid premature exit
+                uncovered = self.get_uncovered_sub_goals(sub_goals, graph)
+                if not uncovered:
+                    _fmts = [d.format for d in _deliverables]
+                    logger.info(
+                        f"[TerminalEvidence] Deliverable short-circuit: "
+                        f"all formats produced ({_fmts})"
+                    )
+                    return f"all deliverables produced ({_fmts}), all sub-goals covered"
+
+        # Condition 1
+        uncovered = self.get_uncovered_sub_goals(sub_goals, graph)
+        if uncovered:
             return None
 
         # Condition 4: multi-step goal guard

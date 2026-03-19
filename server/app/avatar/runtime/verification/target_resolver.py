@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 class TargetResolver:
 
+    # 非文件产出型 goal_type：不需要文件验证目标
+    _NON_FILE_GOAL_TYPES = frozenset({"query", "data_analysis", "general"})
+
     def resolve_targets(
         self,
         normalized_goal: NormalizedGoal,
@@ -31,6 +34,14 @@ class TargetResolver:
         workspace: "SessionWorkspace",
     ) -> List[VerificationTarget]:
         targets: List[VerificationTarget] = []
+
+        # 非文件产出型任务：不提取文件 target，让 CompletionGate 走 _no_verifier_verdict
+        if normalized_goal.goal_type in self._NON_FILE_GOAL_TYPES and not normalized_goal.expected_artifacts:
+            logger.debug(
+                f"[TargetResolver] Non-file goal_type={normalized_goal.goal_type}, "
+                f"no expected_artifacts — skipping file target resolution"
+            )
+            return targets
 
         # --- Priority 1: expected_artifacts from NormalizedGoal ---
         for art in normalized_goal.expected_artifacts:
@@ -62,10 +73,22 @@ class TargetResolver:
             logger.debug(f"[TargetResolver] {len(targets)} target(s) from graph output contract")
             return targets
 
+        # --- Priority 2.4: __artifact_paths__ from ArtifactCollector (ground truth) ---
+        targets = self._from_artifact_paths(graph)
+        if targets:
+            logger.debug(f"[TargetResolver] {len(targets)} target(s) from artifact paths")
+            return targets
+
         # --- Priority 2.5: extract actual file paths from fs.write/fs.copy/fs.move node outputs ---
         targets = self._from_fs_node_outputs(graph, workspace)
         if targets:
             logger.debug(f"[TargetResolver] {len(targets)} target(s) from fs node outputs")
+            return targets
+
+        # --- Priority 2.6: extract file paths from python.run __OUTPUT__ protocol ---
+        targets = self._from_code_node_outputs(graph)
+        if targets:
+            logger.debug(f"[TargetResolver] {len(targets)} target(s) from code node outputs")
             return targets
 
         # --- Priority 3: workspace snapshot diff (new files in output/) ---
@@ -115,7 +138,11 @@ class TargetResolver:
                 reverse=True,
             )
             for node in succeeded_sorted[:5]:  # inspect last 5 succeeded nodes
-                contract = getattr(node, "output_contract", None) or {}
+                # output_contract is stored in node.metadata, not as a direct attribute
+                contract = (node.metadata or {}).get("output_contract") or {}
+                # SkillOutputContract dataclass → convert to dict if needed
+                if not isinstance(contract, dict):
+                    contract = {k: getattr(contract, k, None) for k in ("file_path", "output_path", "artifact_ref", "artifact_id", "mime_type")} if hasattr(contract, "file_path") else {}
                 file_path = contract.get("file_path") or contract.get("output_path")
                 artifact_ref = contract.get("artifact_ref") or contract.get("artifact_id")
                 mime_type = contract.get("mime_type")
@@ -136,6 +163,38 @@ class TargetResolver:
                     ))
         except Exception as e:
             logger.debug(f"[TargetResolver] output_contract extraction failed: {e}")
+        return targets
+
+    def _from_artifact_paths(
+        self,
+        graph: "ExecutionGraph",
+    ) -> List[VerificationTarget]:
+        """
+        从所有成功节点的 __artifact_paths__（由 ArtifactCollector 写入）提取文件产物。
+
+        这是最可靠的来源：ArtifactCollector 在节点执行后扫描 workspace diff，
+        把实际新增/修改的文件路径写入 node.outputs["__artifact_paths__"]。
+        不依赖 _output() 协议或 stdout 解析。
+        """
+        targets: List[VerificationTarget] = []
+        try:
+            from app.avatar.runtime.graph.models.step_node import NodeStatus
+            for node in graph.nodes.values():
+                if node.status != NodeStatus.SUCCESS:
+                    continue
+                art_paths = (node.outputs or {}).get("__artifact_paths__")
+                if not isinstance(art_paths, list):
+                    continue
+                for p in art_paths:
+                    if isinstance(p, str) and p.strip():
+                        targets.append(VerificationTarget(
+                            kind="file",
+                            path=p.strip(),
+                            mime_type=self._guess_mime(p),
+                            producer_step_id=node.id,
+                        ))
+        except Exception as e:
+            logger.debug(f"[TargetResolver] artifact_paths extraction failed: {e}")
         return targets
 
     # fs skill 名称集合，用于从节点输出中提取实际写入的文件路径
@@ -179,6 +238,83 @@ class TargetResolver:
                     ))
         except Exception as e:
             logger.debug(f"[TargetResolver] fs node output extraction failed: {e}")
+        return targets
+
+    _CODE_SKILLS = {"python.run"}
+
+    def _from_code_node_outputs(
+        self,
+        graph: "ExecutionGraph",
+    ) -> List[VerificationTarget]:
+        """
+        从已成功的 python.run 节点中提取文件产物。
+
+        来源优先级：
+        1. node.outputs["file_path"]（_save_binary 写的单文件）
+        2. node.outputs["stdout"] 中的 __OUTPUT__:{"__file__": ...} 协议行
+        3. node.outputs["output"] 如果是 list，遍历其中的文件路径字符串
+        4. node.metadata["artifact_semantic"] 中已提取的路径
+        """
+        import json as _json
+
+        targets: List[VerificationTarget] = []
+        try:
+            from app.avatar.runtime.graph.models.step_node import NodeStatus
+            for node in graph.nodes.values():
+                if node.status != NodeStatus.SUCCESS:
+                    continue
+                if node.capability_name not in self._CODE_SKILLS:
+                    continue
+
+                outputs = node.outputs or {}
+                seen_paths: set = set()
+
+                # Source 1: explicit file_path field
+                fp = outputs.get("file_path")
+                if fp and isinstance(fp, str) and fp.strip():
+                    seen_paths.add(fp.strip())
+
+                # Source 2: __OUTPUT__ protocol lines in stdout
+                stdout = outputs.get("stdout") or ""
+                if isinstance(stdout, str):
+                    for line in stdout.splitlines():
+                        stripped = line.strip()
+                        if stripped.startswith("__OUTPUT__:"):
+                            payload = stripped[len("__OUTPUT__:"):]
+                            try:
+                                obj = _json.loads(payload)
+                                if isinstance(obj, dict):
+                                    path = obj.get("__file__") or obj.get("path")
+                                    if path and isinstance(path, str):
+                                        seen_paths.add(path.strip())
+                            except (ValueError, TypeError):
+                                pass
+
+                # Source 3: output list containing file path strings
+                out_val = outputs.get("output")
+                if isinstance(out_val, list):
+                    for item in out_val:
+                        if isinstance(item, str) and "." in item:
+                            seen_paths.add(item.strip())
+
+                # Source 4: artifact_semantic metadata (set by _extract_artifact_semantic)
+                art_semantic = (node.metadata or {}).get("artifact_semantic")
+                if isinstance(art_semantic, list):
+                    for entry in art_semantic:
+                        if isinstance(entry, dict):
+                            p = entry.get("path")
+                            if p and isinstance(p, str):
+                                seen_paths.add(p.strip())
+
+                for path in seen_paths:
+                    targets.append(VerificationTarget(
+                        kind="file",
+                        path=path,
+                        mime_type=self._guess_mime(path),
+                        producer_step_id=node.id,
+                    ))
+        except Exception as e:
+            logger.debug(f"[TargetResolver] code node output extraction failed: {e}")
         return targets
 
     def _from_workspace_snapshot(
@@ -243,7 +379,9 @@ class TargetResolver:
             for node in reversed(list(graph.nodes.values())):
                 if node.status != NodeStatus.SUCCESS:
                     continue
-                contract = getattr(node, "output_contract", None) or {}
+                contract = (node.metadata or {}).get("output_contract") or {}
+                if not isinstance(contract, dict):
+                    contract = {}
                 fp = contract.get("file_path") or contract.get("output_path")
                 if fp and str(fp) == file_path:
                     return node.id
@@ -268,6 +406,9 @@ class TargetResolver:
             ".pdf":  "application/pdf",
             ".yaml": "application/yaml",
             ".yml":  "application/yaml",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xls":  "application/vnd.ms-excel",
+            ".parquet": "application/x-parquet",
         }
         dot = path.rfind(".")
         if dot == -1:

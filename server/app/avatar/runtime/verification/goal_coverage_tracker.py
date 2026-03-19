@@ -56,6 +56,7 @@ class GoalCoverageTracker:
             for sg in (normalized_goal.sub_goals or [normalized_goal.original])
         ]
         total = len(sub_goals)
+        deliverable_total = len(normalized_goal.deliverables) if normalized_goal.deliverables else 0
         return GoalCoverageSummary(
             goal=normalized_goal.original,
             sub_goals=sub_goals,
@@ -63,6 +64,8 @@ class GoalCoverageTracker:
             total_count=total,
             coverage_ratio=0.0,
             last_updated_at=time.time(),
+            deliverable_satisfied_count=0,
+            deliverable_total_count=deliverable_total,
         )
 
     def update_after_round(
@@ -71,6 +74,7 @@ class GoalCoverageTracker:
         graph: "ExecutionGraph",
         workspace: "SessionWorkspace",
         verifier_results: Optional[List[VerificationResult]] = None,
+        env_context: Optional[dict] = None,
     ) -> GoalCoverageSummary:
         """
         Update coverage summary after one ReAct round.
@@ -116,6 +120,75 @@ class GoalCoverageTracker:
                             new_evidence = f"fs_write:{node.id}:{written_path}"
                             break
 
+            # Priority 1.6: python.run 产物识别
+            # python.run 不走 _output() 协议时，ArtifactCollector 会把实际产物路径
+            # 写入 __artifact_paths__，或 output_processor 会写 artifact_semantic。
+            _CODE_SKILLS = {"python.run"}
+            if not new_satisfied:
+                for node in succeeded_nodes:
+                    if node.capability_name not in _CODE_SKILLS:
+                        continue
+                    outputs = node.outputs or {}
+                    metadata = node.metadata or {}
+                    # Check __artifact_paths__ (set by ArtifactCollector)
+                    art_paths = outputs.get("__artifact_paths__")
+                    if isinstance(art_paths, list) and art_paths:
+                        new_satisfied = True
+                        new_evidence = f"code_artifact:{node.id}:{art_paths[0]}"
+                        break
+                    # Check artifact_semantic (set by output_processor)
+                    art_sem = metadata.get("artifact_semantic")
+                    if isinstance(art_sem, list) and art_sem:
+                        new_satisfied = True
+                        p = art_sem[0].get("path", "") if isinstance(art_sem[0], dict) else ""
+                        new_evidence = f"code_semantic:{node.id}:{p}"
+                        break
+                    # Check explicit file_path in outputs
+                    fp = outputs.get("file_path")
+                    if fp and isinstance(fp, str) and fp.strip():
+                        new_satisfied = True
+                        new_evidence = f"code_file:{node.id}:{fp}"
+                        break
+
+            # Priority 1.7: llm.fallback / 纯文本产出型 skill 成功即覆盖
+            # 对于翻译/问答/总结等任务，llm.fallback 成功且有非空输出即判定覆盖
+            _TEXT_SKILLS = {"llm.fallback"}
+            if not new_satisfied:
+                for node in succeeded_nodes:
+                    if node.capability_name not in _TEXT_SKILLS:
+                        continue
+                    outputs = node.outputs or {}
+                    # llm.fallback 输出有 result/output/content 字段
+                    text_out = (
+                        outputs.get("result")
+                        or outputs.get("output")
+                        or outputs.get("content")
+                        or ""
+                    )
+                    if isinstance(text_out, str) and len(text_out.strip()) > 10:
+                        new_satisfied = True
+                        new_evidence = f"text_output:{node.id}:{len(text_out)}chars"
+                        break
+
+            # Priority 1.8: python.run stdout-only 成功（无文件产物但有 stdout 输出）
+            # 覆盖"列出文件名并打印"等 info-display 任务
+            if not new_satisfied:
+                for node in succeeded_nodes:
+                    if node.capability_name not in _CODE_SKILLS:
+                        continue
+                    outputs = node.outputs or {}
+                    stdout = outputs.get("stdout") or ""
+                    output_val = outputs.get("output")
+                    # 有 stdout 输出或有非空 output（list/str）即判定覆盖
+                    if isinstance(stdout, str) and len(stdout.strip()) > 5:
+                        new_satisfied = True
+                        new_evidence = f"code_stdout:{node.id}:{len(stdout)}chars"
+                        break
+                    if output_val is not None and output_val != "" and output_val != []:
+                        new_satisfied = True
+                        new_evidence = f"code_output:{node.id}:{type(output_val).__name__}"
+                        break
+
             # Priority 2: verifier result binding
             if not new_satisfied and verifier_results:
                 for result in verifier_results:
@@ -149,10 +222,24 @@ class GoalCoverageTracker:
         summary.coverage_ratio = satisfied / total
         summary.last_updated_at = time.time()
 
+        # Update deliverable counts from env_context
+        if env_context:
+            del_states = env_context.get("deliverable_states", {})
+            if del_states:
+                summary.deliverable_satisfied_count = sum(
+                    1 for ds in del_states.values()
+                    if hasattr(ds, "status") and ds.status == "satisfied"
+                )
+
         logger.debug(
             f"[GoalCoverageTracker] Coverage: {satisfied}/{summary.total_count} "
             f"({summary.coverage_ratio:.0%})"
         )
+        if summary.deliverable_total_count > 0:
+            logger.debug(
+                f"[GoalCoverageTracker] Coverage: {summary.satisfied_count}/{summary.total_count} sub-goals, "
+                f"{summary.deliverable_satisfied_count}/{summary.deliverable_total_count} deliverables"
+            )
         return summary
 
     # ------------------------------------------------------------------

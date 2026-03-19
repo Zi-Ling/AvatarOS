@@ -74,15 +74,20 @@ class CompletionGate:
         coverage_summary: GoalCoverageSummary,
         session_id: str,
         step_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> GateDecision:
         """
         Run all applicable verifiers and return a GateDecision.
+
+        When deliverables exist, targets are grouped per-deliverable so each
+        deliverable gets its own verifier set. This enables per-deliverable
+        failure attribution and repair.
 
         Side effects:
         - All VerificationResult objects written to StepTraceStore.
         - Write failures set trace_hole=True (never raises).
         """
-        verifiers = self._registry.get_verifiers(normalized_goal, targets)
+        verifiers = self._registry.get_verifiers(normalized_goal, targets, context=context)
         decision = GateDecision(verdict=GateVerdict.UNCERTAIN)
 
         # --- No verifiers case ---
@@ -90,15 +95,69 @@ class CompletionGate:
             return self._no_verifier_verdict(normalized_goal, coverage_summary)
 
         # --- Run verifiers ---
+        # Verifier-target compatibility: type-specific verifiers (json_parseable,
+        # csv_has_data, image_openable) should only run against targets whose
+        # file extension matches. file_exists and text_contains are universal.
+        _CONDITION_VALID_EXTS = {
+            "json_parseable": {".json"},
+            "csv_has_data": {".csv", ".tsv"},
+            "image_openable": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"},
+        }
+
         all_results: List[VerificationResult] = []
+        per_deliverable_results: Dict[str, List[VerificationResult]] = {}
+
+        # Build deliverable-to-extension mapping for grouping
+        _deliverable_ext_map: Dict[str, str] = {}
+        if normalized_goal.deliverables:
+            for d in normalized_goal.deliverables:
+                _deliverable_ext_map[d.id] = f".{d.format.lower()}"
+
         for verifier in verifiers:
+            ctype = getattr(getattr(verifier, "spec", None), "condition_type", None)
+            ctype_val = ctype.value if ctype else ""
+            valid_exts = _CONDITION_VALID_EXTS.get(ctype_val)
+
             for target in targets:
+                # Skip if verifier is type-specific and target extension doesn't match
+                if valid_exts and target.path:
+                    dot = target.path.rfind(".")
+                    ext = target.path[dot:].lower().split("?")[0] if dot != -1 else ""
+                    if ext not in valid_exts:
+                        logger.debug(
+                            f"[CompletionGate] Skipping {ctype_val} verifier for "
+                            f"{ext} file: {target.path}"
+                        )
+                        continue
+
                 result = await self._run_one(verifier, target, workspace)
                 all_results.append(result)
                 self._write_trace(session_id, step_id, result, decision)
 
+                # Group result by deliverable if applicable
+                if _deliverable_ext_map and target.path:
+                    dot = target.path.rfind(".")
+                    t_ext = target.path[dot:].lower().split("?")[0] if dot != -1 else ""
+                    for d_id, d_ext in _deliverable_ext_map.items():
+                        if t_ext == d_ext:
+                            per_deliverable_results.setdefault(d_id, []).append(result)
+                            break
+
+        # Log per-deliverable results if available
+        if per_deliverable_results:
+            for d_id, d_results in per_deliverable_results.items():
+                passed = sum(1 for r in d_results if r.status == VerificationStatus.PASSED)
+                failed = sum(1 for r in d_results if r.status == VerificationStatus.FAILED)
+                logger.info(
+                    f"[CompletionGate] Deliverable {d_id}: "
+                    f"{passed} passed, {failed} failed out of {len(d_results)} checks"
+                )
+
         # --- Apply verdict rules ---
+        had_trace_hole = decision.trace_hole
         decision = self._apply_verdict(all_results, coverage_summary, normalized_goal)
+        if had_trace_hole:
+            decision.trace_hole = True
 
         # --- LLM Judge for UNCERTAIN (Phase 3) ---
         if decision.verdict == GateVerdict.UNCERTAIN and self._llm_judge is not None:
@@ -112,11 +171,23 @@ class CompletionGate:
     # Verdict logic
     # ------------------------------------------------------------------
 
+    # 非文件产出型 goal_type：不需要文件验证，节点成功即可
+    _NON_FILE_GOAL_TYPES = frozenset({"query", "data_analysis", "general"})
+
     def _no_verifier_verdict(
         self,
         normalized_goal: NormalizedGoal,
         coverage_summary: GoalCoverageSummary,
     ) -> GateDecision:
+        # 非文件产出型任务（列表/展示/分析/问答）：没有 target 是正常的
+        # 只要有节点成功执行过，就判定 PASS
+        if normalized_goal.goal_type in self._NON_FILE_GOAL_TYPES:
+            return GateDecision(
+                verdict=GateVerdict.PASS,
+                reason=f"Non-file goal_type={normalized_goal.goal_type}, "
+                       f"no file targets expected — execution success is sufficient",
+            )
+
         if normalized_goal.risk_level == RiskLevel.HIGH:
             return GateDecision(
                 verdict=GateVerdict.UNCERTAIN,

@@ -64,11 +64,14 @@ class NodeRunner:
         workspace: Optional['SessionWorkspace'] = None,
         artifact_collector: Optional['ArtifactCollector'] = None,
         trace_store: Optional['StepTraceStore'] = None,
+        action_plane_proxy: Optional[Any] = None,
     ):
         self.executor = executor
         self.workspace = workspace
         self.artifact_collector = artifact_collector
         self.trace_store = trace_store
+        # Optional ActionPlane proxy for governance-wrapped execution (Req 8.1, 8.6)
+        self._action_plane_proxy = action_plane_proxy
         # Recovery policy engine for intelligent retry/escalation decisions
         from app.avatar.runtime.graph.managers.recovery_policy_engine import RecoveryPolicyEngine
         self._recovery_engine = RecoveryPolicyEngine()
@@ -211,10 +214,13 @@ class NodeRunner:
                         )
                         artifact_ids = [a.artifact_id for a in collected]
                         if artifact_ids:
-                            # 把 artifact_ids 挂到 node outputs
+                            # 把 artifact_ids 和文件路径挂到 node outputs
                             if node.outputs is None:
                                 node.outputs = {}
                             node.outputs["__artifacts__"] = artifact_ids
+                            node.outputs["__artifact_paths__"] = [
+                                a.local_path for a in collected if a.local_path
+                            ]
                             context.set_node_output(node.id, node.outputs)
                             logger.info(
                                 f"[NodeRunner] Node {node.id} produced "
@@ -283,6 +289,41 @@ class NodeRunner:
                     f"[NodeRunner] Node {node.id} failed (attempt {node.retry_count + 1}): {error_message}"
                 )
 
+                # Classify error and generate PlanningHint
+                _error_classification = None
+                try:
+                    from app.avatar.runtime.graph.types.error_classification import ErrorClassifier
+                    from app.avatar.runtime.graph.types.planning_hint import PlanningHint
+                    _classifier = ErrorClassifier()
+                    _error_classification = _classifier.classify(e)
+                    _hint = PlanningHint(
+                        error_class=_error_classification.error_class.value,
+                        error_code=_error_classification.error_code.value,
+                        suggested_fix=f"Error in node {node.id}: {error_message[:200]}",
+                    )
+                    # Inject into env_context
+                    if hasattr(context, 'env') and isinstance(context.env, dict):
+                        hints = context.env.setdefault("planning_hints", [])
+                        hints.append({
+                            "error_class": _hint.error_class,
+                            "error_code": _hint.error_code,
+                            "suggested_fix": _hint.suggested_fix,
+                            "node_id": node.id,
+                        })
+                    # Emit debug event
+                    try:
+                        from app.avatar.runtime.observability.debug_event_stream import get_debug_event_stream
+                        import time as _time_mod
+                        get_debug_event_stream().emit(
+                            "created", "ErrorClassification",
+                            f"err_{node.id}_{int(_time_mod.time() * 1000)}",
+                            f"class={_error_classification.error_class.value}, code={_error_classification.error_code.value}",
+                        )
+                    except Exception:
+                        pass
+                except Exception as _clf_err:
+                    logger.debug("[NodeRunner] ErrorClassifier failed: %s", _clf_err)
+
                 should_retry = node.retry_count < node.retry_policy.max_retries
 
                 # 不可重试错误（如 4xx HTTP）直接跳过重试
@@ -293,23 +334,46 @@ class NodeRunner:
                 # Consult RecoveryPolicyEngine for intelligent retry decisions
                 if should_retry:
                     try:
-                        from types import SimpleNamespace
-                        _step_state = SimpleNamespace(
-                            id=node.id,
-                            status="failed",
-                            retry_count=node.retry_count,
-                            error_message=error_message,
-                            input_snapshot_json=None,
-                        )
-                        _decision = self._recovery_engine.decide_step_recovery(
-                            _step_state, max_retries=node.retry_policy.max_retries
-                        )
-                        if _decision == "escalate_to_replan":
-                            logger.info(
-                                f"[NodeRunner] RecoveryPolicy: escalate_to_replan for {node.id} "
-                                f"(error: {error_message[:120]})"
+                        # Prefer ErrorClassification-based decision if available
+                        if _error_classification is not None:
+                            _decision_result = self._recovery_engine.decide_from_classification(
+                                _error_classification,
+                                step_id=node.id,
                             )
-                            should_retry = False
+                            if _decision_result.decision in ("fail_fast", "skip"):
+                                logger.info(
+                                    "[NodeRunner] RecoveryPolicy (classified): %s for %s "
+                                    "(class=%s, code=%s)",
+                                    _decision_result.decision, node.id,
+                                    _decision_result.error_class.value,
+                                    _decision_result.error_code.value,
+                                )
+                                should_retry = False
+                            elif _decision_result.decision == "replan_subgraph":
+                                logger.info(
+                                    "[NodeRunner] RecoveryPolicy: replan_subgraph for %s",
+                                    node.id,
+                                )
+                                should_retry = False
+                        else:
+                            # Fallback to legacy string-based recovery
+                            from types import SimpleNamespace
+                            _step_state = SimpleNamespace(
+                                id=node.id,
+                                status="failed",
+                                retry_count=node.retry_count,
+                                error_message=error_message,
+                                input_snapshot_json=None,
+                            )
+                            _decision = self._recovery_engine.decide_step_recovery(
+                                _step_state, max_retries=node.retry_policy.max_retries
+                            )
+                            if _decision == "escalate_to_replan":
+                                logger.info(
+                                    f"[NodeRunner] RecoveryPolicy: escalate_to_replan for {node.id} "
+                                    f"(error: {error_message[:120]})"
+                                )
+                                should_retry = False
                     except Exception as _rpe:
                         logger.warning(f"[NodeRunner] RecoveryPolicyEngine failed: {_rpe}")
 

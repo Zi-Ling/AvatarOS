@@ -174,6 +174,9 @@ class PlannerGuard:
         # 4. Cycle detection (Requirement 31.12, 31.13)
         self._check_cycles(patch, graph, result)
 
+        # 5. Deliverable coverage front-gate (warning only)
+        self._check_deliverable_coverage(patch, context, result)
+
         if result.approved:
             logger.info(
                 f"[PlannerGuard] Patch approved: "
@@ -466,6 +469,55 @@ class PlannerGuard:
                         "Patch would create a cycle in the execution graph"
                     )
                     return
+
+    def _check_deliverable_coverage(
+        self,
+        patch: 'GraphPatch',
+        context: Optional[Dict[str, Any]],
+        result: ValidationResult,
+    ) -> None:
+        """
+        Front-gate only: if FINISH and deliverables exist but no actions in the
+        entire graph claimed any deliverable coverage, emit a warning.
+        Does NOT hard-block — final judgment is CompletionGate's responsibility.
+        """
+        from app.avatar.runtime.graph.models.graph_patch import PatchOperation
+
+        if not context:
+            return
+
+        # Only check on FINISH patches
+        is_finish = any(a.operation == PatchOperation.FINISH for a in patch.actions)
+        if not is_finish:
+            return
+
+        normalized_goal = context.get("normalized_goal")
+        if not normalized_goal or not getattr(normalized_goal, "deliverables", None):
+            return
+
+        deliverable_ids = {d.id for d in normalized_goal.deliverables}
+        if not deliverable_ids:
+            return
+
+        # Check if any node in the patch or existing graph claimed deliverables
+        claimed: set = set()
+        for action in patch.actions:
+            if action.operation == PatchOperation.ADD_NODE and action.node:
+                claimed.update(getattr(action.node, "intended_deliverables", []) or [])
+
+        # Also check deliverable_states in env_context
+        del_states = context.get("deliverable_states", {})
+        for ds in del_states.values():
+            if hasattr(ds, "status") and ds.status == "satisfied":
+                claimed.add(ds.deliverable_id)
+
+        unclaimed = deliverable_ids - claimed
+        if unclaimed and not del_states:
+            # No deliverable states tracked yet and no claims — warn
+            result.add_warning(
+                f"FINISH issued but {len(unclaimed)} deliverable(s) have no coverage claim: "
+                f"{sorted(unclaimed)}. CompletionGate will verify actual production."
+            )
 
     @classmethod
     def from_config(cls, config_dict: Dict[str, Any], approval_manager: Optional['ApprovalService'] = None) -> 'PlannerGuard':

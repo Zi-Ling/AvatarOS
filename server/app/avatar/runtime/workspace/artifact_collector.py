@@ -112,11 +112,27 @@ class ArtifactCollector:
         if not new_files:
             return []
 
+        # Filter out framework debug artifacts (input/ directory contains
+        # step_N_output.json, manifest.json etc. injected by CodeInjectorMixin)
+        _DEBUG_DIRS = {"input", "logs", "tmp"}
+        deliverable_files: List[Path] = []
+        for fp in new_files:
+            try:
+                rel = fp.relative_to(workspace.root)
+                if rel.parts and rel.parts[0] in _DEBUG_DIRS:
+                    continue
+            except ValueError:
+                pass
+            deliverable_files.append(fp)
+
+        if not deliverable_files:
+            return []
+
         from app.avatar.runtime.graph.storage.artifact_store import ArtifactType
 
         collected: List[CollectedArtifact] = []
 
-        for file_path in new_files:
+        for file_path in deliverable_files:
             try:
                 artifact = await self._promote_file(
                     file_path=file_path,

@@ -134,7 +134,7 @@ class GraphPlanner:
         Requirements: 6.1, 19.1, 19.2, 19.3, 19.4, 19.5
         """
         # Convert ExecutionGraph to Task model
-        task = self._graph_to_task(graph)
+        task = self._graph_to_task(graph, env_context=env_context)
         
         # Call InteractiveLLMPlanner (preserves all optimizations)
         step = await self.interactive_planner.next_step(task, env_context)
@@ -166,7 +166,7 @@ class GraphPlanner:
         patch.metadata["cost"] = cost_usd
         return patch
     
-    def _graph_to_task(self, graph: 'ExecutionGraph') -> Task:
+    def _graph_to_task(self, graph: 'ExecutionGraph', env_context: Optional[Dict[str, Any]] = None) -> Task:
         """
         Convert ExecutionGraph to Task model.
         
@@ -206,8 +206,16 @@ class GraphPlanner:
                 # when generating downstream code (prevents type mismatch errors)
                 _output_type = type(output_val).__name__
                 _output_contract = (node.metadata or {}).get("output_contract")
+                _output_schema = (node.metadata or {}).get("output_schema")
                 _type_hint = ""
-                if _output_contract:
+                if _output_schema:
+                    _kind = _output_schema.get("semantic_kind", "")
+                    _fields = _output_schema.get("fields", [])
+                    _field_summary = ", ".join(
+                        f"{f['field_name']}:{f['field_type']}" for f in _fields[:5]
+                    )
+                    _type_hint = f" [output_kind={_kind}, fields={{{_field_summary}}}, python_type={_output_type}]"
+                elif _output_contract:
                     _vk = getattr(_output_contract, "value_kind", None)
                     if _vk:
                         _type_hint = f" [output_type={_vk.value if hasattr(_vk, 'value') else _vk}, python_type={_output_type}]"
@@ -228,15 +236,34 @@ class GraphPlanner:
                 from app.avatar.planner.models import StepStatus, StepResult
                 step.status = StepStatus.FAILED
                 _err_msg = node.error_message or "Unknown error"
-                # Classify the error to help planner make better replan decisions
+                # Consume PlanningHint from env_context if available
                 _err_classification = ""
-                _err_lower = _err_msg.lower()
-                if any(kw in _err_lower for kw in ("attributeerror", "typeerror", "keyerror")):
-                    _err_classification = " [error_type=type_mismatch: upstream output type does not match downstream code expectations. Check the actual python_type of upstream step outputs and adjust data access accordingly.]"
-                elif any(kw in _err_lower for kw in ("modulenotfounderror", "importerror")):
-                    _err_classification = " [error_type=missing_dependency]"
-                elif any(kw in _err_lower for kw in ("filenotfounderror", "no such file")):
-                    _err_classification = " [error_type=file_not_found]"
+                _ctx = env_context or {}
+                _hints = _ctx.get("planning_hints", [])
+                _node_hint = None
+                for h in _hints:
+                    if isinstance(h, dict) and h.get("node_id") == node.id:
+                        _node_hint = h
+                        break
+                if _node_hint:
+                    _ec = _node_hint.get("error_class", "")
+                    _ecode = _node_hint.get("error_code", "")
+                    _fix = _node_hint.get("suggested_fix", "")
+                    _err_classification = f" [error_class={_ec}, error_code={_ecode}]"
+                    if _fix:
+                        _err_classification += f" [fix_hint={_fix[:200]}]"
+                # No fallback: raw exception stack parsing removed.
+                # PlanningHint is the sole structured error context source.
+                # When no hint is available the planner sees only the raw
+                # error_message, which is sufficient for LLM-based reasoning.
+                # Append type_mismatch_hint if present
+                _tmh = _ctx.get("type_mismatch_hint")
+                if _tmh and isinstance(_tmh, dict):
+                    _err_classification += f" [type_mismatch_hint={_tmh}]"
+                # Append envelope_targets if present
+                _et = _ctx.get("envelope_targets")
+                if _et:
+                    _err_classification += f" [envelope_targets={_et}]"
                 step.result = StepResult(
                     success=False,
                     error=_err_msg + _err_classification,
