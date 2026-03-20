@@ -1,6 +1,6 @@
 # AvatarOS Roadmap
 
-> Building a local-first AI agent runtime that plans and executes real tasks on your machine.
+> Building a local-first autonomous AI agent runtime that plans and executes real tasks on your machine.
 
 ---
 
@@ -22,13 +22,13 @@
 - [x] PlannerGuard — validates planner output before applying
 - [x] Parallel node execution with retry and backoff
 - [x] Executor factory — routes skills to correct executor
-- [x] Docker sandbox for Python execution (`python.run`)
-- [x] Playwright browser automation (`browser.run`)
+- [x] Docker/Podman sandbox for Python execution (`python.run`)
+- [x] Playwright browser automation with helper API (`browser.run`)
 - [x] Session workspace — per-task isolated file system
 - [x] Artifact tracking and file registry
 - [x] Execution graph UI (real-time visualization)
 - [x] Scheduler with cron-style triggers
-- [x] Knowledge base (store + semantic retrieval)
+- [x] Knowledge base (store + semantic retrieval via ChromaDB)
 
 ---
 
@@ -44,10 +44,15 @@
 - [x] Task control — pause / resume / cancel
 - [x] Approval flow UI for high-risk skill execution
 - [x] Artifact display layer in chat
+- [x] Policy Engine — permission checks, path protection, budget control
+- [x] Verification system — LLMJudge + RepairLoop auto-repair
+- [x] Self-monitoring — StuckDetector, LoopDetector, BudgetGuard
+- [x] Multi-provider web search (Brave / Google CSE / Tavily / SearXNG / DuckDuckGo)
+- [x] 30+ built-in Skills with typed I/O and side-effect declarations
 
 ---
 
-## � Phase 3 — Stability & Us&er Experience (In Progress)
+## 🔧 Phase 3 — Stability & User Experience (In Progress)
 
 - [ ] End-to-end test coverage for core task scenarios
 - [ ] Better error messages surfaced to the user (not just "execution failed")

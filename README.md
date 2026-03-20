@@ -5,14 +5,14 @@
 
 <h1 align="center">AvatarOS</h1>
 <p align="center">
-  A local AI agent runtime that plans, executes, and automates — on your own machine.
+  A local-first autonomous AI agent runtime — plans, executes, and automates real tasks on your machine.
 </p>
 
 ---
 
 **AvatarOS is not a chatbot.**
 
-It is a local-first AI agent runtime. You describe a goal in natural language, and it plans and executes multi-step tasks using a skill system — running code in sandboxes, browsing the web, managing files, and recovering from failures automatically.
+It is an autonomous Agent Runtime system. You describe a goal in natural language, and it automatically plans execution steps, invokes various Skills (file operations, code execution, web search, browser automation, etc.), and ensures output quality through a verification system.
 
 > Give AI the ability to *do things*, not just talk.
 
@@ -20,16 +20,20 @@ It is a local-first AI agent runtime. You describe a goal in natural language, a
 
 ---
 
-## ✨ What it can do (today)
+## ✨ What it can do
 
 - **Natural language → task execution** — describe what you want, it plans and runs it step by step
 - **Graph-based execution engine** — tasks run as a dynamic DAG, nodes added incrementally by the planner
 - **ReAct loop** — plan → execute → observe → replan, fully automatic
-- **Skill system** — `python.run`, `browser.run` (Playwright), `net.get/download`, `fs.*`, `state.*`, and more
-- **Sandboxed execution** — Python runs in Docker containers, browser runs in isolated Chromium contexts
+- **30+ built-in Skills** — `python.run`, `browser.run` (Playwright), `web.search`, `net.*`, `fs.*`, `memory.*`, `state.*`, `llm.fallback`, and more
+- **Sandboxed execution** — Python runs in Docker/Podman containers, browser runs in isolated Playwright contexts
+- **Multi-provider web search** — Brave → Google CSE → Tavily → SearXNG → DuckDuckGo, automatic fallback
+- **Policy Engine** — permission checks, path protection, budget control, and human approval flow for high-risk operations
+- **Verification system** — LLMJudge evaluates output quality, RepairLoop auto-fixes on failure
+- **Self-monitoring** — stuck detection, loop detection, budget guard to prevent runaway execution
 - **Web UI** — chat interface, real-time execution graph visualization, workspace file explorer
 - **Scheduler** — recurring and scheduled task automation
-- **Knowledge base** — store and retrieve domain knowledge
+- **Knowledge base** — store and retrieve domain knowledge via vector search
 - **Session workspace** — per-task isolated file system, artifacts tracked and accessible
 
 ---
@@ -38,12 +42,14 @@ It is a local-first AI agent runtime. You describe a goal in natural language, a
 
 | Layer | Stack |
 |---|---|
-| Frontend | Next.js + Electron |
-| Backend | FastAPI + Python |
-| LLM | DeepSeek / OpenAI compatible |
-| Execution | Docker (Python sandbox) + Playwright (browser) |
-| DB | SQLite (SQLModel) |
-| Vector store | ChromaDB |
+| Frontend | Next.js + TypeScript + Tailwind CSS + Electron |
+| Backend | FastAPI + Uvicorn + Python |
+| Real-time | Socket.IO (python-socketio) |
+| LLM | DeepSeek / OpenAI / Ollama (any OpenAI-compatible API) |
+| Execution | Docker / Podman (Python sandbox) + Playwright (browser) |
+| Database | SQLite + Alembic (auto-migration) |
+| Vector Store | ChromaDB |
+| Web Search | Brave / Google CSE / Tavily / SearXNG / DuckDuckGo |
 
 ---
 
@@ -83,27 +89,31 @@ cd AvatarOS
 
 # 2. Backend
 cd server
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Configure
+# 3. Install Playwright browser (required for browser.run)
+playwright install chromium
+
+# 4. Configure
 cp .env.example .env
-# Edit .env — fill in LLM_API_KEY and LLM_BASE_URL
+# Edit .env — fill in LLM_API_KEY, LLM_MODEL, LLM_BASE_URL
 
-# 4. Download embedding model (~1.1GB, required for semantic search)
-# If you're in China, set mirror first:
-# $env:HF_ENDPOINT='https://hf-mirror.com'
-python scripts/download_embedding_model.py
+# 5. Build sandbox image (required for python.run)
+docker build -f Dockerfile.sandbox -t avatar-sandbox:latest .
 
-# 5. Start backend
+# 6. Start backend
 python main.py
 
-# 6. Frontend (new terminal)
+# 7. Frontend (new terminal)
 cd ../client
 npm install
 npm run dev
 ```
 
-Requires: Python 3.10+, Node.js 18+, Docker (for Python sandbox), an OpenAI-compatible LLM API key.
+Requires: Python 3.11+, Node.js 18+, Docker or Podman (for sandbox), an OpenAI-compatible LLM API key.
 
 ---
 
@@ -114,20 +124,25 @@ User Input
     ↓
 Intent Router  (classify → task / chat / question)
     ↓
-Planner  (LLM → next step as JSON, one at a time)
+Planner  (LLM → ReAct: plan one step at a time)
     ↓
-PlannerGuard  (validate patch before applying)
+PolicyEngine  (permission check / budget control / approval flow)
     ↓
 Graph Runtime  (incremental DAG execution)
     ↓
 Node Runner  (parallel execution + retry)
     ↓
 Executor Factory
-    ├── SandboxExecutor  → Docker container  (python.run)
-    ├── BrowserSandboxExecutor  → Playwright  (browser.run)
-    └── ProcessExecutor  → subprocess  (net.*, fs.*, ...)
+    ├── LocalExecutor       → direct execution  (SAFE skills)
+    ├── ProcessExecutor     → process isolation  (READ/WRITE skills)
+    ├── SandboxExecutor     → Docker/Podman      (python.run)
+    └── BrowserSandboxExecutor → Playwright      (browser.run)
     ↓
-Skill Engine  (typed input/output, side-effect declarations)
+Skill Engine  (30+ skills, typed I/O, side-effect declarations)
+    ↓
+Verification Gate  (LLMJudge → RepairLoop if needed)
+    ↓
+Self Monitor  (stuck / loop / budget detection)
     ↓
 Planner observes result → decides next step or FINISH
 ```
@@ -139,18 +154,33 @@ Planner observes result → decides next step or FINISH
 - [x] End-to-end ReAct task execution pipeline
 - [x] Incremental graph-based planner (one step at a time)
 - [x] PlannerGuard — validates and rate-limits planner output
-- [x] Docker sandbox for Python execution
-- [x] Playwright browser automation (`browser.run`)
-- [x] File, HTTP, state skills
+- [x] Docker/Podman sandbox for Python execution
+- [x] Playwright browser automation with helper API
+- [x] 30+ built-in Skills (file, HTTP, search, code, memory, state)
+- [x] Multi-provider web search with automatic fallback
+- [x] Policy Engine — permission checks, path protection, approval flow
+- [x] Verification system — LLMJudge + RepairLoop
+- [x] Self-monitoring — stuck detection, loop detection, budget guard
 - [x] Session workspace with per-task isolation
 - [x] Artifact tracking and file registry
 - [x] Web UI — chat, execution graph, workspace explorer
-- [x] Scheduler
-- [x] Knowledge base
+- [x] Scheduler with cron-style triggers
+- [x] Knowledge base with vector search (ChromaDB)
 - [x] OS environment injection (platform-aware paths)
 - [x] 4xx error non-retry + semantic failure signals
+- [x] Task control — pause / resume / cancel
+- [x] Approval flow UI for high-risk skill execution
 - [ ] GUI automation (screen reading / clicking) — planned
 - [ ] Multi-agent support — planned
+
+---
+
+## 📖 Documentation
+
+Full documentation available at [`server/docs/`](./server/docs/):
+
+- [English Documentation](./server/docs/en/index.md)
+- [中文文档](./server/docs/zh/index.md)
 
 ---
 

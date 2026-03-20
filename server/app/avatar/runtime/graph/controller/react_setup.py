@@ -226,7 +226,7 @@ class ReactSetupMixin:
                 logger.warning(f"[GraphController] ClarificationEngine failed: {_ce_err}")
 
         # 18.A3: ComplexityAnalyzer
-        if self._complexity_analyzer is not None:
+        if self._complexity_analyzer is not None and not env_context.get("_skip_complexity"):
             try:
                 if _task_def is not None:
                     _complexity = self._complexity_analyzer.classify_from_task_definition(_task_def)

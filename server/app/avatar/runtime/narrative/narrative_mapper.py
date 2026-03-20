@@ -122,6 +122,50 @@ DEFAULT_MAPPINGS: Dict[str, EventMapping] = {
         status="running",
         template="已收到确认，继续执行",
     ),
+    # Recovery events (ReAct loop)
+    "recovery.truncation": EventMapping(
+        event_type="recovery_truncation",
+        level="minor",
+        phase="executing",
+        status="retrying",
+        template="输出过长被截断，正在简化后重试（第 {retry_count} 次）",
+    ),
+    "recovery.schema": EventMapping(
+        event_type="recovery_schema",
+        level="minor",
+        phase="executing",
+        status="retrying",
+        template="参数不完整，正在修正后重试（第 {retry_count} 次）",
+    ),
+    "recovery.dedup": EventMapping(
+        event_type="recovery_dedup",
+        level="minor",
+        phase="executing",
+        status="retrying",
+        template="检测到重复步骤，正在调整策略",
+    ),
+    # Phase-level events (PhasedPlanner)
+    "phase.start": EventMapping(
+        event_type="phase_started",
+        level="major",
+        phase="executing",
+        status="running",
+        template="{semantic_label}",
+    ),
+    "phase.completed": EventMapping(
+        event_type="phase_completed",
+        level="major",
+        phase="executing",
+        status="completed",
+        template="{semantic_label}",
+    ),
+    "phase.failed": EventMapping(
+        event_type="phase_failed",
+        level="major",
+        phase="executing",
+        status="failed",
+        template="{semantic_label}",
+    ),
 }
 
 # ── Generic fallback mapping for unregistered event types ────────────────

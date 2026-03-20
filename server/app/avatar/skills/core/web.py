@@ -242,15 +242,13 @@ class SearXNGProvider(SearchProvider):
         return bool(self._url)
 
     async def _health_check(self) -> bool:
-        """首次调用时做健康检查，结果缓存"""
+        """首次调用时做健康检查，结果缓存。只检查连通性，不做完整搜索。"""
         if self._healthy is not None:
             return self._healthy
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(
-                    f"{self._url}/search",
-                    params={"q": "ping", "format": "json"},
-                )
+                # 只请求首页检查连通性，不做搜索（搜索可能因引擎慢而超时）
+                resp = await client.get(f"{self._url}/")
                 self._healthy = resp.status_code == 200
         except Exception:
             self._healthy = False
@@ -268,8 +266,6 @@ class SearXNGProvider(SearchProvider):
                 params={
                     "q": query,
                     "format": "json",
-                    "time_range": "day",
-                    "engines": "google,bing,duckduckgo",
                 },
             )
             resp.raise_for_status()

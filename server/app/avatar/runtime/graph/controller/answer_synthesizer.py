@@ -84,7 +84,13 @@ class AnswerSynthesizer:
 
             # ── Collect short text outputs (e.g. llm.fallback) ─────
             if node.capability_name in ("llm.fallback", "llm.chat"):
-                answer = outputs.get("content") or outputs.get("text") or ""
+                answer = (
+                    outputs.get("result")
+                    or outputs.get("response_zh")
+                    or outputs.get("content")
+                    or outputs.get("text")
+                    or ""
+                )
                 if isinstance(answer, str) and 10 < len(answer) < 1500:
                     text_snippets.append(answer.strip())
 

@@ -160,7 +160,7 @@ class ContainerPool:
       broken_set    — Dict[str, ContainerEntry]，BROKEN 状态，待清理
     """
 
-    HEALTH_CHECK_INTERVAL = 120  # 秒，后台健康检查间隔
+    HEALTH_CHECK_INTERVAL = 30   # 秒，后台健康检查间隔（从 120 降低，加快恢复）
     MAX_TASK_COUNT        = 100  # 单容器最大复用次数后强制轮换（预留）
 
     def __init__(
@@ -168,7 +168,7 @@ class ContainerPool:
         client: Any,
         image: str,
         runtime: Optional[str] = None,
-        pool_size: int = 2,
+        pool_size: int = 3,
         max_idle_time: int = 300,
         mem_limit: str = "256m",
         cpu_quota: int = 50000,
@@ -197,6 +197,7 @@ class ContainerPool:
         self._replenish_lock = threading.Lock()  # 防止并发补建堆积
         self._health_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._container_ready_event = threading.Event()  # acquire 等待信号，替代 sleep 轮询
 
         logger.info(
             f"[ContainerPool] Initialized (image={image}, runtime={runtime}, "
@@ -279,12 +280,22 @@ class ContainerPool:
     def acquire(self, timeout: int = 10) -> Any:
         """
         从 READY 队列获取容器，返回 docker container 对象。
+
+        三态逻辑：
+        1. ready 有容器 → 直接拿
+        2. creating 中有容器 → Event.wait() 等待（替代 sleep 轮询）
+        3. 全空（ready=0, creating=0）→ 同步 self-rescue spawn
         超时或无健康容器时抛出 SandboxFailure(SANDBOX_DEAD)。
         """
         deadline = time.time() + timeout
 
-        while time.time() < deadline:
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+
             entry = None
+            need_rescue = False
 
             with self._lock:
                 if self.ready_queue:
@@ -292,19 +303,97 @@ class ContainerPool:
                     entry.state = ContainerState.BUSY
                     entry.task_count += 1
                     self.busy_set[entry.container_id] = entry
+                elif not self.creating_set:
+                    # 全空：ready=0, creating=0 → 需要 self-rescue
+                    need_rescue = True
 
             if entry is not None:
                 logger.debug(f"[ContainerPool] Acquired {entry.short_id}")
+                # 清除 event 以便下次 wait
+                self._container_ready_event.clear()
                 return entry.container
 
-            # 没有 READY 容器，等一下再试
-            time.sleep(0.05)
+            if need_rescue:
+                # 同步 self-rescue：直接在当前线程创建容器
+                logger.warning(
+                    "[ContainerPool] Pool empty (ready=0, creating=0), "
+                    "attempting synchronous self-rescue spawn"
+                )
+                rescue_container = self._sync_spawn_rescue(remaining)
+                if rescue_container is not None:
+                    return rescue_container
+                # rescue 失败，继续等待（可能后台线程补建了）
 
-        raise SandboxFailure(
-            SandboxFailureReason.SANDBOX_DEAD,
+            # 有 creating 中的容器，或 rescue 失败 → 等 Event 信号
+            wait_time = min(remaining, 2.0)
+            self._container_ready_event.wait(timeout=wait_time)
+            self._container_ready_event.clear()
+
+        # 超时
+        with self._lock:
+            ready_n = len(self.ready_queue)
+            creating_n = len(self.creating_set)
+            broken_n = len(self.broken_set)
+
+        msg = (
             f"No healthy container available after {timeout}s "
-            f"(ready={len(self.ready_queue)}, creating={len(self.creating_set)})"
+            f"(ready={ready_n}, creating={creating_n}, broken={broken_n})"
         )
+        if broken_n > 0 and ready_n == 0 and creating_n == 0:
+            msg += " — all containers broken, pool exhausted"
+
+        raise SandboxFailure(SandboxFailureReason.SANDBOX_DEAD, msg)
+
+    def _sync_spawn_rescue(self, timeout_remaining: float) -> Optional[Any]:
+        """同步创建一个容器用于 self-rescue，不走后台线程。
+
+        返回 container 对象（已标记 BUSY），或 None 表示失败。
+        """
+        try:
+            container = None
+            for attempt in range(self._SPAWN_RETRIES + 1):
+                try:
+                    container = self._create_raw_container()
+                    break
+                except _DOCKER_TRANSIENT_ERRORS as e:
+                    if attempt < self._SPAWN_RETRIES:
+                        time.sleep(min(self._SPAWN_RETRY_DELAY, timeout_remaining / 2))
+                    else:
+                        logger.error(f"[ContainerPool] Self-rescue spawn failed after retries: {e}")
+                        return None
+                except Exception as e:
+                    logger.error(f"[ContainerPool] Self-rescue spawn failed: {e}")
+                    return None
+
+            if container is None:
+                return None
+
+            # 等待容器 running
+            for _ in range(20):
+                container.reload()
+                if container.status == "running":
+                    break
+                time.sleep(0.5)
+            else:
+                logger.error(f"[ContainerPool] Self-rescue container did not start")
+                try:
+                    container.remove(force=True)
+                except Exception:
+                    pass
+                return None
+
+            entry = ContainerEntry(container=container, state=ContainerState.BUSY)
+            entry.task_count = 1
+            entry.last_heartbeat_at = time.time()
+            with self._lock:
+                self.busy_set[entry.container_id] = entry
+
+            logger.info(f"[ContainerPool] Self-rescue spawned {entry.short_id}")
+            return container
+
+        except Exception as e:
+            logger.error(f"[ContainerPool] Self-rescue failed: {e}")
+            return None
 
     def release(self, container: Any, failed: bool = False):
         """
@@ -539,6 +628,9 @@ class ContainerPool:
                 with self._lock:
                     self.creating_set.pop(entry.container_id, None)
                     self.ready_queue.append(entry)
+
+                # 通知 acquire() 有新容器可用
+                self._container_ready_event.set()
 
                 logger.info(f"[ContainerPool] Spawned {entry.short_id} ({reason})")
 

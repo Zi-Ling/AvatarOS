@@ -55,6 +55,10 @@ class ComplexityResult:
     requires_decomposition: bool = False
     schema_version: str = "1.0.0"
 
+    # Phased planning signals (populated by LLM for complex tasks)
+    estimated_phases: int = 1
+    phase_hints: List[str] = field(default_factory=list)
+
     # Legacy compat fields
     is_complex: bool = False
     connector_score: float = 0.0
@@ -120,8 +124,11 @@ class ComplexityAnalyzer:
                 )
             return ComplexityResult(
                 task_type="complex",
+                detection_channel="data",
                 requires_decomposition=True,
                 is_complex=True,
+                estimated_phases=num_deliverables,
+                phase_hints=names,
                 reason=f"complex: {num_deliverables} heterogeneous deliverables",
             )
 
@@ -152,6 +159,13 @@ class ComplexityAnalyzer:
     # Core: LLM-based classification
     # ------------------------------------------------------------------
 
+    # Phase hint blocklist: overly abstract / methodology-oriented hints
+    _ABSTRACT_HINT_BLOCKLIST = frozenset({
+        "需求分析", "系统设计", "详细设计", "测试", "部署", "维护",
+        "planning", "design", "testing", "deployment", "maintenance",
+        "analysis", "review", "setup", "init", "cleanup", "finish",
+    })
+
     def _classify_via_llm(self, text: str) -> ComplexityResult:
         """Single LLM call for all classification.
 
@@ -168,6 +182,12 @@ class ComplexityAnalyzer:
                 reason="no LLM available, default simple (planner self-regulates)",
             )
 
+        # Smart truncation: front goal (700 chars) + tail constraints/deliverables (300 chars)
+        if len(text) > 1000:
+            truncated = text[:700] + "\n...\n" + text[-300:]
+        else:
+            truncated = text
+
         prompt = (
             "Classify this task as exactly one of: simple, template_batch, complex\n\n"
             "Definitions:\n"
@@ -177,10 +197,25 @@ class ComplexityAnalyzer:
             "Each item is independent and uses the same pattern.\n"
             "- complex: multi-phase task needing planning and decomposition "
             "(e.g. 'build an e-commerce system', 'read file then analyze then generate report')\n\n"
-            f"Task: {text[:500]}\n\n"
+            "## Few-shot examples\n\n"
+            "Task: 帮我写一首关于春天的诗\n"
+            "type: simple\ncount: 0\nphases: 1\nphase_hints:\n\n"
+            "Task: 为公司5个部门各生成一份月度报告\n"
+            "type: template_batch\ncount: 5\nphases: 1\nphase_hints:\n\n"
+            "Task: 搭建一个带用户认证的博客系统，包含文章管理和评论功能\n"
+            "type: complex\ncount: 0\nphases: 3\n"
+            "phase_hints: 搭建用户认证与数据库模型, 实现文章CRUD与API接口, 实现评论功能与前端页面\n\n"
+            "## Constraints\n"
+            "- phase_hints MUST be concrete deliverable-oriented descriptions, NOT abstract methodology "
+            "(bad: '需求分析, 系统设计, 测试'; good: '搭建数据库模型, 实现API接口, 构建前端页面')\n"
+            "- phases must be between 1 and 10\n"
+            "- type must be exactly one of: simple, template_batch, complex\n\n"
+            f"Task: {truncated}\n\n"
             "Reply in this exact format (nothing else):\n"
             "type: <simple|template_batch|complex>\n"
-            "count: <number if template_batch, 0 otherwise>"
+            "count: <number if template_batch, 0 otherwise>\n"
+            "phases: <number of phases if complex, 1 otherwise>\n"
+            "phase_hints: <comma-separated short phase descriptions if complex, empty otherwise>"
         )
         try:
             raw = self._llm_client.call(prompt).strip().lower()
@@ -194,27 +229,35 @@ class ComplexityAnalyzer:
 
     @staticmethod
     def _parse_llm_response(raw: str, original_text: str) -> ComplexityResult:
-        """Parse LLM classification response."""
-        # Extract type
+        """Parse LLM classification response with post-processing validation."""
+        import re
+
+        _VALID_TYPES = {"simple", "template_batch", "complex"}
+
+        # Extract type — strict matching on "type:" line first
         task_type = "simple"
-        if "template_batch" in raw:
+        type_match = re.search(r'type:\s*(simple|template_batch|complex)', raw)
+        if type_match:
+            task_type = type_match.group(1)
+        elif "template_batch" in raw:
             task_type = "template_batch"
         elif "complex" in raw:
             task_type = "complex"
         elif "simple" in raw:
             task_type = "simple"
         else:
-            # Unrecognized → default simple
             logger.debug("[ComplexityAnalyzer] LLM returned unexpected: %s", raw)
             return ComplexityResult(
                 task_type="simple",
-                reason=f"LLM returned unrecognized output, default simple",
+                reason="LLM returned unrecognized output, default simple",
             )
 
+        # Validate task_type
+        if task_type not in _VALID_TYPES:
+            task_type = "simple"
+
         if task_type == "template_batch":
-            # Extract count
             count = 0
-            import re
             count_match = re.search(r'count:\s*(\d+)', raw)
             if count_match:
                 count = int(count_match.group(1))
@@ -232,12 +275,41 @@ class ComplexityAnalyzer:
             )
 
         if task_type == "complex":
+            # Extract and validate phase count (clamp to 1-10)
+            estimated_phases = 1
+            phase_hints: List[str] = []
+            phases_match = re.search(r'phases:\s*(\d+)', raw)
+            if phases_match:
+                estimated_phases = max(1, min(10, int(phases_match.group(1))))
+            hints_match = re.search(r'phase_hints:\s*(.+)', raw)
+            if hints_match:
+                hints_raw = hints_match.group(1).strip()
+                if hints_raw and hints_raw.lower() not in ("empty", "none", "n/a", ""):
+                    phase_hints = [h.strip() for h in hints_raw.split(",") if h.strip()]
+
+            # Post-processing: validate phase_hints quality
+            phase_hints = ComplexityAnalyzer._validate_phase_hints(phase_hints)
+
+            # If all hints were rejected, downgrade to simple
+            if estimated_phases >= 3 and not phase_hints:
+                logger.debug(
+                    "[ComplexityAnalyzer] All phase_hints rejected as abstract, "
+                    "downgrading complex → simple"
+                )
+                return ComplexityResult(
+                    task_type="simple",
+                    detection_channel="llm",
+                    reason="LLM classified as complex but phase_hints too abstract, downgraded to simple",
+                )
+
             return ComplexityResult(
                 task_type="complex",
                 detection_channel="llm",
                 requires_decomposition=True,
                 is_complex=True,
-                reason="LLM classified as complex",
+                estimated_phases=estimated_phases,
+                phase_hints=phase_hints,
+                reason=f"LLM classified as complex (phases={estimated_phases})",
             )
 
         return ComplexityResult(
@@ -245,6 +317,22 @@ class ComplexityAnalyzer:
             detection_channel="llm",
             reason="LLM classified as simple",
         )
+
+    @classmethod
+    def _validate_phase_hints(cls, hints: List[str]) -> List[str]:
+        """Filter out overly abstract / methodology-oriented phase hints.
+
+        Returns only concrete, deliverable-oriented hints.
+        Hints shorter than 4 chars or matching the blocklist are rejected.
+        """
+        valid = []
+        for h in hints:
+            if len(h) < 4:
+                continue
+            if h.lower() in cls._ABSTRACT_HINT_BLOCKLIST:
+                continue
+            valid.append(h)
+        return valid
 
     # ------------------------------------------------------------------
     # Legacy backward-compatible API

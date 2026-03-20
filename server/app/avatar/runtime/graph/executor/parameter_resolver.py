@@ -9,6 +9,7 @@ core execution logic.
 """
 
 from __future__ import annotations
+import json as _json
 from typing import Dict, List, Any, Optional, TYPE_CHECKING
 import logging
 
@@ -91,7 +92,39 @@ class ParameterResolverMixin:
         if edge.transformer_name:
             value = self._apply_transformer(edge.transformer_name, value, edge)
 
+        # Auto-coerce JSON strings to native Python objects.
+        # DAG mode: upstream stdout is often a JSON string that the downstream
+        # skill expects as list/dict (e.g. fs.write expects writes: List[...]).
+        value = self._try_json_coerce(value)
+
         return value
+
+    @staticmethod
+    def _try_json_coerce(value: Any) -> Any:
+        """Attempt to deserialize a JSON string to a Python object.
+
+        Only acts on str values that look like JSON arrays or objects.
+        Returns the original value unchanged on any failure or non-string input.
+        """
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return value
+        # Only attempt for values that look like JSON containers
+        if stripped[0] not in ('[', '{'):
+            return value
+        try:
+            parsed = _json.loads(stripped)
+            if isinstance(parsed, (list, dict)):
+                logger.debug(
+                    "[ParameterResolver] Auto-coerced JSON string (%d chars) → %s",
+                    len(stripped), type(parsed).__name__,
+                )
+                return parsed
+            return value
+        except (_json.JSONDecodeError, ValueError):
+            return value
 
     def _lookup_field(
         self,

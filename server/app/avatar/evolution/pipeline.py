@@ -121,6 +121,7 @@ class EvolutionPipeline:
         task_type: str,
         sub_goals: List[SubGoalResult],
         decision_basis: str = "",
+        controller_verdict: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         """
@@ -161,6 +162,7 @@ class EvolutionPipeline:
                 task_id=task_id,
                 sub_goals=sub_goals,
                 decision_basis=decision_basis,
+                controller_verdict=controller_verdict,
             )
             self._trace_collector.record_outcome(
                 trace_id=trace.trace_id,

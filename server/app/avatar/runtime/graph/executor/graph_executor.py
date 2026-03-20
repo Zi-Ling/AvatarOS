@@ -184,6 +184,14 @@ class GraphExecutor(
             resolved_params = self._resolve_parameters(graph, node, context)
             final_params = {**node.params, **resolved_params}
 
+            # Auto-inject search results into llm.fallback context
+            # When Planner calls llm.fallback after web.search but doesn't pass
+            # context (or can't due to token limits), we inject it automatically.
+            if node.capability_name == "llm.fallback" and not final_params.get("context"):
+                _search_context = self._find_search_results(graph)
+                if _search_context:
+                    final_params["context"] = _search_context
+
             # P1: Write SkillInputSchema to node metadata
             self._write_input_schema(node)
 
@@ -281,6 +289,19 @@ class GraphExecutor(
             node.metadata["execution_latency"] = latency
             logger.error(f"[GraphExecutor] Node {node.id} failed: {e}", exc_info=True)
             raise
+
+    @staticmethod
+    def _find_search_results(graph: 'ExecutionGraph') -> Optional[str]:
+        """Find the most recent successful web.search output in the graph."""
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+
+        for node in reversed(list(graph.nodes.values())):
+            if node.capability_name == "web.search" and node.status == NodeStatus.SUCCESS:
+                outputs = node.outputs or {}
+                text = outputs.get("output") or ""
+                if isinstance(text, str) and len(text) > 20:
+                    return text
+        return None
 
     async def _offload_large_outputs(
         self,

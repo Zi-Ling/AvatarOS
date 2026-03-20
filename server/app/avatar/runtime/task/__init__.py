@@ -36,6 +36,8 @@ from .phased_planner import (
     GoalPlan,
     PhasePlan,
     PhasedPlanner,
+    PhaseAcceptancePolicy,
+    PhaseAcceptanceResult,
 )
 
 __all__ = [
@@ -66,4 +68,6 @@ __all__ = [
     "PhasePlan",
     "GoalPlan",
     "PhasedPlanner",
+    "PhaseAcceptancePolicy",
+    "PhaseAcceptanceResult",
 ]

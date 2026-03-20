@@ -15,6 +15,14 @@ class FallbackInput(SkillInput):
     user_message: str = Field(..., description="Original user message (raw input). Parameter name: user_message", alias=None)
     intent: Optional[str] = Field(None, description="Inferred intent label (optional).")
     reason: Optional[str] = Field(None, description="Internal failure reason. DO NOT expose to user.")
+    context: Optional[str] = Field(
+        None,
+        description=(
+            "Optional upstream context (e.g. web.search results, previous step output). "
+            "When provided, LLM will synthesize an answer using this context instead of "
+            "generating a fallback reply."
+        ),
+    )
 
     model_config = {"populate_by_name": True}
 
@@ -57,7 +65,9 @@ class LLMFallbackSkill(BaseSkill[FallbackInput, FallbackOutput]):
         description=(
             "Use this skill when you need to ask the user a question or lack required information to proceed. "
             "Also handles executable text tasks (translation, summarization, rewriting, etc.) directly. "
-            "Required parameter: user_message (the message/question to present to the user)."
+            "When 'context' is provided (e.g. search results from web.search), synthesizes an answer from that context. "
+            "Required parameter: user_message (the message/question to present to the user). "
+            "Optional parameter: context (upstream data like search results to synthesize answer from)."
         ),
         input_model=FallbackInput,
         output_model=FallbackOutput,
@@ -86,12 +96,59 @@ class LLMFallbackSkill(BaseSkill[FallbackInput, FallbackOutput]):
     async def run(self, ctx: SkillContext, params: FallbackInput) -> FallbackOutput:
         llm_client = self._get_llm_client(ctx)
 
+        # 有上游 context（如搜索结果）→ 基于 context 合成回答
+        if params.context:
+            return await self._synthesize_from_context(llm_client, params)
+
         # 可执行的文本任务 → 直接执行，不走兜底回复
         if self._is_executable_text_task(params.user_message):
             return await self._execute_text_task(llm_client, params)
 
         # 兜底回复流程
         return await self._fallback_reply(llm_client, params)
+
+    async def _synthesize_from_context(self, llm_client, params: FallbackInput) -> FallbackOutput:
+        """基于上游 context（搜索结果等）合成回答，而非生成兜底回复"""
+        # 截断过长的 context，防止超出 token 限制
+        context = params.context
+        if len(context) > 6000:
+            context = context[:6000] + "\n...[truncated]"
+
+        prompt = (
+            "You are an information synthesis assistant. Your job is to extract information "
+            "from the SEARCH RESULTS below to answer the user's question.\n\n"
+            "CORE PRINCIPLE:\n"
+            "The search results ARE your source of truth. Even if information is scattered "
+            "across multiple snippets, piece together a complete answer.\n\n"
+            "RULES:\n"
+            "1. Answer in the SAME LANGUAGE as the user's question.\n"
+            "2. Extract concrete data from snippets: version numbers, dates, prices, specs, names.\n"
+            "3. If multiple snippets contain relevant info, combine them into one coherent answer.\n"
+            "4. Give the answer directly. Do NOT say 'Based on the search results...' or similar.\n"
+            "5. Append source URLs at the end if available in the search results.\n"
+            "6. ONLY say you cannot answer if the search results are COMPLETELY unrelated to the question. "
+            "If snippets contain even partial relevant information, you MUST answer.\n\n"
+            f"SEARCH RESULTS:\n{context}\n\n"
+            f"USER QUESTION: {params.user_message}"
+        )
+        try:
+            raw, usage = llm_client.call_with_usage(prompt)
+            text = raw.strip() if isinstance(raw, str) else str(getattr(raw, "content", raw)).strip()
+            return FallbackOutput(
+                success=True,
+                result=text,
+                response_zh=text,
+                response_en=text,
+                message="Answer synthesized from upstream context",
+                llm_usage=usage or {},
+                llm_model=getattr(llm_client.config, 'model', None),
+            )
+        except Exception as e:
+            return FallbackOutput(
+                success=False,
+                retryable=True,
+                message=f"Context synthesis failed: {str(e)[:200]}",
+            )
 
     async def _execute_text_task(self, llm_client, params: FallbackInput) -> FallbackOutput:
         """直接执行文本任务，返回 LLM 原始结果"""

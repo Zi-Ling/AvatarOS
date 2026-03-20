@@ -11,7 +11,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from app.avatar.evolution.models import (
     FailureCategory,
@@ -39,24 +39,40 @@ class OutcomeClassifier:
     根据子目标状态判定 OutcomeStatus 和 FailureCategory。
     """
 
+    # Controller verdict → OutcomeStatus mapping
+    _VERDICT_MAP: Dict[str, OutcomeStatus] = {
+        "success": OutcomeStatus.SUCCESS,
+        "uncertain_success": OutcomeStatus.SUCCESS,
+        "partial_success": OutcomeStatus.PARTIAL,
+        "failed": OutcomeStatus.FAILED,
+        "cancelled": OutcomeStatus.FAILED,
+        "uncertain_terminal": OutcomeStatus.FAILED,
+    }
+
     def classify(
         self,
         trace_id: str,
         task_id: str,
         sub_goals: List[SubGoalResult],
         decision_basis: str = "",
+        controller_verdict: Optional[str] = None,
     ) -> OutcomeRecord:
         """
         根据子目标结果列表分类任务结果。
 
-        分类规则：
-        - 任何子目标被安全策略拦截 → unsafe
-        - 任何子目标因外部依赖不可用 → blocked
-        - 所有子目标满足且无阻塞性验证失败 → success
-        - 部分子目标满足但存在未满足的非阻塞性子目标 → partial
-        - 核心目标未满足 → failed
+        当 controller_verdict 存在时，以其为 ground truth 确定 OutcomeStatus，
+        sub_goals 仅用于 failure_category 分析和 summary 生成。
+        这避免了 _node_covers 启发式匹配失败导致的终态语义分裂。
         """
-        status = self._determine_status(sub_goals)
+        if controller_verdict and controller_verdict in self._VERDICT_MAP:
+            status = self._VERDICT_MAP[controller_verdict]
+            # Safety/env blocks override controller verdict (defense-in-depth)
+            if any(sg.safety_blocked for sg in sub_goals):
+                status = OutcomeStatus.UNSAFE
+            elif any(sg.env_blocked for sg in sub_goals):
+                status = OutcomeStatus.BLOCKED
+        else:
+            status = self._determine_status(sub_goals)
         failure_category = None
 
         if status == OutcomeStatus.FAILED:

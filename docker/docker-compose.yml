@@ -49,7 +49,7 @@ services:
   searxng:
     image: searxng/searxng:latest
     ports:
-      - "8888:8888"
+      - "9090:9090"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:

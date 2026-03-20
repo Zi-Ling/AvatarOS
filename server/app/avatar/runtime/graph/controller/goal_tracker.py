@@ -315,6 +315,30 @@ class GoalTracker:
         if uncovered:
             return None
 
+        # ── Single-goal, no-deliverable short-circuit ───────────────────
+        # For simple tasks (e.g. "计算素数", "生成随机数") where:
+        #   - Only 1 sub-goal (already covered above)
+        #   - No deliverables expected
+        #   - No multi-step connectors in goal
+        #   - All nodes succeeded (no failures to recover from)
+        # → Short-circuit without keyword overlap check.
+        # This saves a full planner call (~9k tokens) for trivial tasks
+        # where keyword overlap between Chinese goal and code output is low.
+        if (
+            len(sub_goals) <= 1
+            and not _deliverables
+            and not self._MULTI_STEP_CONNECTORS.search(graph.goal)
+            and all(n.status == NodeStatus.SUCCESS for n in graph.nodes.values())
+        ):
+            logger.info(
+                "[TerminalEvidence] Single-goal no-deliverable short-circuit: "
+                f"{len(successful_nodes)} node(s) all succeeded"
+            )
+            return (
+                f"single sub-goal covered, no deliverables, "
+                f"all {len(successful_nodes)} node(s) succeeded"
+            )
+
         # Condition 4: multi-step goal guard
         # If the goal contains multi-step connectors, require at least 2
         # distinct skill types to have succeeded. This prevents short-circuit

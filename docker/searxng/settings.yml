@@ -1,43 +1,133 @@
 # SearXNG Configuration — AvatarOS built-in search engine
 # JSON API enabled for web.search skill
+# Optimized for China network: Chinese engines enabled, international engines disabled
 
-use_default_settings: true
+use_default_settings:
+  engines:
+    keep_only:
+      - baidu
+      - sogou
+      - 360search
+      - quark
+      - baidu images
+      - quark images
+      - baidu kaifa
+      - bing
+      - yahoo
+      - github
+      - stackoverflow
+      - arxiv
+      - google
+      - duckduckgo
+      - brave
+      - wikipedia
+      - wikidata
 
 server:
-  secret_key: "avatarsearxng2024"
+  secret_key: "avatarsearxng@2026!"
   bind_address: "0.0.0.0"
-  port: 8888
+  port: 8080
   limiter: false
 
 search:
   safe_search: 0
   autocomplete: ""
-  default_lang: "auto"
+  default_lang: "zh"
   formats:
     - html
     - json
 
 engines:
+  # --- Chinese engines (no proxy needed) ---
+  - name: baidu
+    engine: baidu
+    shortcut: bd
+    disabled: false
+
+  - name: sogou
+    engine: sogou
+    shortcut: sogou
+    disabled: false
+
+  - name: 360search
+    engine: 360search
+    shortcut: 360so
+    disabled: false
+
+  - name: quark
+    engine: quark
+    shortcut: qk
+    disabled: false
+
+  - name: baidu images
+    engine: baidu
+    shortcut: bdi
+    disabled: false
+
+  - name: quark images
+    engine: quark
+    shortcut: qki
+    disabled: false
+
+  - name: baidu kaifa
+    engine: baidu
+    shortcut: bdk
+    disabled: false
+
+  # --- International engines (disabled, enable when proxy available) ---
   - name: google
     engine: google
-    shortcut: g
-    disabled: false
-  - name: bing
-    engine: bing
-    shortcut: b
-    disabled: false
+    shortcut: go
+    disabled: true
+
   - name: duckduckgo
     engine: duckduckgo
     shortcut: ddg
-    disabled: false
+    disabled: true
+
+  - name: brave
+    engine: brave
+    shortcut: br
+    disabled: true
+
   - name: wikipedia
     engine: wikipedia
     shortcut: wp
+    disabled: true
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    disabled: true
+
+  - name: bing
+    engine: bing
+    shortcut: bi
+    disabled: false
+
+  - name: yahoo
+    engine: yahoo
+    shortcut: yh
+    disabled: false
+
+  - name: github
+    engine: github
+    shortcut: gh
+    disabled: false
+
+  - name: stackoverflow
+    engine: stackoverflow
+    shortcut: st
+    disabled: false
+
+  - name: arxiv
+    engine: arxiv
+    shortcut: arx
     disabled: false
 
 ui:
   static_use_hash: true
 
 outgoing:
-  request_timeout: 10
+  request_timeout: 15
   useragent_suffix: "AvatarOS"
