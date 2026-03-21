@@ -10,6 +10,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 from app.services.state_service import get_state_service
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,8 @@ class StateSetSkill(BaseSkill[StateSetInput, StateSetOutput]):
         side_effects=set(),
         risk_level=SkillRiskLevel.SAFE,
         aliases=["set_state", "save_state"],
+        tags=["set", "store", "state", "设置", "状态"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: StateSetInput) -> StateSetOutput:
@@ -88,6 +91,8 @@ class StateGetSkill(BaseSkill[StateGetInput, StateGetOutput]):
         side_effects=set(),
         risk_level=SkillRiskLevel.SAFE,
         aliases=["get_state", "load_state"],
+        tags=["get", "load", "state", "获取", "状态"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.JSON, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: StateGetInput) -> StateGetOutput:
@@ -134,6 +139,8 @@ class StateDeleteSkill(BaseSkill[StateDeleteInput, StateDeleteOutput]):
         side_effects=set(),
         risk_level=SkillRiskLevel.SAFE,
         aliases=["delete_state", "remove_state"],
+        tags=["delete", "remove", "state", "删除", "状态"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: StateDeleteInput) -> StateDeleteOutput:

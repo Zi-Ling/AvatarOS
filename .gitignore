@@ -34,7 +34,7 @@ server/venv/
 
 # Environment / secrets
 server/.env
-server/.env.*
+!server/.env.example
 
 # Runtime data (generated at runtime, not source code)
 server/workspace/

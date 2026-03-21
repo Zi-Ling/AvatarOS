@@ -48,6 +48,8 @@ export type RunSummaryData = {
   terminalStatus?: "completed" | "failed" | "partial" | "paused" | "cancelled";
   // LLM 生成的用户态说明（Final Answer）
   finalAnswer?: string;
+  // 结构化原始输出（供折叠面板展示）
+  structuredOutput?: Record<string, unknown> | unknown[];
   keyOutputs: Array<{ stepName: string; skillName?: string; summary?: string; artifacts?: string[] }>;
 };
 

@@ -203,11 +203,25 @@ def _format_history(task: Task, workspace_root: Optional[str] = None,
                 result_str = f"Error: {error_msg}"
 
                 # File Type Routing violation detection:
-                # If a step failed and it used fs.read on a binary file type,
+                # If a step failed and it used a read-only FS skill on a binary file type,
                 # remind the planner of the correct routing rule.
                 _BINARY_EXTS = (".xlsx", ".xls", ".docx", ".pdf", ".png", ".jpg",
                                 ".gif", ".bmp", ".zip", ".7z", ".rar", ".pptx")
-                if step.skill_name == "fs.read":
+                _is_fs_read = False
+                try:
+                    from app.avatar.skills.registry import skill_registry as _sr
+                    from app.avatar.skills.base import SkillRiskLevel, SideEffect
+                    _cls = _sr.get(step.skill_name)
+                    if _cls:
+                        _spec = _cls.spec
+                        _is_fs_read = (
+                            _spec.risk_level == SkillRiskLevel.READ
+                            and SideEffect.FS in _spec.side_effects
+                            and "read" in _spec.tags
+                        )
+                except Exception:
+                    pass
+                if _is_fs_read:
                     _path_param = (step.params or {}).get("path", "")
                     if any(_path_param.lower().endswith(ext) for ext in _BINARY_EXTS):
                         _ext = next(ext for ext in _BINARY_EXTS if _path_param.lower().endswith(ext))
@@ -351,19 +365,28 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
     # 规则 3：是否有明确未完成的失败步骤（最近一步失败）
     has_recent_failure = bool(failed_steps) and failed_steps[-1][0] > (successful_steps[-1][0] if successful_steps else 0)
 
-    # ── 规则 4：写文件意图但缺少 fs.write 成功步骤 ───────────────────────
-    # goal 含写/创建文件关键词时，必须有 fs.write/fs.copy 成功才能 FINISH
+    # ── 规则 4：写文件意图但缺少 fs write 成功步骤 ───────────────────────
+    # goal 含写/创建文件关键词时，必须有 file-writing skill 成功才能 FINISH
     # 防止 python.run 只输出文件路径列表就被误判为"已完成写文件"
     _WRITE_INTENT_KEYWORDS = {
         "写入", "写到", "写文件", "创建文件", "保存", "存储", "生成文件",
         "write", "create file", "save file", "output file",
     }
-    _WRITE_SKILLS = {"fs.write", "fs.copy"}
     goal_has_write_intent = any(kw in goal_lower for kw in _WRITE_INTENT_KEYWORDS)
-    has_write_success = any(
-        s.skill_name in _WRITE_SKILLS and s.result and s.result.success
-        for _, s in successful_steps
-    )
+    has_write_success = False
+    if goal_has_write_intent:
+        try:
+            from app.avatar.skills.registry import skill_registry as _sr
+            from app.avatar.skills.base import SkillRiskLevel, SideEffect
+            for _, s in successful_steps:
+                _cls = _sr.get(s.skill_name)
+                if _cls and _cls.spec.risk_level == SkillRiskLevel.WRITE and SideEffect.FS in _cls.spec.side_effects:
+                    if s.result and s.result.success:
+                        has_write_success = True
+                        break
+        except Exception:
+            # Fallback: if registry unavailable, don't block
+            has_write_success = True
     missing_write = goal_has_write_intent and not has_write_success
 
     # ── 综合判定 ──────────────────────────────────────────────────────────
@@ -377,7 +400,7 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
     if has_recent_failure:
         continue_signals.append("last step failed — may need retry or alternative approach")
     if missing_write:
-        continue_signals.append("goal requires writing files but no fs.write/fs.copy has succeeded yet")
+        continue_signals.append("goal requires writing files but no file-writing skill has succeeded yet")
 
     lines.append("Finish Confidence Check:")
     if finish_signals:

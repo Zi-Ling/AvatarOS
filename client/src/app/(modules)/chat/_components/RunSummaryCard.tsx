@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import {
   CheckCircle2, XCircle, Clock, ChevronDown, ChevronUp,
-  ExternalLink, ShieldCheck, PauseCircle, Ban, AlertTriangle,
+  ExternalLink, ShieldCheck, PauseCircle, Ban, AlertTriangle, Code,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useWorkbenchStore } from "@/stores/workbenchStore";
@@ -56,6 +56,7 @@ const STATUS_CONFIG: Record<TerminalStatus, {
 
 export function RunSummaryCard({ data }: RunSummaryCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [dataExpanded, setDataExpanded] = useState(false);
   const { setActiveTab } = useWorkbenchStore();
 
   const terminalStatus: TerminalStatus =
@@ -65,6 +66,8 @@ export function RunSummaryCard({ data }: RunSummaryCardProps) {
   const cfg = STATUS_CONFIG[terminalStatus];
   const durationSec = data.durationMs > 0 ? (data.durationMs / 1000).toFixed(1) : null;
   const hasKeyOutputs = data.keyOutputs.length > 0;
+  const hasStructuredOutput = data.structuredOutput != null;
+  const hasExpandable = hasKeyOutputs || hasStructuredOutput;
 
   return (
     <div className={cn("mt-3 rounded-xl border overflow-hidden", cfg.border, cfg.bg)}>
@@ -112,42 +115,71 @@ export function RunSummaryCard({ data }: RunSummaryCardProps) {
           >
             <ExternalLink className="w-3.5 h-3.5" />
           </button>
-          {hasKeyOutputs && (
+          {hasExpandable && (
             <button
               onClick={() => setExpanded(v => !v)}
               className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+              title={expanded ? "收起" : "展开详情"}
             >
               {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
             </button>
           )}
         </div>
       </div>
-      {expanded && hasKeyOutputs && (
-        <div className="border-t border-slate-200 dark:border-slate-700 divide-y divide-slate-100 dark:divide-slate-800">
-          {data.keyOutputs.map((output, i) => (
-            <div key={i} className="px-3 py-2 flex items-start gap-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="text-[10px] font-mono text-indigo-500 dark:text-indigo-400 truncate">
-                  {output.skillName ?? output.stepName}
-                </p>
-                {output.summary && (
-                  <p className="text-xs text-slate-600 dark:text-slate-400 line-clamp-2 mt-0.5">
-                    {output.summary}
-                  </p>
-                )}
-                {output.artifacts && output.artifacts.length > 0 && (
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {output.artifacts.map((a, j) => (
-                      <span key={j} className="text-[10px] font-mono text-indigo-500 bg-indigo-50 dark:bg-indigo-950/30 px-1.5 py-0.5 rounded truncate max-w-[180px]">
-                        {a.split(/[/\\]/).pop()}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
+      {expanded && hasExpandable && (
+        <div className="border-t border-slate-200 dark:border-slate-700">
+          {/* 结构化原始数据面板 */}
+          {hasStructuredOutput && (
+            <div className="px-3 py-2">
+              <button
+                onClick={() => setDataExpanded(v => !v)}
+                className="flex items-center gap-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
+              >
+                <Code className="w-3 h-3" />
+                <span>原始数据</span>
+                {dataExpanded
+                  ? <ChevronUp className="w-3 h-3" />
+                  : <ChevronDown className="w-3 h-3" />}
+              </button>
+              {dataExpanded && (
+                <pre className="mt-2 p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/80 text-[11px] font-mono text-slate-600 dark:text-slate-300 overflow-x-auto max-h-[320px] overflow-y-auto leading-relaxed whitespace-pre-wrap break-words">
+                  {JSON.stringify(data.structuredOutput, null, 2)}
+                </pre>
+              )}
             </div>
-          ))}
+          )}
+          {/* Key outputs */}
+          {hasKeyOutputs && (
+            <div className={cn(
+              "divide-y divide-slate-100 dark:divide-slate-800",
+              hasStructuredOutput && "border-t border-slate-200 dark:border-slate-700",
+            )}>
+              {data.keyOutputs.map((output, i) => (
+                <div key={i} className="px-3 py-2 flex items-start gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] font-mono text-indigo-500 dark:text-indigo-400 truncate">
+                      {output.skillName ?? output.stepName}
+                    </p>
+                    {output.summary && (
+                      <p className="text-xs text-slate-600 dark:text-slate-400 line-clamp-2 mt-0.5">
+                        {output.summary}
+                      </p>
+                    )}
+                    {output.artifacts && output.artifacts.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {output.artifacts.map((a, j) => (
+                          <span key={j} className="text-[10px] font-mono text-indigo-500 bg-indigo-50 dark:bg-indigo-950/30 px-1.5 py-0.5 rounded truncate max-w-[180px]">
+                            {a.split(/[/\\]/).pop()}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """SelfMonitor — aggregates all sub-detectors for agent self-monitoring.
 
-Aggregates StuckDetector, LoopDetector, BudgetGuardV2, and
+Aggregates StuckDetector, LoopDetector, BudgetMonitor, and
 UncertaintyHeuristic.  Also performs context health checks (WorkingMemory
 size) and emits all alerts via DebugEventStream.
 
@@ -21,7 +21,7 @@ from ..kernel.signals import RuntimeSignal, SignalType
 from ..feature_flags import record_system_fallback
 from .stuck_detector import StuckDetector
 from .loop_detector import LoopDetector
-from .budget_guard_v2 import BudgetGuardV2
+from .budget_monitor import BudgetMonitor
 from .uncertainty_heuristic import UncertaintyHeuristic
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class SelfMonitor:
         self,
         stuck_detector: Optional[StuckDetector] = None,
         loop_detector: Optional[LoopDetector] = None,
-        budget_guard_v2: Optional[BudgetGuardV2] = None,
+        budget_monitor: Optional[BudgetMonitor] = None,
         uncertainty_heuristic: Optional[UncertaintyHeuristic] = None,
         legacy_budget_guard: Optional[Any] = None,
         debug_event_stream: Optional[Any] = None,
@@ -87,7 +87,7 @@ class SelfMonitor:
     ) -> None:
         self._stuck = stuck_detector or StuckDetector()
         self._loop = loop_detector or LoopDetector()
-        self._budget = budget_guard_v2 or BudgetGuardV2()
+        self._budget = budget_monitor or BudgetMonitor()
         self._uncertainty = uncertainty_heuristic or UncertaintyHeuristic()
         self._legacy_budget_guard = legacy_budget_guard
         self._debug_stream = debug_event_stream
@@ -109,9 +109,9 @@ class SelfMonitor:
         except Exception as exc:
             logger.warning("[SelfMonitor] check failed, falling back: %s", exc)
             record_system_fallback(
-                subsystem="SelfMonitor",
-                reason=str(exc),
-                strategy="legacy_budget_guard",
+                subsystem_name="SelfMonitor",
+                error=str(exc),
+                fallback_name="legacy_budget_guard",
             )
             return self._fallback_check(ctx)
 

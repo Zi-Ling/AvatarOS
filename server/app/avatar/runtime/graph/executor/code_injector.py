@@ -116,6 +116,7 @@ class CodeInjectorMixin:
         self,
         params: Dict[str, Any],
         context: 'ExecutionContext',
+        sandboxed: bool = False,
     ) -> Dict[str, Any]:
         """
         把上游节点输出写成 typed input artifacts，通过文件传入容器。
@@ -123,6 +124,11 @@ class CodeInjectorMixin:
         每个上游输出写成一个 JSON 文件（对于 JSON 可序列化的值），
         或直接引用文件路径（对于文件产物）。
         同时写一个 manifest.json 列出所有输入。
+
+        Args:
+            sandboxed: True 表示代码将在 Docker/Sandbox 容器中执行，
+                       注入的路径应使用容器虚拟路径（/session, /workspace）。
+                       False 表示本地执行，使用宿主机真实路径。
         """
         from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH, CONTAINER_SESSION_PATH
 
@@ -143,6 +149,10 @@ class CodeInjectorMixin:
         _user_ws = self._get_base_path()
         _has_user_ws = _user_ws is not None and str(_user_ws.resolve()) != workspace_root
         _input_mount = CONTAINER_SESSION_PATH if _has_user_ws else CONTAINER_WORKSPACE_PATH
+
+        # sandboxed=True → 代码在 Docker 容器中执行，使用容器路径
+        # sandboxed=False → 代码在宿主机本地执行，使用宿主机真实路径
+        _is_local_exec = not sandboxed
 
         manifest: Dict[str, Any] = {}
         load_lines: List[str] = []
@@ -180,27 +190,42 @@ class CodeInjectorMixin:
                     file_path_str = outputs.get("file_path")
             if file_path_str:
                 _fp = str(file_path_str)
-                if _fp.startswith("/workspace/") or _fp.startswith("/workspace\\") or _fp.startswith("/session/"):
-                    container_path = _fp.replace("\\", "/")
+                if _is_local_exec:
+                    # 本地执行：直接用宿主机路径
+                    resolved_path = str(Path(_fp).resolve()) if not Path(_fp).is_absolute() else _fp
+                    resolved_path = resolved_path.replace("\\", "/")
+                    manifest[var_name] = {
+                        "format": "file_ref",
+                        "host_path": resolved_path,
+                        "type": type(value).__name__,
+                    }
+                    load_lines.append(f'{var_name} = "{resolved_path}"')
                 else:
-                    host_path = str(Path(_fp).resolve())
-                    if host_path.startswith(workspace_root):
-                        rel = host_path[len(workspace_root):].lstrip("/\\").replace("\\", "/")
-                        container_path = f"{_input_mount}/{rel}"
-                    else:
+                    if _fp.startswith("/workspace/") or _fp.startswith("/workspace\\") or _fp.startswith("/session/"):
                         container_path = _fp.replace("\\", "/")
-                manifest[var_name] = {
-                    "format": "file_ref",
-                    "container_path": container_path,
-                    "type": type(value).__name__,
-                }
-                load_lines.append(f'{var_name} = "{container_path}"')
+                    else:
+                        host_path = str(Path(_fp).resolve())
+                        if host_path.startswith(workspace_root):
+                            rel = host_path[len(workspace_root):].lstrip("/\\").replace("\\", "/")
+                            container_path = f"{_input_mount}/{rel}"
+                        else:
+                            container_path = _fp.replace("\\", "/")
+                    manifest[var_name] = {
+                        "format": "file_ref",
+                        "container_path": container_path,
+                        "type": type(value).__name__,
+                    }
+                    load_lines.append(f'{var_name} = "{container_path}"')
                 continue
 
             # 结构化数据：序列化为 JSON 文件
             json_filename = f"{var_name}.json"
             json_path = inputs_dir / json_filename
-            container_json_path = f"{_input_mount}/input/{json_filename}"
+            # 本地执行用宿主机真实路径，Docker 执行用容器虚拟路径
+            if _is_local_exec:
+                effective_json_path = str(json_path.resolve()).replace("\\", "/")
+            else:
+                effective_json_path = f"{_input_mount}/input/{json_filename}"
 
             try:
                 sanitized_value = self._sanitize_json_value_host_paths(value)
@@ -208,11 +233,11 @@ class CodeInjectorMixin:
                     json.dump(sanitized_value, f, ensure_ascii=False, default=str)
                 manifest[var_name] = {
                     "format": "json",
-                    "container_path": container_json_path,
+                    "path": effective_json_path,
                     "type": _original_type,
                 }
                 load_lines.append(
-                    f'with open("{container_json_path}", encoding="utf-8") as _f:\n'
+                    f'with open("{effective_json_path}", encoding="utf-8") as _f:\n'
                     f'    {var_name} = json.load(_f)'
                 )
             except Exception as e:
@@ -241,4 +266,87 @@ class CodeInjectorMixin:
             original_code = "\n".join(str(line) for line in original_code)
         elif not isinstance(original_code, str):
             original_code = str(original_code)
+
+        # ── Defense: strip LLM-generated duplicate assignments ──
+        # LLM sometimes hardcodes upstream output into code as
+        # `n1_output = '...'` or `n1_output = """..."""`.
+        # Since we already inject the correct value via JSON file,
+        # remove these redundant (and often broken) assignments.
+        original_code = self._strip_duplicate_output_assignments(
+            original_code, list(all_outputs.keys()),
+        )
+
         return {**params, "code": injected_prefix + self._output_helper_code() + original_code}
+
+    @staticmethod
+    def _strip_duplicate_output_assignments(code: str, node_ids: List[str]) -> str:
+        """Remove LLM-generated hardcoded assignments for injected variables.
+
+        Detects patterns like:
+            n1_output = '...'
+            n1_output = \"\"\"...\"\"\"
+            n1_output = "..."
+        and removes the entire assignment (which may span multiple lines for
+        multi-line strings) since the correct value is already injected via
+        JSON file loading.
+        """
+        import re
+
+        if not node_ids:
+            return code
+
+        var_names = [f"{nid}_output" for nid in node_ids]
+        cleaned_lines: List[str] = []
+        lines = code.split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.lstrip()
+
+            # Check if this line starts a duplicate assignment
+            is_dup = False
+            for var in var_names:
+                # Match: var_name = '...' or var_name = "..." or var_name = """..."""
+                if stripped.startswith(f"{var} =") or stripped.startswith(f"{var}="):
+                    is_dup = True
+                    break
+
+            if not is_dup:
+                cleaned_lines.append(line)
+                i += 1
+                continue
+
+            # Skip this assignment — may be multi-line string
+            # Detect opening quote style
+            eq_pos = stripped.find("=")
+            rhs = stripped[eq_pos + 1:].lstrip() if eq_pos >= 0 else ""
+
+            if rhs.startswith('"""') or rhs.startswith("'''"):
+                # Triple-quoted: skip until closing triple quote
+                quote = rhs[:3]
+                # Check if it closes on the same line (after the opening)
+                rest = rhs[3:]
+                if quote in rest:
+                    # Single-line triple-quoted string
+                    i += 1
+                    continue
+                # Multi-line: skip until closing quote found
+                i += 1
+                while i < len(lines):
+                    if quote in lines[i]:
+                        i += 1
+                        break
+                    i += 1
+            else:
+                # Single or double quote, or other expression
+                # For single-line: just skip this line
+                # For multi-line (backslash continuation or unclosed string):
+                # skip lines ending with backslash
+                while i < len(lines) and lines[i].rstrip().endswith("\\"):
+                    i += 1
+                i += 1  # skip the final line of the assignment
+
+            logger.debug("[CodeInjector] Stripped duplicate assignment for injected variable")
+
+        return "\n".join(cleaned_lines)
+

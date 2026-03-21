@@ -49,6 +49,7 @@ class AppBootstrap:
         llm_logger = self._init_llm_logger()
         llm_client = self._init_llm_client(llm_logger)
         self._warmup_skills()
+        await self._init_data_layer()
         self._warmup_executors()
         self._init_runtime(llm_client)
         self._init_router(llm_client, llm_logger)
@@ -86,14 +87,17 @@ class AppBootstrap:
         if self._scheduler_started:
             try:
                 from app.services.scheduler_service import scheduler_service
-                scheduler_service.stop()
+                scheduler_service.scheduler.shutdown(wait=False)
                 logger.info("  ├─ Scheduler 已停止")
             except Exception as e:
                 logger.warning(f"  ├─ Scheduler 停止失败: {e}")
 
         if self._bridge:
             try:
-                self._bridge.stop()
+                if hasattr(self._bridge, 'stop'):
+                    self._bridge.stop()
+                elif hasattr(self._bridge, 'disconnect'):
+                    self._bridge.disconnect()
                 logger.info("  ├─ SocketBridge 已停止")
             except Exception as e:
                 logger.warning(f"  ├─ SocketBridge 停止失败: {e}")
@@ -175,6 +179,16 @@ class AppBootstrap:
         from app.avatar.skills.registry import skill_registry
         count = len(list(skill_registry.iter_skills()))
         logger.info(f"  ✅ 技能注册表就绪：{count} 个技能")
+
+    async def _init_data_layer(self):
+        """初始化结构化数据层（建表、schema 迁移）"""
+        logger.info("📊 初始化结构化数据层...")
+        try:
+            from app.services.data import ensure_initialized
+            await ensure_initialized()
+            logger.info("  ✅ 结构化数据层就绪")
+        except Exception as e:
+            logger.warning(f"  ⚠️ 结构化数据层初始化失败: {e}")
     
     def _warmup_executors(self):
         """预热执行器（避免首次执行延迟）"""
@@ -221,7 +235,6 @@ class AppBootstrap:
 
         self.app.state.avatar_router = AvatarRouter(
             runtime=self.app.state.avatar_runtime,
-            llm=llm_client,
             memory_manager=self.app.state.memory_manager,
             logger=router_logger,
             intent_compiler=intent_compiler,

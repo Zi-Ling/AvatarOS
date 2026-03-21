@@ -30,6 +30,7 @@ class KeyboardTypeSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.WRITE,
         aliases=["keyboard.type", "type_text", "input_text", "write_text"],
+        tags=["keyboard", "type", "input", "text", "键盘", "输入", "打字"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: KeyboardTypeInput) -> SkillOutput:
@@ -47,6 +48,7 @@ class KeyboardHotkeySkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.WRITE,
         aliases=["keyboard.hotkey", "hotkey", "press_combo"],
+        tags=["keyboard", "hotkey", "shortcut", "combo", "键盘", "快捷键", "组合键"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: KeyboardHotkeyInput) -> SkillOutput:
@@ -64,6 +66,7 @@ class KeyboardPressSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.WRITE,
         aliases=["keyboard.press", "press_keys", "key_sequence"],
+        tags=["keyboard", "press", "key", "键盘", "按键"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: KeyboardPressInput) -> SkillOutput:

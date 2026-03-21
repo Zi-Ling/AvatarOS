@@ -253,7 +253,7 @@ export function MessageList({
                 <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 dark:bg-white/60 [animation-delay:150ms]" />
                 <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 dark:bg-white/60 [animation-delay:300ms]" />
               </div>
-              <span className="text-xs text-slate-400 dark:text-slate-500">正在分析任务...</span>
+              <span className="text-xs text-slate-400 dark:text-slate-500">思考中...</span>
             </div>
           </div>
         </div>

@@ -16,6 +16,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
         risk_level=SkillRiskLevel.EXECUTE,
         aliases=["run_python", "execute_python", "python"],
         code_params={"code"},
+        tags=["run", "execute", "compute", "calculate", "generate",
+              "运行", "执行", "计算", "生成", "分析"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: PythonRunInput) -> PythonRunOutput:
@@ -62,7 +66,12 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
         except Exception:
             pass
 
-        local_vars: Dict[str, Any] = {"base_path": str(ctx.base_path)}
+        # 使用单一命名空间（同时作为 globals 和 locals），避免 exec 三参数模式下
+        # 嵌套函数无法访问 locals dict 中变量的 Python 语义陷阱。
+        # code_injector 注入的 import（_json, _os 等）写入同一 dict 后，
+        # 嵌套 def 内部也能正常引用。
+        # 参考：https://docs.python.org/3/library/functions.html#exec
+        exec_ns: Dict[str, Any] = {"__builtins__": __builtins__, "base_path": str(ctx.base_path)}
         success = False
         error_msg = None
         base64_img = None
@@ -74,7 +83,7 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
                 os.chdir(str(ctx.base_path))
 
             with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
-                exec(params.code, {"__builtins__": __builtins__}, local_vars)
+                exec(params.code, exec_ns)
 
                 # Matplotlib hook
                 if "matplotlib.pyplot" in sys.modules:
@@ -91,9 +100,9 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
                 # Pandas DataFrame hook
                 if "pandas" in sys.modules:
                     pd = sys.modules["pandas"]
-                    target_df = local_vars.get("result")
+                    target_df = exec_ns.get("result")
                     if not isinstance(target_df, pd.DataFrame):
-                        dfs = {k: v for k, v in local_vars.items() if isinstance(v, pd.DataFrame)}
+                        dfs = {k: v for k, v in exec_ns.items() if isinstance(v, pd.DataFrame)}
                         target_df = dfs.get("df") or (list(dfs.values())[-1] if dfs else None)
                     if target_df is not None:
                         try:
@@ -125,9 +134,17 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
                 except Exception:
                     pass  # 解析失败保持上一次结果
 
+        # 框架注入的内部变量名，不应暴露给用户变量检测逻辑
+        _FRAMEWORK_VARS = frozenset({
+            "_json", "_os", "_sys", "_types", "_mock_subprocess",
+            "_blocked_subprocess", "_output", "_save_binary",
+            "_f", "_clean", "_data", "_ws", "_abs", "_dir",
+            "json",  # code_injector 有时注入 `import json`
+        })
+
         safe_vars = {}
-        for k, v in local_vars.items():
-            if k.startswith("__") or k == "base_path":
+        for k, v in exec_ns.items():
+            if k.startswith("__") or k == "base_path" or k in _FRAMEWORK_VARS:
                 continue
             try:
                 safe_vars[k] = v if isinstance(v, (str, int, float, bool, list, dict, type(None))) else str(v)
@@ -142,9 +159,9 @@ class PythonRunSkill(BaseSkill[PythonRunInput, PythonRunOutput]):
             except Exception as e:
                 logger.warning(f"[python.run] Failed to inject variables: {e}")
 
-        result_val = local_vars.get("result")
+        result_val = exec_ns.get("result")
         if result_val is None and success:
-            user_vars = {k: v for k, v in safe_vars.items() if k != "result"}
+            user_vars = {k: v for k, v in safe_vars.items() if k != "result" and not k.startswith("_")}
             if len(user_vars) == 1:
                 result_val = list(user_vars.values())[0]
             elif output_stdout.strip():

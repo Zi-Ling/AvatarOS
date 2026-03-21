@@ -82,8 +82,14 @@ class AnswerSynthesizer:
                     if re.match(r'^[\w\s\u4e00-\u9fff]+[:：]\s*[\d,.]+', line):
                         numeric_results.append(line)
 
-            # ── Collect short text outputs (e.g. llm.fallback) ─────
-            if node.capability_name in ("llm.fallback", "llm.chat"):
+            # ── Collect short text outputs (e.g. text-answer skills) ──
+            _is_answer = False
+            try:
+                from app.avatar.skills.registry import skill_registry as _sr
+                _is_answer = _sr.is_answer_skill(node.capability_name)
+            except Exception:
+                pass
+            if _is_answer:
                 answer = (
                     outputs.get("result")
                     or outputs.get("response_zh")

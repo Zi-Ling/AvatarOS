@@ -82,9 +82,17 @@ _GOAL_TYPE_MAP = {
                                  "列出", "显示", "打印", "查看", "读取", "print", "display"}),
 }
 
-# path-like pattern
+# Known extension set for bare-filename matching (group 3)
+_KNOWN_EXT_PATTERN = '|'.join(re.escape(ext.lstrip('.')) for ext in _EXT_MAP)
+
+# path-like pattern: matches paths starting with ./ / ~ OR containing a directory separator
+# Group 3: bare filenames with known extensions (output.csv, data.json)
 _PATH_RE = re.compile(
-    r'(?:^|[\s\'"])([./~][\w./\-*?]+\.\w{2,6})',
+    r'(?:^|[\s\'"])([./~][\w./\-*?]+\.\w{2,6})'   # group(1): ./foo/bar.csv, /tmp/out.json
+    r'|'
+    r'(?:^|[\s\'"])([\w][\w\-]*/[\w./\-*?]+\.\w{2,6})'  # group(2): output/report.csv
+    r'|'
+    r'(?:^|[\s\'"])([\w][\w\-]*\.(?:' + _KNOWN_EXT_PATTERN + r'))\b',  # group(3): output.csv, data.json
     re.MULTILINE,
 )
 
@@ -128,10 +136,10 @@ class GoalNormalizer:
         artifacts: List[ExpectedArtifact] = []
         seen_paths: set = set()
 
-        # 1. Explicit path patterns
+        # 1. Explicit path patterns (including bare filenames like output.csv)
         for m in _PATH_RE.finditer(goal):
-            path = m.group(1)
-            if path in seen_paths:
+            path = m.group(1) or m.group(2) or m.group(3)
+            if not path or path in seen_paths:
                 continue
             seen_paths.add(path)
             ext = self._get_ext(path)
@@ -144,6 +152,9 @@ class GoalNormalizer:
             ))
 
         # 2. Extension mentions without full path — collect ALL mentioned formats
+        #    BUT: only match standalone format references (e.g. "生成 JSON 文件",
+        #    "export as CSV"), NOT extensions embedded in filenames like
+        #    "requirements.txt" or "config.json".
         if not artifacts:
             seen_exts: set = set()
             goal_lower = goal.lower()
@@ -163,8 +174,10 @@ class GoalNormalizer:
                         ))
             for ext, (mime, _) in _EXT_MAP.items():
                 ext_bare = ext.lstrip(".")
-                # Word-boundary check: avoid matching "json" inside "jsonify" etc.
-                if re.search(rf'\b{re.escape(ext_bare)}\b', goal_lower) and ext not in seen_exts:
+                # Negative lookbehind for dot: skip "requirements.txt" style matches
+                # where the extension is part of a filename (preceded by '.')
+                # Only match standalone mentions like "JSON 文件", "csv format"
+                if re.search(rf'(?<!\.)\b{re.escape(ext_bare)}\b', goal_lower) and ext not in seen_exts:
                     seen_exts.add(ext)
                     artifacts.append(ExpectedArtifact(
                         label=f"output_{ext_bare}",

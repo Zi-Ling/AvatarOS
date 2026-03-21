@@ -1,30 +1,55 @@
 from __future__ import annotations
 
+"""EventBus — unified event bus with backpressure, trigger rules, and source management.
+
+Provides:
+- Synchronous publish/subscribe with WebSocket broadcasting
+- EventBuffer for backpressure + priority buffering (AgentLoop sense phase)
+- TriggerEngine for rule matching + cooldown + idempotency
+- EventSourceRegistry for source registration + health + reconnection
+
+Requirements: 4.1, 4.4, 4.8, 21.2
+"""
+
 from typing import Callable, List, Dict, Optional, Any
 import logging
 from collections import defaultdict
-import asyncio
 
-from .types import Event, EventType
+from .types import Event, EventType, AgentEvent, TriggerRule
+from .buffer import EventBuffer
+from .trigger_engine import TriggerEngine
+from .event_source_registry import EventSourceRegistry
 
 logger = logging.getLogger(__name__)
 
-# Callback type: function that takes an Event and returns nothing
 EventHandler = Callable[[Event], None]
 
 
 class EventBus:
+    """Unified event bus with backpressure, trigger rules, and source management.
+
+    Core capabilities:
+    - subscribe / subscribe_all / publish: synchronous pub/sub
+    - WebSocket broadcasting for graph events
+    - EventBuffer: backpressure + priority buffering for AgentLoop
+    - TriggerEngine: rule matching + cooldown + idempotency
+    - EventSourceRegistry: source registration + health + reconnection
     """
-    A simple synchronous event bus with WebSocket broadcasting support.
-    
-    Requirements:
-    - 21.2: Broadcast graph events via WebSocket
-    """
-    
-    def __init__(self):
+
+    def __init__(
+        self,
+        event_buffer: Optional[EventBuffer] = None,
+        trigger_engine: Optional[TriggerEngine] = None,
+        source_registry: Optional[EventSourceRegistry] = None,
+    ) -> None:
         self._subscribers: Dict[EventType, List[EventHandler]] = defaultdict(list)
         self._global_subscribers: List[EventHandler] = []
         self._websocket_broadcaster: Optional[Callable[[Event], None]] = None
+        self._buffer = event_buffer or EventBuffer()
+        self._trigger_engine = trigger_engine or TriggerEngine()
+        self._source_registry = source_registry or EventSourceRegistry()
+
+    # ── Subscribe / Broadcast ───────────────────────────────────────────
 
     def subscribe(self, event_type: EventType, handler: EventHandler) -> None:
         """Subscribe to a specific event type."""
@@ -33,38 +58,19 @@ class EventBus:
     def subscribe_all(self, handler: EventHandler) -> None:
         """Subscribe to all events."""
         self._global_subscribers.append(handler)
-    
+
     def set_websocket_broadcaster(self, broadcaster: Callable[[Event], None]) -> None:
-        """
-        Set WebSocket broadcaster for real-time updates.
-        
-        The broadcaster should be a function that takes an Event and broadcasts
-        it to connected WebSocket clients.
-        
-        Args:
-            broadcaster: Function to broadcast events via WebSocket
-            
-        Requirements: 21.2
-        """
+        """Set WebSocket broadcaster for real-time updates."""
         self._websocket_broadcaster = broadcaster
         logger.info("WebSocket broadcaster registered with EventBus")
 
+    # ── Publish ─────────────────────────────────────────────────────────
+
     def publish(self, event: Event) -> None:
-        """
-        Publish an event to all subscribers.
-        
-        This method:
-        1. Notifies specific event type subscribers
-        2. Notifies global subscribers
-        3. Broadcasts to WebSocket clients (if broadcaster is set)
-        
-        Broadcasts on these events:
-        - node_started
-        - node_completed
-        - node_failed
-        - graph_completed
-        
-        Requirements: 21.2
+        """Publish an event: notify subscribers + WebSocket broadcast + buffer.
+
+        If event is an AgentEvent, it is buffered directly.
+        If event is a plain Event, it is wrapped as AgentEvent before buffering.
         """
         # 1. Notify specific subscribers
         if event.type in self._subscribers:
@@ -80,17 +86,16 @@ class EventBus:
                 handler(event)
             except Exception as e:
                 logger.error(f"Error in global event handler: {e}", exc_info=True)
-        
-        # 3. Broadcast to WebSocket clients (Requirement 21.2)
+
+        # 3. Broadcast to WebSocket clients
         if self._websocket_broadcaster:
-            from .types import EventType as ET
             broadcast_events = {
-                ET.GRAPH_STARTED,
-                ET.GRAPH_COMPLETED,
-                ET.GRAPH_FAILED,
-                ET.NODE_STARTED,
-                ET.NODE_COMPLETED,
-                ET.NODE_FAILED,
+                EventType.GRAPH_STARTED,
+                EventType.GRAPH_COMPLETED,
+                EventType.GRAPH_FAILED,
+                EventType.NODE_STARTED,
+                EventType.NODE_COMPLETED,
+                EventType.NODE_FAILED,
             }
             if event.type in broadcast_events:
                 try:
@@ -98,60 +103,10 @@ class EventBus:
                 except Exception as e:
                     logger.error(f"Error in WebSocket broadcaster: {e}", exc_info=True)
 
-
-# ---------------------------------------------------------------------------
-# EventBusV2 — inherits EventBus, delegates to EventBuffer / TriggerEngine /
-# EventSourceRegistry for backpressure, rule matching, and source management.
-#
-# Requirements: 4.1, 4.4, 4.8
-# ---------------------------------------------------------------------------
-
-from .buffer import EventBuffer
-from .trigger_engine import TriggerEngine
-from .event_source_registry import EventSourceRegistry
-from .types import AgentEvent, TriggerRule
-
-
-class EventBusV2(EventBus):
-    """Extended event bus with backpressure, trigger rules, and source management.
-
-    Inherits from EventBus to preserve subscribe() and WebSocket broadcasting.
-    Internal complexity is delegated to:
-      - EventBuffer: backpressure + priority buffering
-      - TriggerEngine: rule matching + cooldown + idempotency
-      - EventSourceRegistry: source registration + health + reconnection
-    """
-
-    def __init__(
-        self,
-        event_buffer: Optional[EventBuffer] = None,
-        trigger_engine: Optional[TriggerEngine] = None,
-        source_registry: Optional[EventSourceRegistry] = None,
-    ) -> None:
-        super().__init__()
-        self._buffer = event_buffer or EventBuffer()
-        self._trigger_engine = trigger_engine or TriggerEngine()
-        self._source_registry = source_registry or EventSourceRegistry()
-
-    # ── publish (sync, compatible with parent) ──
-
-    def publish(self, event: Event) -> None:
-        """Publish an event: parent broadcast + buffer to EventBuffer.
-
-        If *event* is an ``Event`` (legacy), it is broadcast via the parent
-        class.  If it is an ``AgentEvent`` (V2), it is also buffered for
-        ``drain_pending()``.  A plain ``Event`` is converted to an
-        ``AgentEvent`` before buffering so that the sense phase always
-        receives a uniform type.
-        """
-        # Parent handles WebSocket broadcasting and subscriber notification
-        super().publish(event)
-
-        # Buffer for AgentLoop._sense_phase()
+        # 4. Buffer for AgentLoop sense phase
         if isinstance(event, AgentEvent):
             self._buffer.enqueue(event)
         else:
-            # Wrap legacy Event as AgentEvent for the buffer
             agent_event = AgentEvent(
                 event_type=event.type.value if hasattr(event.type, "value") else str(event.type),
                 source=event.source,
@@ -161,13 +116,13 @@ class EventBusV2(EventBus):
             )
             self._buffer.enqueue(agent_event)
 
-    # ── drain (for AgentLoop._sense_phase()) ──
+    # ── Drain (for AgentLoop sense phase) ───────────────────────────────
 
     async def drain_pending(self) -> List[AgentEvent]:
         """Return and clear all buffered events, highest priority first."""
         return self._buffer.drain()
 
-    # ── source management proxies ──
+    # ── Source management ───────────────────────────────────────────────
 
     def register_source(self, source: Any) -> None:
         """Register an EventSource adapter."""
@@ -177,7 +132,15 @@ class EventBusV2(EventBus):
         """Unregister an EventSource adapter."""
         self._source_registry.unregister(source_id)
 
-    # ── trigger rule proxies ──
+    def get_source_health(self) -> Dict[str, bool]:
+        """Return health status of all registered EventSources."""
+        return self._source_registry.get_health()
+
+    async def reconnect_degraded_sources(self) -> None:
+        """Attempt to reconnect degraded EventSources."""
+        await self._source_registry.reconnect_degraded()
+
+    # ── Trigger rule management ─────────────────────────────────────────
 
     def add_trigger_rule(self, rule: TriggerRule) -> None:
         """Register a TriggerRule."""
@@ -188,15 +151,5 @@ class EventBusV2(EventBus):
         self._trigger_engine.remove_rule(rule_id)
 
     def match_trigger_rules(self, event: AgentEvent) -> List[TriggerRule]:
-        """Return matching TriggerRules for *event* (cooldown-filtered)."""
+        """Return matching TriggerRules for event (cooldown-filtered)."""
         return self._trigger_engine.match(event)
-
-    # ── health ──
-
-    def get_source_health(self) -> Dict[str, bool]:
-        """Return health status of all registered EventSources."""
-        return self._source_registry.get_health()
-
-    async def reconnect_degraded_sources(self) -> None:
-        """Attempt to reconnect degraded EventSources."""
-        await self._source_registry.reconnect_degraded()

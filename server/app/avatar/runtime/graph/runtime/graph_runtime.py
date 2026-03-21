@@ -12,7 +12,7 @@ Requirements: 3.1, 3.2, 3.3, 3.7, 4.3, 11.1, 11.2, 11.6, 11.7
 """
 
 from __future__ import annotations
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import logging
 import asyncio
 from datetime import datetime
@@ -457,20 +457,31 @@ class GraphRuntime:
     def _mark_downstream_skipped(
         self,
         graph: 'ExecutionGraph',
-        failed_node: 'StepNode'
+        failed_node: 'StepNode',
+        _root_error: Optional[str] = None,
     ) -> None:
         """
-        Mark downstream nodes as SKIPPED recursively.
+        Mark downstream nodes as SKIPPED recursively with error context.
         
         Uses outgoing_edges adjacency index for efficient traversal.
+        Propagates the root cause error message so downstream nodes and
+        the planner know WHY they were skipped.
         
         Args:
             graph: ExecutionGraph containing the nodes
             failed_node: The failed node whose downstream should be skipped
+            _root_error: Root cause error message (auto-extracted from failed_node if None)
             
         Requirements: 11.1, 11.2, 11.6, 11.7
         """
         from app.avatar.runtime.graph.models.step_node import NodeStatus
+        
+        # Extract root cause error from the failed node
+        if _root_error is None:
+            _root_error = getattr(failed_node, 'error_message', None) or "unknown error"
+            # Truncate to avoid bloating metadata
+            if len(_root_error) > 300:
+                _root_error = _root_error[:300] + "..."
         
         # Get outgoing edges using adjacency index (Requirement 11.6)
         outgoing_edges = graph.get_outgoing_edges(failed_node.id)
@@ -500,17 +511,28 @@ class GraphRuntime:
                 logger.info(f"[GraphRuntime] Target node {target_node.id} is already terminal: {target_node.status}")
                 continue
             
-            # Mark as SKIPPED (Requirement 11.2)
+            # Mark as SKIPPED with error context (Requirement 11.2)
+            skip_reason = (
+                f"Required dependency {failed_node.id} failed: {_root_error}"
+            )
             logger.info(f"[GraphRuntime] Marking node {target_node.id} as SKIPPED")
-            target_node.mark_skipped(f"Required dependency {failed_node.id} failed")
+            target_node.mark_skipped(skip_reason)
+            
+            # Store structured error context in node metadata for planner access
+            if not hasattr(target_node, 'metadata') or target_node.metadata is None:
+                target_node.metadata = {}
+            target_node.metadata['_skip_cause'] = {
+                'failed_dependency': failed_node.id,
+                'error_summary': _root_error,
+            }
             
             logger.info(
                 f"[GraphRuntime] Marked node {target_node.id} as SKIPPED "
                 f"due to failed dependency {failed_node.id}"
             )
             
-            # Recursively mark downstream nodes
-            self._mark_downstream_skipped(graph, target_node)
+            # Recursively mark downstream nodes (pass root error through)
+            self._mark_downstream_skipped(graph, target_node, _root_error=_root_error)
     
     def _is_terminal(self, graph: 'ExecutionGraph') -> bool:
         """

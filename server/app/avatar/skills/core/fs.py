@@ -13,6 +13,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,8 @@ class FsReadInput(SkillInput):
 class FsReadOutput(SkillOutput):
     output: Optional[Any] = Field(None, description="File content (single) or dict {path: content} (batch)")
     path: str = ""
+    value_kind: Optional[str] = "text"
+    transport_mode: Optional[str] = "inline"
     content: Optional[str] = None
     size_bytes: Optional[int] = None
     # batch 模式结果
@@ -94,6 +97,8 @@ class FsReadSkill(BaseSkill[FsReadInput, FsReadOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.READ,
         aliases=["read_file", "file.read", "open_file", "fs.read_file"],
+        tags=["read", "open", "load", "读取", "打开", "查看"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     # Binary file extensions that should NOT be read in text mode
@@ -281,6 +286,9 @@ class FsWriteSkill(BaseSkill[FsWriteInput, FsWriteOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.WRITE,
         aliases=["write_file", "file.write", "save_file", "fs.write_file"],
+        tags=["save", "write", "file", "保存", "写入", "文件", "存储", "创建"],
+        dedup_mode="skip",
+        output_contract=SkillOutputContract(value_kind=ValueKind.PATH, transport_mode=TransportMode.REF),
     )
 
     async def _write_one(self, ctx: SkillContext, item: FsWriteItem) -> tuple[bool, str, int]:
@@ -423,6 +431,8 @@ class FsListSkill(BaseSkill[FsListInput, FsListOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.READ,
         aliases=["list_dir", "fs.list_dir", "ls", "dir"],
+        tags=["list", "ls", "dir", "列出", "目录", "浏览"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.JSON, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: FsListInput) -> FsListOutput:
@@ -495,6 +505,9 @@ class FsDeleteSkill(BaseSkill[FsDeleteInput, FsDeleteOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.WRITE,
         aliases=["delete_file", "remove_file", "rm", "fs.delete_file", "fs.remove"],
+        tags=["delete", "remove", "删除", "移除"],
+        dedup_mode="skip",
+        output_contract=SkillOutputContract(value_kind=ValueKind.PATH, transport_mode=TransportMode.REF),
     )
 
     async def run(self, ctx: SkillContext, params: FsDeleteInput) -> FsDeleteOutput:
@@ -594,6 +607,9 @@ class FsMoveSkill(BaseSkill[FsMoveInput, FsMoveOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.WRITE,
         aliases=["move_file", "rename_file", "mv", "fs.move_file", "fs.rename"],
+        tags=["move", "rename", "移动", "重命名"],
+        dedup_mode="skip",
+        output_contract=SkillOutputContract(value_kind=ValueKind.PATH, transport_mode=TransportMode.REF),
     )
 
     async def run(self, ctx: SkillContext, params: FsMoveInput) -> FsMoveOutput:
@@ -700,6 +716,9 @@ class FsCopySkill(BaseSkill[FsCopyInput, FsCopyOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.WRITE,
         aliases=["copy_file", "cp", "fs.copy_file"],
+        tags=["copy", "复制", "备份"],
+        dedup_mode="skip",
+        output_contract=SkillOutputContract(value_kind=ValueKind.PATH, transport_mode=TransportMode.REF),
     )
 
     async def run(self, ctx: SkillContext, params: FsCopyInput) -> FsCopyOutput:

@@ -65,7 +65,7 @@ def record_system_fallback(subsystem_name: str, error: Any, fallback_name: Optio
 _SUBSYSTEM_FLAGS: list[str] = [
     "runtime_kernel",
     "agent_loop",
-    "event_bus_v2",
+    "event_bus",
     "memory_system",
     "self_monitor",
     "policy_engine_v2",
@@ -106,7 +106,7 @@ def probe_modules() -> None:
     new_subsystem_modules = {
         "runtime_kernel": "app.avatar.runtime.kernel.runtime_kernel",
         "agent_loop": "app.avatar.runtime.kernel.agent_loop",
-        "event_bus_v2": "app.avatar.runtime.events.event_bus_v2",
+        "event_bus": "app.avatar.runtime.events.bus",
         "memory_system": "app.avatar.memory.system",
         "self_monitor": "app.avatar.runtime.selfmonitor.self_monitor",
         "policy_engine_v2": "app.avatar.runtime.policy.policy_engine",
@@ -114,6 +114,7 @@ def probe_modules() -> None:
         "collaboration_hub": "app.avatar.runtime.collaboration.collaboration_hub",
         "negotiation_engine": "app.avatar.runtime.negotiation.negotiation_engine",
         "task_scheduler": "app.avatar.runtime.scheduler.task_scheduler",
+        "multi_agent_runtime": "app.avatar.runtime.multiagent",
     }
     for name, module_path in new_subsystem_modules.items():
         if name not in _registry._capabilities:

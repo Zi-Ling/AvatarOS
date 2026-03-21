@@ -314,7 +314,15 @@ class PlannerGuard:
                 continue
 
             capability_name = action.node.capability_name
-            if not any(capability_name.startswith(prefix) for prefix in ("fs.", "file")):
+            # Only check workspace isolation for skills with FS side effects
+            try:
+                from app.avatar.skills.registry import skill_registry as _sr
+                from app.avatar.skills.base import SideEffect as _SE
+                _cls = _sr.get(capability_name)
+                _has_fs = _cls and _SE.FS in _cls.spec.side_effects
+            except Exception:
+                _has_fs = False
+            if not _has_fs:
                 continue
 
             # 收集所有需要检查的路径（支持 str 和 list[dict] 批量参数）

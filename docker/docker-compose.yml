@@ -16,7 +16,7 @@ services:
       - LLM_BASE_URL=${LLM_BASE_URL:-https://api.deepseek.com}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # Search providers (SearXNG works out of the box, commercial APIs are optional)
-      - SEARXNG_URL=http://searxng:8888
+      - SEARXNG_URL=http://searxng:8080
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - GOOGLE_CSE_KEY=${GOOGLE_CSE_KEY:-}
       - GOOGLE_CSE_ID=${GOOGLE_CSE_ID:-}
@@ -49,14 +49,14 @@ services:
   searxng:
     image: searxng/searxng:latest
     ports:
-      - "9090:9090"
+      - "9090:8080"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:
-      - SEARXNG_BASE_URL=http://localhost:8888
+      - SEARXNG_BASE_URL=http://localhost:8080
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8888/healthz"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

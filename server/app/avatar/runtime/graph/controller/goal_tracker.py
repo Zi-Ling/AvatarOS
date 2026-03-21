@@ -6,6 +6,9 @@ Extracted from GraphController. Provides:
 - Sub-goal coverage checking against succeeded nodes
 - Terminal evidence short-circuit (runtime hard rule, not Planner-dependent)
 - Progress guard (detect "success but no progress" loops)
+
+All skill metadata (tags, risk levels, side effects) is read from the
+SkillRegistry at init time — no hardcoded skill names or tag dicts.
 """
 
 from __future__ import annotations
@@ -43,30 +46,8 @@ class GoalTracker:
     )
 
     # ── Skill semantic tags ─────────────────────────────────────────────
-    COMPUTE_SKILLS: Set[str] = {"python.run", "python.eval", "shell.run"}
-
-    IO_KEYWORDS: Set[str] = {
-        "保存", "写入", "写到", "存储", "save", "write", "保存到",
-        "读取", "下载", "发送", "上传", "fetch", "download", "send", "upload",
-    }
-
-    SKILL_TAGS: Dict[str, List[str]] = {
-        "fs.write":          ["save", "write", "file", "保存", "写入", "文件", "存储"],
-        "fs.read":           ["read", "open", "load", "读取", "打开"],
-        "fs.list":           ["list", "ls", "dir", "列出", "目录"],
-        "fs.delete":         ["delete", "remove", "删除"],
-        "fs.copy":           ["copy", "复制"],
-        "fs.move":           ["move", "rename", "移动", "重命名"],
-        "python.run":        ["run", "execute", "compute", "calculate", "generate",
-                              "运行", "执行", "计算", "生成"],
-        "net.get":           ["fetch", "get", "download", "request", "获取", "下载", "请求"],
-        "net.post":          ["post", "send", "submit", "发送", "提交"],
-        "browser.open":      ["open", "browse", "visit", "打开", "浏览", "访问"],
-        "computer.app.launch": ["launch", "open", "start", "启动", "打开"],
-        "memory.store":      ["remember", "store", "记住", "存储"],
-        "memory.retrieve":   ["recall", "retrieve", "remember", "回忆", "检索"],
-        "web.search":        ["search", "搜索", "查找", "查询", "检索", "find"],
-    }
+    # Built dynamically from SkillRegistry at __init__ time.
+    # No hardcoded skill names or tag dicts.
 
     _STOPWORDS: Set[str] = {
         "the", "a", "an", "is", "are", "in", "on", "at", "to", "of",
@@ -83,6 +64,63 @@ class GoalTracker:
     def __init__(self) -> None:
         self._prev_succeeded_ids: Set[str] = set()
         self._no_progress_rounds: int = 0
+
+        # ── Build skill metadata from registry ─────────────────────────
+        self._skill_tags: Dict[str, List[str]] = {}
+        self._compute_skills: Set[str] = set()
+        self._io_tags: Set[str] = set()
+        self._producer_skills: Set[str] = set()
+        self._read_only_skills: Set[str] = set()
+        self._load_from_registry()
+
+    def _load_from_registry(self) -> None:
+        """
+        Build all skill classification sets from SkillRegistry.
+
+        Classification rules (based on SkillSpec metadata, not names):
+        - skill_tags:      spec.tags (for sub-goal coverage matching)
+        - compute_skills:  risk_level == EXECUTE (code execution skills)
+        - io_tags:         union of tags from all WRITE/READ skills (for
+                           detecting IO intent in sub-goals)
+        - producer_skills: risk_level in (WRITE, EXECUTE, SYSTEM)
+                           Only skills whose risk_level explicitly indicates
+                           mutation are producers.  READ skills with FS
+                           side_effects (e.g. fs.read) must NOT be counted —
+                           they observe state but never produce deliverables.
+        - read_only_skills: risk_level in (READ, SAFE)
+        """
+        from app.avatar.skills.base import SkillRiskLevel
+        from app.avatar.skills.registry import skill_registry
+
+        for spec in skill_registry.list_specs():
+            # Tags for sub-goal coverage
+            self._skill_tags[spec.name] = spec.tags if spec.tags else [spec.name]
+
+            # Compute skills: EXECUTE risk level
+            if spec.risk_level == SkillRiskLevel.EXECUTE:
+                self._compute_skills.add(spec.name)
+
+            # Producer skills: can create/modify external state.
+            # Keyed strictly on risk_level — side_effects alone are NOT
+            # sufficient because READ skills (fs.read, fs.list) carry
+            # SideEffect.FS but never produce output files.
+            if spec.risk_level in (SkillRiskLevel.WRITE, SkillRiskLevel.EXECUTE, SkillRiskLevel.SYSTEM):
+                self._producer_skills.add(spec.name)
+
+            # Read-only skills: READ or SAFE risk level
+            if spec.risk_level in (SkillRiskLevel.READ, SkillRiskLevel.SAFE):
+                self._read_only_skills.add(spec.name)
+
+            # IO tags: collect tags from READ/WRITE skills for IO intent detection
+            if spec.risk_level in (SkillRiskLevel.READ, SkillRiskLevel.WRITE):
+                self._io_tags.update(spec.tags)
+
+        logger.debug(
+            "[GoalTracker] Loaded from registry: %d skills, "
+            "%d compute, %d producer, %d read-only",
+            len(self._skill_tags), len(self._compute_skills),
+            len(self._producer_skills), len(self._read_only_skills),
+        )
 
     # ── Goal decomposition ──────────────────────────────────────────────
 
@@ -109,7 +147,18 @@ class GoalTracker:
 
     def decompose_goal(self, goal: str) -> List[str]:
         """Split goal into sub-goals. Single-clause goals return [goal]."""
-        parts = self._GOAL_SPLIT_PATTERN.split(goal)
+        # ── For phased goals, only split the actual goal line ────────────
+        # PhasedPlanner injects "[Phase X/Y] <goal>\n\nCompleted phases:\n..."
+        # The completed-phase summaries may contain conjunctions (然后, and then)
+        # that would incorrectly trigger splitting. Only split the first line.
+        split_text = goal
+        if re.match(r'\[Phase\s+\d+/\d+\]', goal):
+            # Extract just the first line (the actual phase goal)
+            first_line = goal.split('\n', 1)[0].strip()
+            if first_line:
+                split_text = first_line
+
+        parts = self._GOAL_SPLIT_PATTERN.split(split_text)
         sub_goals = [p.strip() for p in parts if p and p.strip()]
         result = sub_goals if len(sub_goals) > 1 else [goal]
 
@@ -162,6 +211,9 @@ class GoalTracker:
 
     # ── Deliverable coverage (planning perspective) ─────────────────────
 
+    # _PRODUCER_SKILLS and _READ_ONLY_SKILLS are now built dynamically
+    # from SkillRegistry in __init__ → _load_from_registry().
+
     def get_unsatisfied_deliverables(
         self,
         deliverables: List[Any],
@@ -171,7 +223,10 @@ class GoalTracker:
         Return deliverables not yet produced by any succeeded node (planning perspective).
 
         This is a lightweight check: a deliverable is considered "produced" if any
-        succeeded node wrote a file whose extension matches the deliverable format.
+        succeeded *producer* node wrote a file whose extension matches the deliverable
+        format.  Read-only skills (fs.read, fs.list, …) are excluded so that input
+        file paths are never mistaken for produced deliverables.
+
         Final verification (verifier pass) is done by CompletionGate, not here.
         """
         from app.avatar.runtime.graph.models.step_node import NodeStatus
@@ -179,8 +234,11 @@ class GoalTracker:
         if not deliverables:
             return []
 
+        # Only consider nodes whose skill can actually *produce* files.
         successful_nodes = [
-            n for n in graph.nodes.values() if n.status == NodeStatus.SUCCESS
+            n for n in graph.nodes.values()
+            if n.status == NodeStatus.SUCCESS
+            and n.capability_name in self._producer_skills
         ]
         if not successful_nodes:
             return list(deliverables)
@@ -232,11 +290,11 @@ class GoalTracker:
     def _node_covers(self, node: Any, sub_goal: str) -> bool:
         sg_lower = sub_goal.lower()
         skill = node.capability_name
-        tags = self.SKILL_TAGS.get(skill, [skill])
+        tags = self._skill_tags.get(skill, [skill])
         if any(t.lower() in sg_lower for t in tags):
             return True
-        if skill in self.COMPUTE_SKILLS:
-            if not any(kw in sg_lower for kw in self.IO_KEYWORDS):
+        if skill in self._compute_skills:
+            if not any(t.lower() in sg_lower for t in self._io_tags):
                 return True
         # CJK keyword match in node outputs
         output_text = ""
@@ -261,6 +319,8 @@ class GoalTracker:
 
     # ── Terminal evidence short-circuit ─────────────────────────────────
 
+    # _READ_ONLY_SKILLS is built dynamically from registry (see __init__).
+
     def check_terminal_evidence(
         self,
         graph: 'ExecutionGraph',
@@ -275,13 +335,11 @@ class GoalTracker:
         1. All sub-goals covered.
         2. keyword_overlap >= 0.5 between goal and last success output,
            OR "answer-produced pattern" matches (web.search ok + llm.fallback ok).
-        3. No CONTINUE signals (missing write, recent failure).
+        3. No CONTINUE signals (unsatisfied deliverables, recent failure).
         4. For multi-step goals: at least 2 distinct skill types succeeded.
 
         Hard override: if ALL expected deliverable formats have been produced
         by succeeded nodes, short-circuit regardless of other conditions.
-        This prevents the Planner from adding unnecessary verification steps
-        after all files are already written.
         """
         from app.avatar.runtime.graph.models.step_node import NodeStatus
 
@@ -292,15 +350,11 @@ class GoalTracker:
             return None
 
         # ── Hard override: deliverable-level short-circuit ──────────────
-        # If all expected deliverable formats are produced, the task is done
-        # regardless of whether Planner has said FINISH. This is a hard
-        # constraint that doesn't depend on prompt engineering.
         _ng = env_context.get("normalized_goal")
         _deliverables = getattr(_ng, "deliverables", None) if _ng else None
         if _deliverables:
             unsatisfied = self.get_unsatisfied_deliverables(_deliverables, graph)
             if not unsatisfied:
-                # Also require sub-goal coverage to avoid premature exit
                 uncovered = self.get_uncovered_sub_goals(sub_goals, graph)
                 if not uncovered:
                     _fmts = [d.format for d in _deliverables]
@@ -315,21 +369,45 @@ class GoalTracker:
         if uncovered:
             return None
 
+        # ── Condition 3a (early): unsatisfied deliverables block exit ───
+        # If the goal has deliverables that haven't been produced yet by a
+        # producer skill, do NOT short-circuit.  This replaces the old
+        # keyword-based write-intent detection — deliverables are extracted
+        # by GoalTracker.decompose_goal and are language-agnostic.
+        if _deliverables:
+            unsatisfied = self.get_unsatisfied_deliverables(_deliverables, graph)
+            if unsatisfied:
+                _fmts = [d.format for d in unsatisfied]
+                logger.debug(
+                    "[TerminalEvidence] Unsatisfied deliverables %s — continuing", _fmts
+                )
+                return None
+
         # ── Single-goal, no-deliverable short-circuit ───────────────────
         # For simple tasks (e.g. "计算素数", "生成随机数") where:
         #   - Only 1 sub-goal (already covered above)
-        #   - No deliverables expected
+        #   - No deliverables expected (checked above)
         #   - No multi-step connectors in goal
-        #   - All nodes succeeded (no failures to recover from)
-        # → Short-circuit without keyword overlap check.
-        # This saves a full planner call (~9k tokens) for trivial tasks
-        # where keyword overlap between Chinese goal and code output is low.
+        #   - All nodes succeeded
+        #   - At least one non-read-only skill succeeded
+        #     (pure fs.read tasks should let Planner decide FINISH —
+        #      TerminalEvidence can't tell if the user wanted more work)
         if (
             len(sub_goals) <= 1
             and not _deliverables
             and not self._MULTI_STEP_CONNECTORS.search(graph.goal)
             and all(n.status == NodeStatus.SUCCESS for n in graph.nodes.values())
         ):
+            # Guard: if ALL succeeded skills are read-only, don't short-circuit.
+            # The Planner may still need to plan write/compute steps.
+            _succeeded_skills = {n.capability_name for n in successful_nodes}
+            if _succeeded_skills <= self._read_only_skills:
+                logger.debug(
+                    "[TerminalEvidence] Only read-only skills succeeded (%s) — "
+                    "letting Planner decide", _succeeded_skills
+                )
+                return None
+
             logger.info(
                 "[TerminalEvidence] Single-goal no-deliverable short-circuit: "
                 f"{len(successful_nodes)} node(s) all succeeded"
@@ -340,10 +418,6 @@ class GoalTracker:
             )
 
         # Condition 4: multi-step goal guard
-        # If the goal contains multi-step connectors, require at least 2
-        # distinct skill types to have succeeded. This prevents short-circuit
-        # after only the first phase (e.g. download) when a second phase
-        # (e.g. convert to grayscale) hasn't executed yet.
         goal_lower = graph.goal.lower()
         if self._MULTI_STEP_CONNECTORS.search(graph.goal):
             distinct_skills = {n.capability_name for n in successful_nodes}
@@ -359,33 +433,17 @@ class GoalTracker:
         keyword_overlap = self._keyword_overlap(graph.goal, last_success)
 
         # Condition 2b: answer-produced pattern
-        # web.search succeeded + llm.fallback succeeded → info-seeking goal is answered
         answer_produced = self._answer_produced_pattern(successful_nodes)
 
         if keyword_overlap < 0.5 and not answer_produced:
             return None
 
-        # Condition 3: no CONTINUE signals
-
-        # 3a: write intent without write success
-        _WRITE_INTENT_KW = {
-            "写入", "写到", "写文件", "创建文件", "保存", "存储", "生成文件",
-            "write", "create file", "save file", "output file",
-        }
-        _WRITE_SKILLS = {"fs.write", "fs.copy"}
-        if any(kw in goal_lower for kw in _WRITE_INTENT_KW):
-            if not any(
-                n.capability_name in _WRITE_SKILLS and n.status == NodeStatus.SUCCESS
-                for n in graph.nodes.values()
-            ):
-                return None
-
-        # 3b: last node failed
+        # Condition 3b: last node failed
         all_nodes = list(graph.nodes.values())
         if all_nodes and all_nodes[-1].status == NodeStatus.FAILED:
             return None
 
-        reason_parts = [f"all sub-goals covered"]
+        reason_parts = ["all sub-goals covered"]
         if answer_produced:
             reason_parts.append("answer-produced (web.search+llm.fallback)")
         else:
@@ -406,15 +464,27 @@ class GoalTracker:
         output_tokens = set(re.findall(r'[\w\u4e00-\u9fff]+', output_text))
         return len(goal_tokens & output_tokens) / max(len(goal_tokens), 1)
 
-    @staticmethod
-    def _answer_produced_pattern(successful_nodes: List[Any]) -> bool:
+    def _answer_produced_pattern(self, successful_nodes: List[Any]) -> bool:
         """
-        Answer-produced pattern: web.search succeeded AND llm.fallback succeeded.
-        This covers info-seeking goals where keyword overlap between Chinese goal
-        and English LLM output is low, but the task is semantically complete.
+        Answer-produced pattern: a "search" skill succeeded AND an "answer/reply"
+        skill succeeded.  This covers info-seeking goals where keyword overlap
+        between Chinese goal and English LLM output is low, but the task is
+        semantically complete.
+
+        Detection is tag-based — no hardcoded skill names.
         """
-        skills = {n.capability_name for n in successful_nodes}
-        return "web.search" in skills and "llm.fallback" in skills
+        has_search = False
+        has_answer = False
+        from app.avatar.skills.registry import skill_registry
+        for n in successful_nodes:
+            tags = set(self._skill_tags.get(n.capability_name, []))
+            if tags & skill_registry.SEARCH_TAGS:
+                has_search = True
+            if tags & skill_registry.ANSWER_TAGS:
+                has_answer = True
+            if has_search and has_answer:
+                return True
+        return False
 
     # ── Progress guard ──────────────────────────────────────────────────
 

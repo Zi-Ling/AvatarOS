@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-"""BudgetGuardV2 — multi-dimension budget guard with elastic shrink.
+"""BudgetMonitor — multi-dimension budget monitor with elastic shrink.
 
-Wraps the existing BudgetAccount and adds multi-dimension budget tracking
-(token_budget, cost_budget, time_budget, api_call_budget).
+Monitors multi-dimension budget utilization (token, cost, time, api_call)
+as part of SelfMonitor's check cycle.
 
 - 80% utilization → BUDGET_WARNING + SHRINK_BUDGET
 - 100% utilization → SUSPEND_TASK
 - enter_shrink_mode(): reduce LLM call frequency, switch to economy model,
   reduce parallelism.
+
+Note: This is distinct from BudgetGuard (in graph/controller/) which tracks
+per-task planner call/token/cost budgets within the react loop.
+BudgetMonitor operates at the global monitoring level via SelfMonitor.
 
 Requirements: 9.5, 9.6
 """
@@ -66,8 +70,8 @@ class BudgetDimension:
         )
 
 
-class BudgetGuardV2:
-    """Multi-dimension budget guard with elastic shrink mode.
+class BudgetMonitor:
+    """Multi-dimension budget monitor with elastic shrink mode.
 
     Wraps the existing BudgetAccount for actual cost tracking and adds
     multi-dimension budget monitoring with warning/suspend thresholds.
@@ -133,7 +137,7 @@ class BudgetGuardV2:
                 signals.append(
                     RuntimeSignal(
                         signal_type=SignalType.SUSPEND_TASK,
-                        source_subsystem="BudgetGuardV2",
+                        source_subsystem="BudgetMonitor",
                         target_task_id=ctx.task_id,
                         priority=5,
                         reason=(
@@ -152,7 +156,7 @@ class BudgetGuardV2:
                 signals.append(
                     RuntimeSignal(
                         signal_type=SignalType.BUDGET_WARNING,
-                        source_subsystem="BudgetGuardV2",
+                        source_subsystem="BudgetMonitor",
                         target_task_id=ctx.task_id,
                         priority=2,
                         reason=(
@@ -170,7 +174,7 @@ class BudgetGuardV2:
                 signals.append(
                     RuntimeSignal(
                         signal_type=SignalType.SHRINK_BUDGET,
-                        source_subsystem="BudgetGuardV2",
+                        source_subsystem="BudgetMonitor",
                         target_task_id=ctx.task_id,
                         priority=2,
                         reason=f"Entering shrink mode for '{dim.name}'",
@@ -190,7 +194,7 @@ class BudgetGuardV2:
         if not self._shrink_mode:
             self._shrink_mode = True
             self._shrink_activated_at = time.time()
-            logger.info("[BudgetGuardV2] Shrink mode activated")
+            logger.info("[BudgetMonitor] Shrink mode activated")
 
     def exit_shrink_mode(self) -> None:
         """Deactivate shrink mode."""
@@ -204,3 +208,52 @@ class BudgetGuardV2:
             for name, dim in self._dimensions.items()
             if dim.limit > 0
         }
+
+    # ------------------------------------------------------------------
+    # Per-Role Budget (Multi-Agent extension)
+    # ------------------------------------------------------------------
+
+    def update_role_usage(
+        self,
+        role_name: str,
+        dimension: str,
+        used: float,
+    ) -> None:
+        """Update usage for a specific role's budget dimension."""
+        if not hasattr(self, "_role_budgets"):
+            self._role_budgets: dict[str, dict[str, BudgetDimension]] = {}
+        if role_name not in self._role_budgets:
+            self._role_budgets[role_name] = {}
+        if dimension not in self._role_budgets[role_name]:
+            self._role_budgets[role_name][dimension] = BudgetDimension(
+                name=f"{role_name}.{dimension}", limit=0.0
+            )
+        self._role_budgets[role_name][dimension].used = used
+
+    def get_role_utilization(self, role_name: str) -> dict[str, float]:
+        """Return utilization summary for a specific role."""
+        if not hasattr(self, "_role_budgets"):
+            return {}
+        role_dims = getattr(self, "_role_budgets", {}).get(role_name, {})
+        return {
+            name: dim.utilization
+            for name, dim in role_dims.items()
+            if dim.limit > 0
+        }
+
+    def set_role_budget_limit(
+        self,
+        role_name: str,
+        dimension: str,
+        limit: float,
+    ) -> None:
+        """Set budget limit for a specific role dimension."""
+        if not hasattr(self, "_role_budgets"):
+            self._role_budgets: dict[str, dict[str, BudgetDimension]] = {}
+        if role_name not in self._role_budgets:
+            self._role_budgets[role_name] = {}
+        if dimension not in self._role_budgets[role_name]:
+            self._role_budgets[role_name][dimension] = BudgetDimension(
+                name=f"{role_name}.{dimension}"
+            )
+        self._role_budgets[role_name][dimension].limit = limit

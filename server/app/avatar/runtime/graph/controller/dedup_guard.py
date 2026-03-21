@@ -30,17 +30,22 @@ class DedupGuard:
     - Skips dedup for nodes with incoming edges (depend on new upstream data).
     """
 
-    # Skills that skip dedup entirely (each call targets a different file)
-    SKIP_SKILLS: frozenset = frozenset({
-        "fs.write", "fs.copy", "fs.move", "fs.delete",
-    })
-
-    # Skills that require exact fingerprint match (fuzzy would mis-kill)
-    EXACT_MATCH_SKILLS: frozenset = frozenset({
-        "llm.fallback", "llm.call",
-    })
+    # Dedup mode is now read from SkillSpec.dedup_mode at runtime.
+    # No hardcoded skill name sets.
 
     # ── Fingerprint helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def _get_dedup_mode(skill: str) -> str:
+        """Get dedup_mode from SkillSpec via registry. Default: 'fuzzy'."""
+        try:
+            from app.avatar.skills.registry import skill_registry
+            cls = skill_registry.get(skill)
+            if cls and hasattr(cls.spec, "dedup_mode"):
+                return cls.spec.dedup_mode
+        except Exception:
+            pass
+        return "fuzzy"
 
     @staticmethod
     def _normalize_param_value(v: Any) -> str:
@@ -77,7 +82,8 @@ class DedupGuard:
         for k in key_params:
             v = params.get(k)
             if v is not None:
-                if skill in self.EXACT_MATCH_SKILLS:
+                dedup_mode = self._get_dedup_mode(skill)
+                if dedup_mode == "exact":
                     import hashlib
                     full_val = re.sub(r'\s+', ' ', str(v).strip())
                     parts.append(f"{k}={hashlib.md5(full_val.encode()).hexdigest()}")
@@ -125,8 +131,9 @@ class DedupGuard:
                 skill = action.node.capability_name
                 new_params = action.node.params or {}
 
-                # Skip dedup for write-type skills
-                if skill in self.SKIP_SKILLS:
+                # Skip dedup for write-type skills (dedup_mode == "skip")
+                dedup_mode = self._get_dedup_mode(skill)
+                if dedup_mode == "skip":
                     filtered_actions.append(action)
                     continue
 
@@ -172,14 +179,15 @@ class DedupGuard:
         """Check if new_fp matches any succeeded fingerprint.
 
         Rules:
-        - EXACT_MATCH_SKILLS: exact fingerprint match only.
+        - dedup_mode == "exact": exact fingerprint match only.
         - Same skill name: fuzzy match (SequenceMatcher >= 0.92).
         - Different skill names: NO fuzzy match — only exact fingerprint
           match.  This prevents cross-skill false positives like
           net.get vs net.download being wrongly deduped.
         """
+        dedup_mode = self._get_dedup_mode(skill)
         for existing_fp in succeeded_fps:
-            if skill in self.EXACT_MATCH_SKILLS:
+            if dedup_mode == "exact":
                 if new_fp == existing_fp:
                     logger.info(f"[DedupGuard] Exact-duplicate: skill={skill}")
                     return True

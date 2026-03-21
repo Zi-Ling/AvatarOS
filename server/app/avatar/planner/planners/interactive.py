@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from difflib import SequenceMatcher
 
 from ..base import TaskPlanner
@@ -14,16 +13,12 @@ from ..models import Task, Step
 from ..registry import register_planner
 from app.avatar.skills.registry import skill_registry
 from app.avatar.runtime.context.reference_resolver import _is_binary_like_payload
+from app.llm.types import LLMMessage, LLMRole, LLMResponse, ToolDefinition
 
 # Extracted modules
 from .planner_prompt import INTERACTIVE_SYSTEM_PROMPT
 from .history_formatter import (
-    _sanitize_host_paths,
-    _is_markup_content,
-    _compress_structured_output,
     _format_history,
-    _build_goal_coverage_summary,
-    _format_skills,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,9 +56,15 @@ class InteractiveLLMPlanner(TaskPlanner):
         self._last_thought = None
         self._last_action = None
         self._repeat_count = 0
+        # Direction correction: soft off-track detection
+        self._off_track_count = 0
+        # 通用执行器不算偏航
+        self._generic_skills = frozenset({"python.run", "browser.run", "llm.fallback"})
         # 优化 4: 文件系统缓存
         self._fs_cache = None
         self._fs_cache_timestamp = 0
+        # Direct reply message from FINISH (no skill execution needed)
+        self._last_final_message: str = ""
 
     async def make_task(
         self,
@@ -94,7 +95,7 @@ class InteractiveLLMPlanner(TaskPlanner):
         Generates the next step to append to the task.
         Returns None if task is finished.
         """
-        available_skills = env_context.get("available_skills", {})
+        available_skills = env_context.get("available_skills", {})  # kept for env_context passthrough
         
         # 优化 4: 获取文件系统状态
         workspace_state = self._get_workspace_state(env_context)
@@ -111,6 +112,19 @@ Please try a DIFFERENT approach:
 - Use a different skill
 - If all approaches failed, use llm.fallback to inform the user
 """
+
+        # Direction correction: soft off-track warning
+        direction_warning = ""
+        if self._off_track_count >= 2:
+            _top_skills = env_context.get("router_scored_skills", [])
+            _top_names = [s.get("name", s) if isinstance(s, dict) else str(s) for s in _top_skills[:3]]
+            if _top_names:
+                direction_warning = (
+                    f"\n⚠️ DIRECTION CHECK: Your recent skill choices don't align with the "
+                    f"user's intent. The most relevant skills for this goal are: "
+                    f"{', '.join(_top_names)}. Please reconsider your approach and "
+                    f"prioritize these skills unless you have a specific reason not to.\n"
+                )
         
         # simple_task_section removed — planner self-regulates step count
         simple_task_section = ""
@@ -175,13 +189,26 @@ Please try a DIFFERENT approach:
                 lines.append("- Double-check ALL required parameters before submitting.")
             recovery_section = "\n".join(lines) + "\n"
 
-        # 跨轮对话历史：统一消息模型，task_result 类型消息携带结构化 metadata
+        # 跨轮对话历史：两层记忆 + 滑动窗口
+        # Layer 1: 结构化事实摘要（覆盖全部历史）
+        # Layer 2: 最近 5 条完整消息（保证近期上下文精确）
         conversation_history_section = ""
+        conversation_summary_section = ""
         chat_history = env_context.get("chat_history", [])
+
+        # Inject conversation summary if available (covers older messages)
+        _conv_summary = env_context.get("conversation_summary")
+        if _conv_summary:
+            try:
+                from app.avatar.memory.conversation_summary import format_summary_for_prompt
+                conversation_summary_section = format_summary_for_prompt(_conv_summary)
+            except Exception:
+                pass
+
         if chat_history:
-            # 只取最近 10 条，避免 prompt 过长
-            recent = chat_history[-10:]
-            lines = ["## Conversation History (for cross-turn reference resolution)"]
+            # 保留最近 5 条完整消息（近期上下文精确）
+            recent = chat_history[-5:]
+            lines = ["## Conversation History (recent — for cross-turn reference resolution)"]
             lines.append(
                 "> MANDATORY: If the user refers to 'it', 'that', 'the result', 'this time', "
                 "'这个时间', '那首诗', '刚才的结果', or ANY similar cross-turn reference, "
@@ -299,7 +326,6 @@ Please try a DIFFERENT approach:
         system_env_section = ""
         system_info = env_context.get("system")
         if system_info:
-            default_paths = env_context.get("default_paths", {})
             # Show container paths for workspace — python.run executes inside
             # Docker where user workspace is mounted at /workspace.
             # Host-specific paths (Desktop/Downloads/Documents) are kept as-is
@@ -319,48 +345,68 @@ Please try a DIFFERENT approach:
 
 """
 
+        # 注入当前日期，防止 LLM 训练数据截止导致年份错误
+        from datetime import date as _date
+        _today = _date.today()
+        _current_date_section = (
+            f"## Current Date\n"
+            f"Today is {_today.isoformat()} ({_today.strftime('%A')}). "
+            f"Year is {_today.year}. Use this date for any time-sensitive queries.\n\n"
+        )
+
+        # 检测用户语言，注入回复语言指令
+        _user_lang = "Chinese" if any('\u4e00' <= c <= '\u9fff' for c in task.goal) else "English"
+        _reply_language_section = (
+            f"## Reply Language\n"
+            f"The user's language is {_user_lang}. All user-facing text "
+            f"(final_message, clarifications, error messages) MUST be in {_user_lang}.\n\n"
+        )
+
         prompt = f"""{INTERACTIVE_SYSTEM_PROMPT}
 
 ## Goal
 {task.goal}
 
-{simple_task_section}{system_env_section}## Available Skills
-{_format_skills(available_skills)}
+{_current_date_section}{_reply_language_section}{simple_task_section}{system_env_section}## Available Skills
+(Provided as callable tools — see tool definitions)
 
 ## Current Workspace State
 {workspace_state}
 
-{context_bindings_section}{conversation_history_section}
+{context_bindings_section}{conversation_summary_section}{conversation_history_section}
 ## Execution History (Truth)
 {_format_history(task, workspace_root=env_context.get("workspace_path"), session_root=env_context.get("session_workspace_path"))}
 
-{loop_warning}{goal_tracker_section}{dedup_hint_section}{truncation_hint_section}{schema_hint_section}{recovery_section}{deliverable_section}
+{loop_warning}{direction_warning}{goal_tracker_section}{dedup_hint_section}{truncation_hint_section}{schema_hint_section}{recovery_section}{deliverable_section}
 ## Your Next Move
-Return ONLY the JSON object.
+Call a tool to execute the next step, or reply with text if the goal is achieved or no tool is needed.
 """
-        # Call LLM (run sync call in thread pool to avoid blocking event loop)
-        loop = asyncio.get_event_loop()
-        raw_response = await loop.run_in_executor(None, self._call_llm, prompt)
-        
-        # Parse
-        try:
-            data = self._parse_json(raw_response)
-        except PlannerTruncationError:
-            raise  # Let graph_controller handle truncation recovery
-        except Exception as e:
-            raise ValueError(f"LLM output malformed: {e}\nRaw: {raw_response}")
+        # Build tool definitions and reverse name mapping from skill registry
+        tool_defs, name_reverse_map = self._build_tool_definitions()
 
-        if data.get("type") == "finish":
-            self._reset_loop_detection()
-            return None
-        
-        if data.get("type") == "execute":
-            skill_name = data.get("skill")
-            params = data.get("params", {})
-            thought = data.get("thought", "")
-            
+        # Build messages for chat API (system + user)
+        messages = [
+            LLMMessage(role=LLMRole.SYSTEM, content=prompt),
+            LLMMessage(role=LLMRole.USER, content=task.goal),
+        ]
+
+        # Call LLM with tools (run sync call in thread pool to avoid blocking event loop)
+        loop = asyncio.get_event_loop()
+        response: LLMResponse = await loop.run_in_executor(
+            None, self._call_llm_with_tools, messages, tool_defs,
+        )
+
+        # Parse response: tool_calls → execute, text content → finish
+        if response.tool_calls and len(response.tool_calls) > 0:
+            tc = response.tool_calls[0]  # Take first tool call
+            # Reverse map API name (e.g. "web-search") back to registry name ("web.search")
+            skill_name = name_reverse_map.get(tc.name, tc.name)
+            params = tc.arguments or {}
+            thought = response.content or ""
+
             self._check_loop(thought, skill_name, params)
-            
+            self._check_direction(skill_name, env_context)
+
             resolved_cls = skill_registry.get(skill_name)
             if resolved_cls:
                 skill_name = resolved_cls.spec.name
@@ -370,182 +416,53 @@ Return ONLY the JSON object.
                 order=len(task.steps),
                 skill_name=skill_name,
                 params=params,
-                description=thought
+                description=thought,
             )
-            
-        raise ValueError(f"Unknown action type: {data.get('type')}")
+
+        # No tool calls → LLM chose to reply with text → FINISH
+        self._reset_loop_detection()
+        self._last_final_message = response.content or ""
+        return None
 
     def _call_llm(self, prompt: str) -> str:
         content, usage = self._llm.call_with_usage(prompt)
         self._last_usage: dict = usage
         return content
 
-    def _parse_json(self, text: str) -> Dict[str, Any]:
-        cleaned = text.strip()
-
-        # ── Attempt 1: direct parse (covers well-formed JSON) ────────────
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-
-        # ── Attempt 2: fix raw newlines inside JSON string values ────────
-        # LLMs often emit literal newlines inside JSON strings (e.g. code in
-        # fs.write content) instead of \\n escape sequences.
-        try:
-            fixed = self._fix_json_string_newlines(cleaned)
-            return json.loads(fixed)
-        except (json.JSONDecodeError, Exception):
-            pass
-
-        # ── Attempt 3: strip markdown code fences then retry ─────────────
-        # Only try this if direct parse failed — avoids destroying JSON that
-        # contains ``` inside string values (e.g. markdown in fs.write).
-        if "```" in cleaned:
-            match = re.search(r'```(?:json)?\s*\n?(.*?)```', cleaned, re.DOTALL)
-            if match:
-                fenced = match.group(1).strip()
-                try:
-                    return json.loads(fenced)
-                except json.JSONDecodeError:
-                    pass
-                try:
-                    return json.loads(self._fix_json_string_newlines(fenced))
-                except (json.JSONDecodeError, Exception):
-                    pass
-
-        # ── Truncation recovery ──────────────────────────────────────────────
-        # Use newline-fixed text for all recovery attempts
-        try:
-            fixed_for_recovery = self._fix_json_string_newlines(cleaned)
-        except Exception:
-            fixed_for_recovery = cleaned
-
-        type_match = re.search(r'"type"\s*:\s*"(\w+)"', cleaned)
-        skill_match = re.search(r'"skill"\s*:\s*"([^"]+)"', cleaned)
-
-        if type_match and type_match.group(1) == "finish":
-            return {"type": "finish", "thought": "[truncated]", "final_message": "Task completed."}
-
-        if type_match and type_match.group(1) == "execute" and skill_match:
-            params: Dict[str, Any] = {}
-            # Try extracting params from the newline-fixed text using
-            # string-aware brace matching (skips braces inside JSON strings)
-            params_start = fixed_for_recovery.find('"params"')
-            if params_start != -1:
-                brace_start = fixed_for_recovery.find('{', params_start + len('"params"'))
-                if brace_start != -1:
-                    end = self._find_matching_brace(fixed_for_recovery, brace_start)
-                    if end > brace_start:
-                        try:
-                            params = json.loads(fixed_for_recovery[brace_start:end + 1])
-                        except Exception:
-                            pass
-            # Fallback: try on original cleaned text with naive brace matching
-            if not params:
-                params_start = cleaned.find('"params"')
-                if params_start != -1:
-                    brace_start = cleaned.find('{', params_start + len('"params"'))
-                    if brace_start != -1:
-                        depth = 0
-                        end = brace_start
-                        for i, ch in enumerate(cleaned[brace_start:], brace_start):
-                            if ch == '{':
-                                depth += 1
-                            elif ch == '}':
-                                depth -= 1
-                                if depth == 0:
-                                    end = i
-                                    break
-                        try:
-                            params = json.loads(cleaned[brace_start:end + 1])
-                        except Exception:
-                            pass
-            logger.warning(
-                f"[Planner] LLM output truncated, recovered skill={skill_match.group(1)} "
-                f"params_keys={list(params.keys())}"
-            )
-            # 如果参数为空，说明截断太严重，无法恢复出有效 action
-            if not params:
-                raise PlannerTruncationError(
-                    skill_name=skill_match.group(1),
-                    message=(
-                        f"LLM output truncated: recovered skill={skill_match.group(1)} "
-                        f"but params is empty, cannot construct valid action"
-                    ),
-                )
-            return {
-                "type": "execute",
-                "thought": "[truncated — thought field exceeded token limit]",
-                "skill": skill_match.group(1),
-                "params": params,
-            }
-
-        raise ValueError(f"Cannot parse or recover LLM output")
+    def _call_llm_with_tools(
+        self, messages: List[LLMMessage], tools: List[ToolDefinition],
+    ) -> LLMResponse:
+        """Call LLM with tool definitions. Returns full LLMResponse."""
+        response = self._llm.chat(messages, tools=tools)
+        self._last_usage: dict = response.usage or {}
+        return response
 
     @staticmethod
-    def _find_matching_brace(text: str, start: int) -> int:
-        """Find the matching closing brace for an opening brace at `start`.
+    def _build_tool_definitions() -> tuple[List[ToolDefinition], Dict[str, str]]:
+        """Convert all registered skills to LLM ToolDefinition objects.
 
-        Unlike naive depth counting, this is JSON-string-aware: braces inside
-        quoted strings are ignored. Returns the index of the matching `}`,
-        or `start` if no match is found.
+        Skill names use dots (e.g. ``web.search``) but many LLM APIs
+        (DeepSeek, OpenAI) require tool names to match ``^[a-zA-Z0-9_-]+$``.
+        We replace ``.`` → ``-`` when building tool definitions and return
+        a reverse mapping dict (api_name → original_name) for lookup.
+
+        Returns:
+            (tool_definitions, reverse_map) where reverse_map maps
+            e.g. ``"web-search"`` → ``"web.search"``.
         """
-        depth = 0
-        in_string = False
-        i = start
-        n = len(text)
-        while i < n:
-            ch = text[i]
-            if ch == '\\' and in_string and i + 1 < n:
-                i += 2  # skip escaped char
-                continue
-            if ch == '"':
-                in_string = not in_string
-            elif not in_string:
-                if ch == '{':
-                    depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:
-                        return i
-            i += 1
-        return start
-
-    @staticmethod
-    def _fix_json_string_newlines(text: str) -> str:
-        """Escape literal newlines/tabs inside JSON string values.
-
-        LLMs frequently emit real newlines inside JSON strings (especially in
-        code content for fs.write). This walks the text character-by-character,
-        tracking whether we're inside a JSON string, and replaces unescaped
-        control characters with their escape sequences.
-        """
-        result = []
-        in_string = False
-        i = 0
-        n = len(text)
-        while i < n:
-            ch = text[i]
-            if ch == '\\' and in_string and i + 1 < n:
-                # Escaped character — pass through as-is
-                result.append(ch)
-                result.append(text[i + 1])
-                i += 2
-                continue
-            if ch == '"':
-                in_string = not in_string
-                result.append(ch)
-            elif in_string and ch == '\n':
-                result.append('\\n')
-            elif in_string and ch == '\r':
-                result.append('\\r')
-            elif in_string and ch == '\t':
-                result.append('\\t')
-            else:
-                result.append(ch)
-            i += 1
-        return ''.join(result)
+        schemas = skill_registry.to_tool_schemas()
+        tools = []
+        reverse_map: Dict[str, str] = {}
+        for s in schemas:
+            original_name = s["name"]
+            api_name = original_name.replace(".", "-")
+            reverse_map[api_name] = original_name
+            tools.append(ToolDefinition(
+                name=api_name,
+                description=s["description"],
+                parameters=s["parameters"],
+            ))
+        return tools, reverse_map
 
     def _get_workspace_state(self, env_context: Dict[str, Any]) -> str:
         """优化 4: 获取工作区文件状态（带缓存和忽略列表）"""
@@ -596,12 +513,35 @@ Return ONLY the JSON object.
                 self._repeat_count = 0
         self._last_thought = thought
         self._last_action = (skill_name, params)
+
+    def _check_direction(self, skill_name: str, env_context: Dict[str, Any]) -> None:
+        """Soft off-track detection: count consecutive uses of skills not in Router top-3.
+
+        Generic executors (python.run, browser.run, llm.fallback) are exempt —
+        they're used for many intent types and don't indicate direction error.
+        """
+        if skill_name in self._generic_skills:
+            return  # generic executors are always on-track
+        top_skills = env_context.get("router_scored_skills", [])
+        top_names = set()
+        for s in top_skills[:3]:
+            if isinstance(s, dict):
+                top_names.add(s.get("name", ""))
+            else:
+                top_names.add(str(s))
+        if not top_names:
+            return  # no router info, can't judge
+        if skill_name in top_names:
+            self._off_track_count = 0
+        else:
+            self._off_track_count += 1
     
     def _reset_loop_detection(self) -> None:
         """重置死循环检测状态"""
         self._last_thought = None
         self._last_action = None
         self._repeat_count = 0
+        self._off_track_count = 0
 
     # -----------------------------------------------------------------------
     # Graph Runtime compatibility (Requirements: 6.3, 19.1-19.5)
@@ -630,9 +570,11 @@ Return ONLY the JSON object.
         step = await self.next_step(task, env_context)
 
         if step is None:
+            _final_message = getattr(self, '_last_final_message', '') or ''
             return GraphPatch(
                 actions=[PatchAction(operation=PatchOperation.FINISH)],
                 reasoning="Task completed",
+                metadata={"final_message": _final_message},
             )
 
         node = StepNode(

@@ -41,6 +41,7 @@ class MouseMoveSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.READ,
         aliases=["mouse.move", "move_mouse"],
+        tags=["mouse", "move", "cursor", "鼠标", "移动", "光标"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: MouseMoveInput) -> SkillOutput:
@@ -58,6 +59,7 @@ class MouseClickSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.WRITE,
         aliases=["mouse.click", "click_mouse"],
+        tags=["mouse", "click", "鼠标", "点击"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: MouseClickInput) -> SkillOutput:
@@ -75,6 +77,7 @@ class MouseClickAtSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.WRITE,
         aliases=["click_coords", "mouse.click_pos"],
+        tags=["mouse", "click", "鼠标", "点击"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: MouseClickAtInput) -> SkillOutput:
@@ -92,6 +95,7 @@ class MouseDragSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.WRITE,
         aliases=["mouse.drag", "drag_drop"],
+        tags=["mouse", "drag", "drop", "鼠标", "拖拽", "拖动"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: MouseDragInput) -> SkillOutput:
@@ -109,6 +113,7 @@ class MouseScrollSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.READ,
         aliases=["mouse.scroll", "scroll"],
+        tags=["mouse", "scroll", "鼠标", "滚动"],
     )
 
     async def run(self, ctx: "SkillContext", input_data: MouseScrollInput) -> SkillOutput:

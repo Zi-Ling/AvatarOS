@@ -232,6 +232,23 @@ class ReactSetupMixin:
                     _complexity = self._complexity_analyzer.classify_from_task_definition(_task_def)
                 else:
                     _complexity = self._complexity_analyzer.classify_from_text(intent)
+
+                # Observability: record complexity analysis in graph metadata
+                if _complexity is not None and hasattr(graph, 'metadata') and graph.metadata is not None:
+                    graph.metadata["complexity_analysis"] = {
+                        "task_type": getattr(_complexity, "task_type", "unknown"),
+                        "estimated_phases": getattr(_complexity, "estimated_phases", 0),
+                        "phase_hints": getattr(_complexity, "phase_hints", []),
+                        "signals": getattr(_complexity, "signals", []),
+                        "why": getattr(_complexity, "reasoning", "") or getattr(_complexity, "explanation", ""),
+                    }
+                    logger.info(
+                        "[ComplexityAnalyzer] Result: type=%s, phases=%d, signals=%s",
+                        _complexity.task_type,
+                        getattr(_complexity, "estimated_phases", 0),
+                        getattr(_complexity, "signals", []),
+                    )
+
                 try:
                     from app.avatar.runtime.observability.debug_event_stream import get_debug_event_stream
                     get_debug_event_stream().emit("created", "ComplexityResult", f"task_{id(graph)}", f"type={_complexity.task_type if _complexity else 'unknown'}")

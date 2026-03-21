@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from app.db.task.task import Task, Run, Step
 from app.db.database import engine
+from app.db.serialization import serialize_for_db
 from app.avatar.intent import IntentSpec
 
 
@@ -44,6 +45,17 @@ class TaskStore:
         for k, v in intent_data.items():
             if hasattr(v, "value"): # Enum handling
                 intent_data[k] = v.value
+        
+        # Strip private runtime objects (e.g. _memory_manager) that are
+        # not JSON-serializable and should never be persisted to DB.
+        if "metadata" in intent_data and isinstance(intent_data["metadata"], dict):
+            intent_data["metadata"] = {
+                k: v for k, v in intent_data["metadata"].items()
+                if not k.startswith("_")
+            }
+        
+        # Ensure all values are JSON-safe (datetime, Enum, Pydantic, etc.)
+        intent_data = serialize_for_db(intent_data)
         
         # Ensure title fallback
         title = intent_spec.goal or "未命名任务"

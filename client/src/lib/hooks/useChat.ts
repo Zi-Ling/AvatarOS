@@ -150,17 +150,19 @@ export function useChat() {
             updateMessage(aiMessageId, { content: accumulatedContent });
           }
           if (data && data.done) {
-            const isTaskPlanning =
-              accumulatedContent.includes("正在规划任务") ||
-              accumulatedContent.includes("正在为您规划任务") ||
-              accumulatedContent.includes("Planning task");
-            if (isTaskPlanning) {
-              // 升级为 task_progress（indeterminate），等待 plan.generated 覆盖
+            // Unified pipeline: SSE stream always ends with empty/minimal content.
+            // Keep isStreaming=true and isTyping=true so the typing indicator
+            // stays visible while waiting for socket events:
+            //   - plan.generated → upgrades to execution block UI (task mode)
+            //   - chat.direct_reply → replaces with chat message (Planner FINISH)
+            const isTaskMode = accumulatedContent.trim() === "";
+            if (isTaskMode) {
               updateMessage(aiMessageId, {
                 messageType: "task_progress",
                 content: "",
                 isStreaming: true,
               });
+              // Don't reset isTyping — keep the typing indicator visible
             } else {
               updateMessage(aiMessageId, { isStreaming: false });
               setCurrentTaskMessageId(null);
@@ -169,8 +171,15 @@ export function useChat() {
         }
       }
 
-      // Stream finished normally — ensure isTyping is reset
-      setIsTyping(false);
+      // Stream finished normally
+      // For task mode (empty content → waiting for socket events), keep isTyping
+      // so the typing indicator stays visible until plan.generated or
+      // chat.direct_reply arrives.
+      const finalMsg = useChatStore.getState().messages.find((m: any) => m.id === aiMessageId);
+      const isWaitingForTask = finalMsg?.messageType === "task_progress";
+      if (!isWaitingForTask) {
+        setIsTyping(false);
+      }
       setCanCancel(false);
     } catch (error: any) {
       console.error("Chat API error:", error);
@@ -223,13 +232,20 @@ export function useChat() {
       });
     }
 
-    // 2. 发送停止 intent — 不在前端自推暂停卡片
-    // 暂停卡片由 TaskEventListener 在收到后端 task.paused / task_status_changed(paused) 后推送
-    if (activeTask && storedSessionId && socket) {
+    // 2. 取消后台任务 — 统一走 REST API（单一控制通道），Socket 只负责广播状态变化
+    if (activeTask && storedSessionId) {
       setIsCancelling(true);
-      socket.emit("cancel_task", {
-        session_id: storedSessionId,
-        task_id: activeTask.id,
+      import("@/lib/api/task").then(({ cancelTask }) => {
+        cancelTask(activeTask.id).catch((e) => {
+          console.error("cancel failed via REST:", e);
+          // Fallback: try socket if REST fails
+          if (socket) {
+            socket.emit("cancel_task", {
+              session_id: storedSessionId,
+              task_id: activeTask.id,
+            });
+          }
+        });
       });
     }
 

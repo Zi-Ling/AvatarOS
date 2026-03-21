@@ -35,6 +35,7 @@ class AgentLoop:
         environment_model: Any = None,  # EnvironmentModel
         max_tick_duration: float = _DEFAULT_TICK_TIMEOUT_S,
         goal_review_interval: int = _DEFAULT_GOAL_REVIEW_INTERVAL,
+        monitor_only: bool = False,
     ) -> None:
         self._kernel = kernel
         self._scheduler = scheduler
@@ -43,6 +44,7 @@ class AgentLoop:
         self._environment_model = environment_model
         self._max_tick_duration = max_tick_duration
         self._goal_review_interval = goal_review_interval
+        self._monitor_only = monitor_only
         self._wake_event = asyncio.Event()
 
     # ------------------------------------------------------------------
@@ -96,25 +98,32 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     async def _tick_inner(self) -> None:
-        """Core tick logic without timeout wrapper."""
+        """Core tick logic without timeout wrapper.
+
+        In monitor_only mode, only sense + monitor phases run.
+        Full mode: sense → schedule → execute → monitor → goal_review.
+        """
         signals: list[RuntimeSignal] = []
 
-        # Phase 1: Sense
+        # Phase 1: Sense (always runs)
         signals += await self._sense_phase()
 
-        # Phase 2: Schedule
-        signals += await self._schedule_phase()
+        if not self._monitor_only:
+            # Phase 2: Schedule
+            signals += await self._schedule_phase()
 
-        # Phase 3: Execute
-        slice_result = await self._execute_phase()
-        signals += slice_result.signals
+            # Phase 3: Execute
+            slice_result = await self._execute_phase()
+            signals += slice_result.signals
+        else:
+            slice_result = SliceResult(terminal=False)
 
-        # Phase 4: Monitor
+        # Phase 4: Monitor (always runs)
         signals += await self._monitor_phase(slice_result)
 
-        # Goal review (every N ticks)
+        # Goal review (every N ticks, only in full mode)
         tick_count = self._kernel.loop_state.tick_count
-        if tick_count > 0 and tick_count % self._goal_review_interval == 0:
+        if not self._monitor_only and tick_count > 0 and tick_count % self._goal_review_interval == 0:
             signals += await self._goal_review()
 
         # Merge and apply
@@ -128,11 +137,11 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     async def _sense_phase(self) -> list[RuntimeSignal]:
-        """Pull pending events from EventBusV2, match TriggerRules, convert to signals.
+        """Pull pending events from EventBus, match TriggerRules, convert to signals.
 
         Flow:
-        1. drain_pending() from EventBusV2
-        2. For each event, match TriggerRules via EventBusV2.match_trigger_rules()
+        1. drain_pending() from EventBus
+        2. For each event, match TriggerRules via EventBus.match_trigger_rules()
         3. For matched rules:
            - create_task action → WorkQueue entry
            - emit_signal action → RuntimeSignal
@@ -141,7 +150,7 @@ class AgentLoop:
         Returns empty list if no event bus is registered.
         Requirements: 4.6, 4.8
         """
-        event_bus = self._kernel.get_subsystem("event_bus_v2")
+        event_bus = self._kernel.get_subsystem("event_bus")
         if event_bus is None:
             return []
 
@@ -350,10 +359,14 @@ class AgentLoop:
 
         signals: list[RuntimeSignal] = []
         try:
+            # Skip monitoring when no task is active — avoids false stuck alerts
+            task_id = self._kernel.active_task_id
+            if not task_id:
+                return []
+
             # Build MonitorContext from current state
             from .monitor_context import MonitorContext
 
-            task_id = self._kernel.active_task_id or ""
             ctx = MonitorContext(
                 task_id=task_id,
                 tick_count=self._kernel.loop_state.tick_count,

@@ -112,12 +112,24 @@ class GraphExecutor(
         return self._get_base_path()
 
     def _get_base_path(self) -> Path:
-        """获取当前 user workspace 路径。"""
+        """获取当前 user workspace 路径。
+
+        优先级：
+          1. WorkspaceManager.get_current_workspace() — 用户可随时切换，动态生效
+          2. self._fallback_base_path — 构造时传入的启动默认值（兜底）
+
+        Task 2 的旧实现优先返回 _fallback_base_path，导致用户切换 workspace 后
+        fs.write 仍写入启动时的 config.avatar_workspace（server/workspace/）。
+        """
         try:
-            return get_current_workspace()
+            ws = get_current_workspace()
+            if ws is not None and str(ws) != ".":
+                return ws
         except Exception as e:
             logger.warning(f"[GraphExecutor] get_current_workspace() failed: {e}")
+        if self._fallback_base_path is not None and str(self._fallback_base_path) != ".":
             return self._fallback_base_path
+        return Path.cwd()
 
     async def execute_node(
         self,
@@ -184,10 +196,16 @@ class GraphExecutor(
             resolved_params = self._resolve_parameters(graph, node, context)
             final_params = {**node.params, **resolved_params}
 
-            # Auto-inject search results into llm.fallback context
-            # When Planner calls llm.fallback after web.search but doesn't pass
+            # Auto-inject search results into text-answer skill context
+            # When Planner calls a text-answer skill after a search skill but doesn't pass
             # context (or can't due to token limits), we inject it automatically.
-            if node.capability_name == "llm.fallback" and not final_params.get("context"):
+            _is_answer_skill = False
+            try:
+                from app.avatar.skills.registry import skill_registry as _sr
+                _is_answer_skill = _sr.is_answer_skill(node.capability_name)
+            except Exception:
+                pass
+            if _is_answer_skill and not final_params.get("context"):
                 _search_context = self._find_search_results(graph)
                 if _search_context:
                     final_params["context"] = _search_context
@@ -292,15 +310,27 @@ class GraphExecutor(
 
     @staticmethod
     def _find_search_results(graph: 'ExecutionGraph') -> Optional[str]:
-        """Find the most recent successful web.search output in the graph."""
+        """Find the most recent successful search skill output in the graph.
+
+        Uses tag-based matching (tags containing "search") instead of
+        hardcoded skill names.
+        """
         from app.avatar.runtime.graph.models.step_node import NodeStatus
 
+        _search_tags = None  # use registry centralized tags
         for node in reversed(list(graph.nodes.values())):
-            if node.capability_name == "web.search" and node.status == NodeStatus.SUCCESS:
-                outputs = node.outputs or {}
-                text = outputs.get("output") or ""
-                if isinstance(text, str) and len(text) > 20:
-                    return text
+            if node.status != NodeStatus.SUCCESS:
+                continue
+            try:
+                from app.avatar.skills.registry import skill_registry as _sr
+                if not _sr.is_search_skill(node.capability_name):
+                    continue
+            except Exception:
+                continue
+            outputs = node.outputs or {}
+            text = outputs.get("output") or ""
+            if isinstance(text, str) and len(text) > 20:
+                return text
         return None
 
     async def _offload_large_outputs(

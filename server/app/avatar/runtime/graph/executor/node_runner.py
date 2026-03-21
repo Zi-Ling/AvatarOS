@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from app.avatar.runtime.workspace.artifact_collector import ArtifactCollector, CollectedArtifact
     from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
 
+from app.avatar.runtime.graph.controller.dag_repair import DagRepairHelper
+
 logger = logging.getLogger(__name__)
 
 
@@ -332,6 +334,7 @@ class NodeRunner:
                     should_retry = False
 
                 # Consult RecoveryPolicyEngine for intelligent retry decisions
+                _needs_replan = False
                 if should_retry:
                     try:
                         # Prefer ErrorClassification-based decision if available
@@ -355,6 +358,7 @@ class NodeRunner:
                                     node.id,
                                 )
                                 should_retry = False
+                                _needs_replan = True
                         else:
                             # Fallback to legacy string-based recovery
                             from types import SimpleNamespace
@@ -374,6 +378,7 @@ class NodeRunner:
                                     f"(error: {error_message[:120]})"
                                 )
                                 should_retry = False
+                                _needs_replan = True
                     except Exception as _rpe:
                         logger.warning(f"[NodeRunner] RecoveryPolicyEngine failed: {_rpe}")
 
@@ -413,6 +418,42 @@ class NodeRunner:
                     continue
 
                 else:
+                    # ── Replan subgraph: invoke planner for recovery before giving up ──
+                    if _needs_replan:
+                        try:
+                            _planner = getattr(self.executor, '_planner', None)
+                            if _planner is None:
+                                # Try to get planner from graph metadata
+                                _planner = graph.metadata.get('_planner') if hasattr(graph, 'metadata') else None
+                            if _planner is not None:
+                                _env_ctx = {}
+                                if hasattr(context, 'env') and isinstance(context.env, dict):
+                                    _env_ctx = context.env
+                                _recovery_attempts = getattr(self, '_recovery_attempts', {})
+                                recovery_patch = await DagRepairHelper.invoke_planner_for_repair(
+                                    planner=_planner,
+                                    graph=graph,
+                                    failed_node_id=node.id,
+                                    error_message=error_message,
+                                    env_context=_env_ctx,
+                                    recovery_attempts=_recovery_attempts,
+                                )
+                                self._recovery_attempts = _recovery_attempts
+                                if recovery_patch is not None:
+                                    # Store recovery patch on graph metadata for GraphController to apply
+                                    if not hasattr(graph, 'metadata') or graph.metadata is None:
+                                        graph.metadata = {}
+                                    graph.metadata['_pending_recovery_patch'] = recovery_patch
+                                    graph.metadata['_recovery_source_node'] = node.id
+                                    logger.info(
+                                        f"[NodeRunner] Recovery patch generated for {node.id}: "
+                                        f"{len(recovery_patch.actions)} actions"
+                                    )
+                        except Exception as _replan_err:
+                            logger.warning(
+                                f"[NodeRunner] Replan invocation failed for {node.id}: {_replan_err}"
+                            )
+
                     node.mark_failed(error_message)
                     execution_time = (datetime.now() - start_time).total_seconds()
 

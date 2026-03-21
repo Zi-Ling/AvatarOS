@@ -58,6 +58,7 @@ class OutputProcessorMixin:
                 mode=self.output_compat_mode,
                 trace_store=self.trace_store,
                 session_id=session_id,
+                skill_name=node.capability_name,
             )
         except InvalidTransportError as e:
             # BINARY+INLINE: record event and skip

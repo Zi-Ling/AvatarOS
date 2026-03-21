@@ -31,7 +31,10 @@ class TaskService:
                 title=runtime_task.goal[:100], # Truncate title if too long
                 intent_spec=serialize_for_db({
                     "goal": runtime_task.goal,
-                    "metadata": runtime_task.metadata
+                    "metadata": {
+                        k: v for k, v in runtime_task.metadata.items()
+                        if not k.startswith("_")
+                    }
                 }),
                 task_mode=runtime_task.metadata.get("task_mode", "one_shot"),
                 created_at=datetime.utcnow(),

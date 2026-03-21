@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from .signals import RuntimeDecision, RuntimeSignal, SignalType
 from .task_state_machine import TaskState, TaskStateMachine
-from .task_state_machine import TaskState, TaskStateMachine
+
 logger = logging.getLogger(__name__)
 
 # Priority tiers for signal conflict resolution (higher index = higher priority).
@@ -126,10 +126,21 @@ class RuntimeKernel:
             self._collaboration_hub = subsystem
 
     def get_subsystem(self, name: str) -> Any:
-        from ..feature_flags import get_capability_registry
-        registry = get_capability_registry()
-        if registry.is_available(name):
-            return self._subsystems.get(name)
+        # Check feature flag — if disabled, return fallback
+        try:
+            from app.avatar.runtime.feature_flags import get_capability_registry
+            registry = get_capability_registry()
+            if not registry.is_available(name):
+                fb = self._fallbacks.get(name)
+                if fb is not None:
+                    return fb
+        except Exception:
+            pass
+        # If subsystem is directly registered, return it
+        sub = self._subsystems.get(name)
+        if sub is not None:
+            return sub
+        # Fall back: check if a fallback is available
         return self._fallbacks.get(name)
 
     # ── task management ──
@@ -277,7 +288,7 @@ class RuntimeKernel:
                 pass
 
     def _apply_shrink_budget(self, decision: RuntimeDecision) -> None:
-        bg = self._subsystems.get("budget_guard_v2")
+        bg = self._subsystems.get("budget_monitor")
         if bg is not None:
             try:
                 bg.enter_shrink_mode()

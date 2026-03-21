@@ -90,30 +90,29 @@ async def _generate_final_answer(
     }.get(terminal_status, "任务已结束")
 
     if user_language == "zh":
-        output_section = f"\n\n执行结果摘要：\n{output_value[:800]}" if output_value else ""
+        output_section = f"\n\n执行结果数据：\n{output_value[:2500]}" if output_value else ""
         error_section = f"\n\n错误信息：\n{error_detail[:400]}" if error_detail else ""
         prompt = f"""用户的任务目标：{goal}
 
 执行状态：{status_context}{output_section}{error_section}
 
-请用自然语言向用户说明：
-1. 任务做了什么、得到了什么结果（如果成功）
-2. 遇到了什么问题（如果失败）
-3. 当前状态说明（如果暂停/取消）
+请用自然语言向用户说明执行结果。
 
 要求：
 - 直接面向用户，语气友好
-- 2-4句话，简洁清晰
-- 不要重复"执行状态"这类系统词汇
-- 不要暴露技术细节（如 skill 名称、traceback）
+- 必须包含结果数据中的关键信息（名称、数量、列表等），不要只说"已完成"
+- 如果结果是列表/对象，用简洁的方式列出核心内容（如名称、数量、关键字段）
+- 如果失败，说明遇到了什么问题
+- 不要暴露内部技术细节（如 skill 名称、traceback、字段名的英文 key）
 - 只返回说明文本，不要额外格式"""
     else:
-        output_section = f"\n\nResult summary:\n{output_value[:800]}" if output_value else ""
+        output_section = f"\n\nResult data:\n{output_value[:2500]}" if output_value else ""
         error_section = f"\n\nError:\n{error_detail[:400]}" if error_detail else ""
         prompt = f"""Task goal: {goal}
 Status: {status_context}{output_section}{error_section}
 
-Explain to the user in 2-4 friendly sentences what happened. No technical jargon."""
+Summarize the result for the user. Include key data points (names, counts, lists) from the output.
+Do not just say "completed" — tell the user what was found/done. No internal technical jargon."""
 
     try:
         if inspect.iscoroutinefunction(llm_client.call):
@@ -126,9 +125,13 @@ Explain to the user in 2-4 friendly sentences what happened. No technical jargon
         return ""
 
 
-
+async def _analyze_code_error(
+    llm_client,
+    goal: str,
+    error_detail: str,
+    user_language: str = "zh",
+) -> str:
     """用 LLM 分析代码执行错误，给出可能原因和修复建议"""
-    # 截断 error_detail，避免 prompt 过长
     truncated = error_detail[:1500] if len(error_detail) > 1500 else error_detail
 
     if user_language == "zh":
@@ -427,7 +430,7 @@ async def execute_task(
         if decision.relevance_score > 0 and decision.top_skills:
             try:
                 explanation = await generate_capability_explanation(
-                    llm_client=avatar_router.llm,
+                    llm_client=avatar_router.runtime.llm_client,
                     goal=decision.goal or user_message,
                     top_skills=decision.top_skills,
                     relevance_score=decision.relevance_score,
@@ -481,18 +484,21 @@ async def execute_task(
                 "chat_history": history or [], "artifact_context": artifact_context,
                 "router_scored_skills": decision.scored_skills,
                 "is_complex": decision.is_complex,
+                "_memory_manager": memory_manager,
             })
         else:
+            _meta = {
+                "source": "router_v2", "session_id": session_id,
+                "chat_history": history or [], "artifact_context": artifact_context,
+                "router_scored_skills": decision.scored_skills,
+                "is_complex": decision.is_complex,
+                "_memory_manager": memory_manager,
+            }
             initial_intent = IntentSpec(
                 id=str(uuid.uuid4()), goal=resolved_goal,
                 intent_type="unknown", domain=IntentDomain.OTHER,
                 raw_user_input=user_message,
-                metadata={
-                    "source": "router_v2", "session_id": session_id,
-                    "chat_history": history or [], "artifact_context": artifact_context,
-                    "router_scored_skills": decision.scored_skills,
-                    "is_complex": decision.is_complex,
-                },
+                metadata=_meta,
             )
 
         # Reference Resolution: 结构化指代消解，按优先级从 history 绑定引用对象
@@ -565,8 +571,11 @@ async def execute_task(
                 control_handle=task_handle,
                 on_graph_created=lambda gid: cancellation_mgr.alias_task(gid, initial_intent.id),
             )
-            # 任务执行完成后，向前端推送完整的执行计划和每个步骤的结果
-            await _emit_plan_and_steps(run_record, initial_intent, session_id)
+            # Real-time step events are now emitted by GraphController via EventBus.
+            # No post-hoc _emit_plan_and_steps needed.
+            _graph = getattr(run_record, "_graph", None)
+            if not (_graph is not None and bool(_graph.nodes)):
+                logger.info(f"[TaskExecution] Direct reply detected (no graph nodes)")
         finally:
             # 无论成功/失败/取消，task 完成后立即注销，释放资源
             cancellation_mgr.unregister_task(initial_intent.id)
@@ -598,151 +607,6 @@ async def execute_task(
     )
 
 
-async def _emit_plan_and_steps(run_record, intent, session_id: str):
-    """
-    任务执行完成后，向前端补发 plan.generated + step.end 事件。
-    优先从 run_record._graph（ExecutionGraph）读取节点信息，
-    fallback 到 run_record.steps（DB 记录）。
-    """
-    plan_id = getattr(run_record, "id", str(uuid.uuid4()))
-    goal = getattr(intent, "goal", "Task")
-
-    # 优先从 ExecutionGraph 读取节点（GraphController 不写 StepStore）
-    graph = getattr(run_record, "_graph", None)
-
-    try:
-        if graph and graph.nodes:
-            # 从 ExecutionGraph.nodes 构建 steps_payload
-            nodes = list(graph.nodes.values())
-            steps_payload = []
-            for i, node in enumerate(nodes):
-                steps_payload.append({
-                    "id": str(node.id),
-                    "skill": node.capability_name,
-                    "skill_name": node.capability_name,
-                    "description": node.capability_name.replace(".", " → "),
-                    "status": "pending",
-                    "order": i,
-                    "params": node.params or {},
-                    "depends_on": [],
-                })
-
-            # 发 plan.generated
-            await socket_manager.emit("server_event", {
-                "type": "plan.generated",
-                "payload": {
-                    "session_id": session_id,
-                    "plan": {
-                        "id": plan_id,
-                        "goal": goal,
-                        "steps": steps_payload,
-                    },
-                },
-            })
-
-            # 逐节点发 step.end / step.failed
-            from app.avatar.runtime.graph.models.step_node import NodeStatus
-            for node in nodes:
-                is_failed = node.status == NodeStatus.FAILED
-                event_type = "step.failed" if is_failed else "step.end"
-
-                outputs = node.outputs or {}
-                b64_image = None
-                if isinstance(outputs, dict):
-                    b64_image = outputs.get("base64_image")
-
-                # 从 node outputs 取 artifact_ids
-                artifact_ids = outputs.get("__artifacts__", []) if isinstance(outputs, dict) else []
-
-                await socket_manager.emit("server_event", {
-                    "type": event_type,
-                    "step_id": str(node.id),
-                    "payload": {
-                        "session_id": session_id,
-                        "skill_name": node.capability_name,
-                        "status": "failed" if is_failed else "completed",
-                        "raw_output": {k: v for k, v in outputs.items() if k != "__artifacts__"},
-                        "base64_image": b64_image,
-                        "error": node.error_message if is_failed else None,
-                        "artifact_ids": artifact_ids,
-                    },
-                })
-
-        elif run_record.steps:
-            # Fallback: 从 DB steps 读取（旧架构兼容）
-            steps_payload = []
-            for i, step in enumerate(run_record.steps):
-                skill_name = getattr(step, "skill_name", "unknown")
-                step_id = getattr(step, "id", f"step_{i}")
-                input_params = getattr(step, "input_params", {}) or {}
-                steps_payload.append({
-                    "id": str(step_id),
-                    "skill": skill_name,
-                    "skill_name": skill_name,
-                    "description": skill_name.replace(".", " → "),
-                    "status": "pending",
-                    "order": i,
-                    "params": input_params,
-                    "depends_on": [],
-                })
-
-            await socket_manager.emit("server_event", {
-                "type": "plan.generated",
-                "payload": {
-                    "session_id": session_id,
-                    "plan": {"id": plan_id, "goal": goal, "steps": steps_payload},
-                },
-            })
-
-            for i, step in enumerate(run_record.steps):
-                skill_name = getattr(step, "skill_name", "unknown")
-                step_id = getattr(step, "id", f"step_{i}")
-                status = getattr(step, "status", "completed")
-                output_result = getattr(step, "output_result", {}) or {}
-                error_message = getattr(step, "error_message", None)
-                is_failed = str(status).lower() == "failed"
-
-                b64_image = None
-                if isinstance(output_result, dict):
-                    val = output_result.get("value", output_result)
-                    if isinstance(val, dict):
-                        b64_image = val.get("base64_image")
-
-                await socket_manager.emit("server_event", {
-                    "type": "step.failed" if is_failed else "step.end",
-                    "step_id": str(step_id),
-                    "payload": {
-                        "session_id": session_id,
-                        "skill_name": skill_name,
-                        "status": "failed" if is_failed else "completed",
-                        "raw_output": output_result,
-                        "base64_image": b64_image,
-                        "error": error_message,
-                    },
-                })
-        else:
-            logger.warning(f"[_emit_plan_and_steps] No graph nodes or DB steps found for run {plan_id}")
-
-    except Exception as e:
-        logger.error(f"[_emit_plan_and_steps] Failed to emit plan/steps: {e}", exc_info=True)
-
-    # task.completed 无论如何都要发，保证前端状态机能推进
-    try:
-        final_status = getattr(run_record, "status", "completed")
-        step_count = len(graph.nodes) if (graph and graph.nodes) else (len(run_record.steps) if run_record.steps else 0)
-        await socket_manager.emit("server_event", {
-            "type": "task.completed",
-            "payload": {
-                "session_id": session_id,
-                "task": {
-                    "id": plan_id,
-                    "status": "FAILED" if final_status != "completed" else "SUCCESS",
-                },
-                "step_count": step_count,
-            },
-        })
-    except Exception as e:
-        logger.error(f"[_emit_plan_and_steps] Failed to emit task.completed: {e}", exc_info=True)
 
 
 async def _handle_planning_failure(error, avatar_router, decision, user_message, session_id, prefix_content, run_record=None, task_start_ms: int = 0):
@@ -780,7 +644,7 @@ async def _handle_planning_failure(error, avatar_router, decision, user_message,
 
     elif error_class == "code":
         analysis = await _analyze_code_error(
-            llm_client=avatar_router.llm,
+            llm_client=avatar_router.runtime.llm_client,
             goal=decision.goal or user_message,
             error_detail=error_for_classify,
             user_language=user_language,
@@ -907,6 +771,44 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
     graph = getattr(run_record, "_graph", None)
     user_language = _detect_language(decision.goal or "")
 
+    # ── Direct reply: Planner FINISH with message, no skill execution ────────
+    # When the graph has no nodes, the Planner replied directly (e.g. greetings,
+    # clarification questions). Use the summary as the chat message — no LLM
+    # final-answer call needed. Emit chat.direct_reply so frontend renders it
+    # as a normal chat bubble instead of the task execution UI.
+    _has_nodes = graph is not None and bool(graph.nodes)
+    _is_direct_reply = graph is not None and not _has_nodes
+    if _is_direct_reply:
+        direct_msg = getattr(run_record, "summary", None) or ""
+        # Filter out the auto-generated "✅ 成功完成任务：..." fallback
+        if direct_msg and not direct_msg.startswith("✅"):
+            logger.info(f"[_format_and_push_result] Direct reply path: emitting chat.direct_reply ({len(direct_msg)} chars)")
+            save_message_to_session(session_id, "assistant", direct_msg,
+                                    metadata={"message_type": "chat"})
+            await socket_manager.emit("server_event", {
+                "type": "chat.direct_reply",
+                "payload": {
+                    "session_id": session_id,
+                    "content": direct_msg,
+                },
+            })
+            return direct_msg
+        else:
+            # Fallback: summary is empty or starts with "✅" — still a direct reply
+            # but no meaningful content. Send a generic response.
+            logger.warning(f"[_format_and_push_result] Direct reply but empty/fallback summary: '{direct_msg[:50] if direct_msg else ''}'")
+            fallback_msg = "我已收到你的消息。" if user_language == "zh" else "Message received."
+            save_message_to_session(session_id, "assistant", fallback_msg,
+                                    metadata={"message_type": "chat"})
+            await socket_manager.emit("server_event", {
+                "type": "chat.direct_reply",
+                "payload": {
+                    "session_id": session_id,
+                    "content": fallback_msg,
+                },
+            })
+            return fallback_msg
+
     # ── llm.fallback 特殊处理：输出是对话消息，不是任务结果 ──────────────────
     # 仅当"最后一个成功节点"是 llm.fallback 时才走此路径。
     # 如果 llm.fallback 只是中间步骤（如翻译后 fs.write），不应拦截。
@@ -917,36 +819,43 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
             (n for n in reversed(nodes) if n.status == _NS.SUCCESS),
             None,
         )
-        if last_success and last_success.capability_name == "llm.fallback":
-            outputs = last_success.outputs or {}
-            fallback_msg = (
-                outputs.get("response_zh") or outputs.get("response_en")
-                or outputs.get("message") or "我暂时无法完成这个请求，请补充更多信息。"
-            )
-            next_steps = outputs.get("next_steps") or []
-            if next_steps:
-                steps_text = "\n".join(
-                    f"- {s.get('zh', s.get('en', ''))}" for s in next_steps if isinstance(s, dict)
+        if last_success:
+            _is_text_answer = False
+            try:
+                from app.avatar.skills.registry import skill_registry as _sr
+                _is_text_answer = _sr.is_answer_skill(last_success.capability_name)
+            except Exception:
+                pass
+            if _is_text_answer:
+                outputs = last_success.outputs or {}
+                fallback_msg = (
+                    outputs.get("response_zh") or outputs.get("response_en")
+                    or outputs.get("message") or "我暂时无法完成这个请求，请补充更多信息。"
                 )
-                if steps_text:
-                    fallback_msg = f"{fallback_msg}\n\n{steps_text}"
-            chat_msg = fallback_msg
-            save_message_to_session(session_id, "assistant", chat_msg)
-            # 构建 run_summary 让前端 RunSummaryCard 能显示 finalAnswer
-            run_summary = _build_run_summary_payload(
-                graph, run_record, task_start_ms,
-                terminal_status="completed",
-                final_answer=chat_msg,
-            )
-            await socket_manager.emit("server_event", {
-                "type": "task.summary",
-                "payload": {
-                    "session_id": session_id,
-                    "content": chat_msg,
-                    "run_summary": run_summary,
-                },
-            })
-            return chat_msg
+                next_steps = outputs.get("next_steps") or []
+                if next_steps:
+                    steps_text = "\n".join(
+                        f"- {s.get('zh', s.get('en', ''))}" for s in next_steps if isinstance(s, dict)
+                    )
+                    if steps_text:
+                        fallback_msg = f"{fallback_msg}\n\n{steps_text}"
+                chat_msg = fallback_msg
+                save_message_to_session(session_id, "assistant", chat_msg)
+                # 构建 run_summary 让前端 RunSummaryCard 能显示 finalAnswer
+                run_summary = _build_run_summary_payload(
+                    graph, run_record, task_start_ms,
+                    terminal_status="completed",
+                    final_answer=chat_msg,
+                )
+                await socket_manager.emit("server_event", {
+                    "type": "task.summary",
+                    "payload": {
+                        "session_id": session_id,
+                        "content": chat_msg,
+                        "run_summary": run_summary,
+                    },
+                })
+                return chat_msg
 
     # ── 提取输出数据 ──────────────────────────────────────────────────────────
     real_b64_image = None
@@ -991,12 +900,30 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
 
     # ── 提取 output_value 供 Final Answer 使用 ───────────────────────────────
     output_value = ""
+    _structured_output = None  # 原始结构化输出，供前端折叠面板展示
     if target_obj and isinstance(target_obj, dict):
-        for key in ("stdout", "output", "content", "text", "message"):
+        # 优先提取有意义的值（str 或 dict/list 都接受）
+        for key in ("stdout", "output", "content", "text"):
             val = target_obj.get(key)
-            if val and isinstance(val, str) and val.strip():
-                output_value = val[:800]
+            if val is not None and val != "" and val != [] and val != {}:
+                if isinstance(val, (dict, list)):
+                    _structured_output = val
+                    output_value = json.dumps(val, ensure_ascii=False, indent=2)[:3000]
+                elif isinstance(val, str) and val.strip():
+                    output_value = val[:3000]
                 break
+        # fallback: 去掉 success/message/error 后的整体 target_obj
+        if not output_value and not _structured_output:
+            clean = {k: v for k, v in target_obj.items()
+                     if k not in ("success", "message", "error") and v not in (None, "", [], {})}
+            if clean:
+                _structured_output = clean
+                output_value = json.dumps(clean, ensure_ascii=False, indent=2)[:3000]
+        # 最后 fallback: message 字段
+        if not output_value:
+            msg = target_obj.get("message")
+            if msg and isinstance(msg, str) and msg.strip():
+                output_value = msg
 
     # ── 步骤统计 ─────────────────────────────────────────────────────────────
     if graph and graph.nodes:
@@ -1011,13 +938,16 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
         step_count = 0
         completed_steps = 0
 
-    # ── LLM Final Answer（所有终态）──────────────────────────────────────────
+    # ── Final Answer 策略 ────────────────────────────────────────────────────
+    # 统一走 LLM 总结（传入完整结构化数据），前端同时展示折叠原始数据面板
+    # 失败/部分完成 → LLM 分析错误原因
+    # 成功无输出（纯副作用）→ LLM 简述完成情况
     error_class = _classify_execution_error(Exception(error_detail)) if error_detail else "unknown"
     final_answer = ""
 
     if terminal_status == "completed" or (terminal_status in ("partial", "failed") and error_class != "infra"):
         final_answer = await _generate_final_answer(
-            llm_client=avatar_router.llm,
+            llm_client=avatar_router.runtime.llm_client,
             goal=decision.goal or "",
             terminal_status=terminal_status,
             output_value=output_value,
@@ -1092,12 +1022,22 @@ async def _format_and_push_result(run_record, decision, avatar_router, session_i
         terminal_status=terminal_status,
         final_answer=final_answer,
     )
+    # 附带结构化输出供前端折叠面板展示（≤ 8KB 才内联，避免 WebSocket 消息过大）
+    _structured_payload = None
+    if _structured_output is not None:
+        try:
+            _s = json.dumps(_structured_output, ensure_ascii=False)
+            if len(_s) <= 8192:
+                _structured_payload = _structured_output
+        except (TypeError, ValueError):
+            pass
     await socket_manager.emit("server_event", {
         "type": "task.summary",
         "payload": {
             "session_id": session_id,
             "content": final_content,
             "run_summary": run_summary,
+            **({"structured_output": _structured_payload} if _structured_payload else {}),
         },
     })
     return final_content

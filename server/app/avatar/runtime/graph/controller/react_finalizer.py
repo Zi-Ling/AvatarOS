@@ -33,6 +33,12 @@ class ReactFinalizerMixin:
         """
         from app.avatar.runtime.graph.models.step_node import NodeStatus
 
+        # ── Emit task.completed via EventBus (unified event source) ─────
+        # Must be in finally to guarantee emission regardless of exit path
+        # (success, failure, cancel, iteration limit, etc.)
+        if s.graph and s.graph.nodes:
+            self._emit_task_completed(s.graph, s.env_context)
+
         # ── Compute lifecycle/result status from final_result ───────────
         if s.final_result is not None:
             fs = s.final_result.final_status

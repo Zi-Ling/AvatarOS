@@ -81,13 +81,18 @@ class _SkillCaller:
 
         skill_instance = skill_cls()
 
-        # 动态获取当前工作目录（统一入口）
+        # 动态获取当前 workspace（用户可能已通过 UI 切换），
+        # 仅在 base_path 未显式设置（测试/隔离场景）时 fallback
         from app.core.workspace.manager import get_current_workspace
         try:
             current_workspace = get_current_workspace()
-        except Exception as e:
-            logger.warning(f"Failed to get current workspace, using default: {e}")
-            current_workspace = self.base_path
+        except Exception:
+            current_workspace = None
+        if current_workspace is None:
+            if self.base_path is not None:
+                current_workspace = self.base_path
+            else:
+                current_workspace = Path.cwd()
 
         ctx = SkillContext(
             base_path=current_workspace,
@@ -390,7 +395,7 @@ class AvatarMain:
         Subsystems registered:
         - graph_adapter (GraphControllerAdapter)
         - environment_model (EnvironmentModel)
-        - event_bus_v2 (EventBusV2)
+        - event_bus (EventBus with buffer/trigger/source capabilities)
         - memory_system (MemorySystem)
         - self_monitor (SelfMonitor)
         - policy_engine_v2 (PolicyEngineV2)
@@ -420,14 +425,13 @@ class AvatarMain:
             env_model = EnvironmentModel(workspace_path=self.base_path)
             self._runtime_kernel.register_subsystem("environment_model", env_model)
 
-            # ── EventBusV2 (sense phase event source) ──
-            event_bus_v2 = None
+            # ── EventBus (sense phase event source) ──
+            # EventBus now has built-in buffer/trigger/source capabilities
+            # Register the main event_bus as the sense phase source
             try:
-                from .events.event_bus_v2 import EventBusV2
-                event_bus_v2 = EventBusV2()
-                self._runtime_kernel.register_subsystem("event_bus_v2", event_bus_v2)
+                self._runtime_kernel.register_subsystem("event_bus", self.event_bus)
             except Exception as e:
-                logger.debug("[AvatarMain] EventBusV2 init skipped: %s", e)
+                logger.debug("[AvatarMain] EventBus registration skipped: %s", e)
 
             # ── MemorySystem ──
             memory_system = None
@@ -476,6 +480,8 @@ class AvatarMain:
                     debug_event_stream=get_debug_event_stream(),
                 )
                 self._runtime_kernel.register_subsystem("self_monitor", self_monitor)
+                # Register BudgetMonitor so RuntimeKernel._apply_shrink_budget can find it
+                self._runtime_kernel.register_subsystem("budget_monitor", self_monitor._budget)
             except Exception as e:
                 logger.debug("[AvatarMain] SelfMonitor init skipped: %s", e)
 
@@ -497,17 +503,48 @@ class AvatarMain:
             except Exception as e:
                 logger.debug("[AvatarMain] TaskScheduler init skipped: %s", e)
 
-            # ── AgentLoop (heartbeat driver) ──
-            # tick() flow: sense → schedule → execute → monitor → decide → apply
+            # ── Multi-Agent Runtime subsystems ──
+            self._multi_agent_registry = None
+            self._multi_agent_spawn_policy = None
+            self._multi_agent_artifact_store = None
+            try:
+                from .multiagent import RoleSpecRegistry, SpawnPolicy, ArtifactStore as MArtifactStore
+                self._multi_agent_registry = RoleSpecRegistry()
+                self._multi_agent_spawn_policy = SpawnPolicy()
+                self._multi_agent_artifact_store = MArtifactStore()
+                self._runtime_kernel.register_subsystem("role_spec_registry", self._multi_agent_registry)
+                self._runtime_kernel.register_subsystem("spawn_policy", self._multi_agent_spawn_policy)
+                self._runtime_kernel.register_subsystem("multi_agent_artifact_store", self._multi_agent_artifact_store)
+                logger.info("[AvatarMain] Multi-Agent Runtime subsystems registered")
+            except Exception as e:
+                logger.debug("[AvatarMain] Multi-Agent Runtime init skipped: %s", e)
+
+            # ── AgentLoop (heartbeat driver, monitor-only mode) ──
+            # Only sense + monitor phases run. Schedule + execute are disabled
+            # to avoid conflicting with GraphController's execution loop.
             self._runtime_agent_loop = AgentLoop(
                 kernel=self._runtime_kernel,
                 scheduler=task_scheduler,
                 monitor=self_monitor,
                 graph_adapter=adapter,
                 environment_model=env_model,
+                monitor_only=True,
             )
 
             self._runtime_kernel.start()
+
+            # Start AgentLoop as background task (non-blocking)
+            self._agent_loop_task = None
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                self._agent_loop_task = loop.create_task(
+                    self._runtime_agent_loop.run(interval_s=10.0),
+                )
+                logger.info("[AvatarMain] AgentLoop started (monitor-only, 10s interval)")
+            except RuntimeError:
+                logger.info("[AvatarMain] AgentLoop deferred (no running event loop)")
+
             logger.info("[AvatarMain] RuntimeKernel initialized with all subsystems")
         except Exception as exc:
             logger.warning(f"[AvatarMain] RuntimeKernel init failed: {exc}")
@@ -608,6 +645,10 @@ class AvatarMain:
         run_record = RunStore.create(task_record.id)
         
         try:
+            # ── TaskScheduler admission check ──
+            # Check if the new task should be queued or can run immediately
+            await self._check_task_admission(task_record.id, intent.goal)
+
             RunStore.update_status(run_record.id, "running")
             
             if self._graph_controller:
@@ -617,6 +658,10 @@ class AvatarMain:
 
                 env_context = self._build_env_context(user_request=intent.goal)
                 env_context["run_id"] = run_record.id
+                # Propagate workspace_path from intent metadata (overrides global workspace)
+                _intent_workspace = intent.metadata.get("workspace_path")
+                if _intent_workspace:
+                    env_context["workspace_path"] = _intent_workspace
                 # Propagate session_id so NodeRunner can resolve the correct session workspace
                 session_id = intent.metadata.get("session_id")
                 if session_id:
@@ -629,6 +674,27 @@ class AvatarMain:
                 if chat_history:
                     env_context["chat_history"] = chat_history
 
+                # 注入对话摘要（两层记忆：事实摘要 + 对话摘要）
+                # 覆盖滑动窗口之外的历史上下文
+                _memory_mgr = intent.metadata.get("_memory_manager")
+                if _memory_mgr and session_id and chat_history:
+                    try:
+                        from app.avatar.memory.conversation_summary import (
+                            get_conversation_summary, should_update_summary,
+                            build_summary_from_history, save_conversation_summary,
+                        )
+                        if should_update_summary(_memory_mgr, session_id, len(chat_history)):
+                            existing = get_conversation_summary(_memory_mgr, session_id)
+                            summary = build_summary_from_history(chat_history, existing)
+                            save_conversation_summary(_memory_mgr, session_id, summary)
+                            env_context["conversation_summary"] = summary
+                        else:
+                            existing = get_conversation_summary(_memory_mgr, session_id)
+                            if existing:
+                                env_context["conversation_summary"] = existing
+                    except Exception as _cs_err:
+                        logger.debug(f"[AvatarMain] Conversation summary failed: {_cs_err}")
+
                 # 注入确定性指代消解结果（由 task_executor 预计算，Planner 直接使用）
                 resolved_inputs = intent.metadata.get("resolved_inputs")
                 if resolved_inputs:
@@ -636,8 +702,29 @@ class AvatarMain:
 
                 # is_complex no longer gates budget — planner self-regulates
 
+                # ── 执行模式选择（纯自动路由） ──
+                # 用户无需感知执行模式，系统根据任务复杂度自动判定
+                # 参考：OpenAI Assistants / Claude / Cursor 的设计理念
+                # 内部调试开关：env_context["force_multi_agent"] = True（绕过判定）
+                _exec_mode = "react"
+                if env_context.get("force_multi_agent"):
+                    _exec_mode = "multi_agent"
+                else:
+                    try:
+                        from app.avatar.runtime.multiagent.supervisor import ComplexityEvaluator
+                        _evaluator = ComplexityEvaluator()
+                        _assessment = _evaluator.evaluate(intent.goal, env_context)
+                        if _assessment.mode == "multi_agent":
+                            _exec_mode = "multi_agent"
+                        logger.info(
+                            "[AvatarMain] Auto-route: mode=%s, reason=%s",
+                            _exec_mode, _assessment.reasoning,
+                        )
+                    except Exception as _route_err:
+                        logger.debug("[AvatarMain] Auto-route fallback to react: %s", _route_err)
+
                 graph_result = await self._graph_controller.execute(
-                    intent.goal, mode="react", env_context=env_context,
+                    intent.goal, mode=_exec_mode, env_context=env_context,
                     control_handle=control_handle,
                 )
 
@@ -651,7 +738,7 @@ class AvatarMain:
                         raise err
                     raise RuntimeError(graph_result.error_message or "GraphController execution failed")
 
-                RunStore.update_status(run_record.id, "completed", summary=f"✅ 成功完成任务：{task_record.title}")
+                RunStore.update_status(run_record.id, "completed", summary=graph_result.summary or f"✅ 成功完成任务：{task_record.title}")
             elif self.task_planner is not None:
                 pass  # no planner without controller
             else:
@@ -661,6 +748,10 @@ class AvatarMain:
             RunStore.update_status(run_record.id, "failed", summary=f"❌ 任务执行失败: {str(e)}", error_message=str(e))
             # Re-raise so API returns 500 or catches it
             raise
+        finally:
+            # Clear active task in RuntimeKernel so AgentLoop stops monitoring it
+            if self._runtime_kernel and self._runtime_kernel_enabled:
+                self._runtime_kernel._active_task_id = None
         
         result = RunStore.get(run_record.id)
         # 把 graph 挂到 run_record 上，供 task_executor 读取节点输出
@@ -674,12 +765,13 @@ class AvatarMain:
         return self.state.load_task(task_id)
 
     def _build_env_context(self, user_request: str = None) -> Dict[str, Any]:
+        # 动态获取当前 workspace（用户可能已通过 UI 切换）
         from app.core.workspace.manager import get_current_workspace
         try:
             current_workspace = get_current_workspace()
         except Exception as e:
-            logger.warning(f"Failed to get current workspace, using default: {e}")
-            current_workspace = self.base_path
+            logger.warning(f"Failed to get current workspace: {e}")
+            current_workspace = self.base_path if self.base_path is not None else Path.cwd()
         
         # 架构重构：移除 Runtime 层的技能搜索
         # 职责下放：让 Planner 自己搜索技能（符合"谁决策，谁搜索"原则）
@@ -771,6 +863,47 @@ class AvatarMain:
         if isinstance(result, list): return {"type": "list", "value": result}
         return {"type": "object", "value": str(result)}
 
+    async def _check_task_admission(self, task_id: str, goal: str) -> None:
+        """Check TaskScheduler for admission control before executing a task.
+
+        If RuntimeKernel is active, registers the task and evaluates whether
+        it should run immediately or be queued. Currently logs warnings for
+        resource conflicts but does not block execution (soft enforcement).
+        """
+        if not self._runtime_kernel or not self._runtime_kernel_enabled:
+            return
+
+        try:
+            task_scheduler = self._runtime_kernel.get_subsystem("task_scheduler")
+            if task_scheduler is None:
+                return
+
+            # Register task with kernel for state tracking
+            self._runtime_kernel.register_task(task_id)
+            # Set as active task so AgentLoop monitor can track it
+            self._runtime_kernel._active_task_id = task_id
+
+            # Evaluate scheduling signals
+            signals = task_scheduler.evaluate(task_id)
+            if signals:
+                from app.avatar.runtime.kernel.signals import SignalType
+                for sig in signals:
+                    if sig.signal_type == SignalType.SWITCH_TASK:
+                        logger.warning(
+                            "[TaskScheduler] Task switch suggested: %s", sig.reason,
+                        )
+                    elif sig.signal_type == SignalType.SUSPEND_TASK:
+                        logger.warning(
+                            "[TaskScheduler] Task suspension suggested: %s", sig.reason,
+                        )
+                    else:
+                        logger.info(
+                            "[TaskScheduler] Signal: %s - %s",
+                            sig.signal_type, sig.reason,
+                        )
+        except Exception as e:
+            logger.debug("[AvatarMain] TaskScheduler admission check skipped: %s", e)
+
     def get_capabilities(self) -> Dict[str, Any]:
         """
         Deprecated for Router usage, kept for backward compatibility or other consumers.
@@ -814,9 +947,26 @@ class AvatarMain:
             await self.cleanup_task.start()
     
     async def stop_cleanup(self) -> None:
-        """停止后台内存清理任务"""
+        """停止后台内存清理任务 + AgentLoop 后台任务"""
         if self.cleanup_task:
             await self.cleanup_task.stop()
+
+        # Cancel AgentLoop background task
+        if hasattr(self, '_agent_loop_task') and self._agent_loop_task is not None:
+            self._agent_loop_task.cancel()
+            try:
+                await self._agent_loop_task
+            except asyncio.CancelledError:
+                pass
+            self._agent_loop_task = None
+            logger.info("[AvatarMain] AgentLoop background task cancelled")
+
+        # Stop RuntimeKernel
+        if self._runtime_kernel is not None:
+            try:
+                self._runtime_kernel.shutdown()
+            except Exception as e:
+                logger.debug("[AvatarMain] RuntimeKernel shutdown: %s", e)
     
     def cleanup_now(self) -> dict:
         """立即执行一次清理（同步版本）"""
@@ -844,8 +994,8 @@ class AvatarMain:
         try:
             from app.avatar.skills.registry import skill_registry
             
-            # 获取 fallback skill
-            fallback_skill_cls = skill_registry.get("llm.fallback")
+            # 通过 tag 查找 fallback/answer skill（不硬编码 skill 名称）
+            fallback_skill_cls = skill_registry.find_by_tags(skill_registry.ANSWER_TAGS)
             if not fallback_skill_cls:
                 logger.warning("[Runtime] Fallback skill not found in registry")
                 return None

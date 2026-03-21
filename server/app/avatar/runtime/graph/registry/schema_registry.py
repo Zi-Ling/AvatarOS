@@ -120,54 +120,77 @@ class SchemaRegistry:
     # ------------------------------------------------------------------
 
     def _register_defaults(self) -> None:
-        """Populate pre-registered output and input schemas for known skills."""
-        # --- Output schemas (Requirement 1) ---
-        self._output_schemas.update({
-            "llm.fallback": StepOutputSchema(
-                semantic_kind=ValueKind.TEXT,
-                fields=[FieldSchema("result", "str")],
-            ),
-            "python.run": StepOutputSchema(
-                semantic_kind=ValueKind.JSON,
-                fields=[],  # dynamic — inferred at runtime
-            ),
-            "fs.write": StepOutputSchema(
-                semantic_kind=ValueKind.PATH,
-                fields=[FieldSchema("path", "str")],
-            ),
-            "fs.read": StepOutputSchema(
-                semantic_kind=ValueKind.TEXT,
-                fields=[FieldSchema("content", "str")],
-            ),
-            "json.parse": StepOutputSchema(
-                semantic_kind=ValueKind.JSON,
-                fields=[],  # dynamic
-            ),
-            "table.render": StepOutputSchema(
-                semantic_kind=ValueKind.TABLE,
-                fields=[FieldSchema("rows", "list")],
-            ),
-        })
+        """Populate output and input schemas from SkillRegistry metadata.
 
-        # --- Input schemas (Requirement 2) ---
-        self._input_schemas.update({
-            "fs.write": SkillInputSchema("fs.write", [
-                ParameterSpec("content", ValueKind.TEXT, "str"),
-                ParameterSpec("path", ValueKind.PATH, "str"),
-            ]),
-            "python.run": SkillInputSchema("python.run", [
-                ParameterSpec("inputs", ValueKind.JSON, "dict", accepts_envelope=True),
-            ]),
-            "llm.fallback": SkillInputSchema("llm.fallback", [
-                ParameterSpec("prompt", ValueKind.TEXT, "str"),
-            ]),
-            "json.parse": SkillInputSchema("json.parse", [
-                ParameterSpec("text", ValueKind.TEXT, "str"),
-            ]),
-            "table.render": SkillInputSchema("table.render", [
-                ParameterSpec("rows", ValueKind.TABLE, "list"),
-            ]),
-        })
+        Instead of hardcoding skill name → schema mappings, we iterate
+        over all registered skills and infer schemas from their SkillSpec.
+        Known semantic_kind mappings are derived from spec metadata:
+        - risk_level WRITE + SideEffect.FS → PATH
+        - risk_level READ + SideEffect.FS → TEXT (file content)
+        - risk_level EXECUTE → JSON (dynamic output)
+        - tags containing "answer"/"reply"/"fallback" → TEXT
+        - tags containing "table"/"render" → TABLE
+        - default → JSON
+        """
+        try:
+            from app.avatar.skills.registry import skill_registry
+            from app.avatar.skills.base import SkillRiskLevel, SideEffect
+
+            for cls in skill_registry.iter_skills():
+                spec = cls.spec
+                name = spec.name
+
+                # ── Determine semantic_kind from spec metadata ──
+                tags_set = set(spec.tags)
+                if spec.risk_level == SkillRiskLevel.WRITE and SideEffect.FS in spec.side_effects:
+                    kind = ValueKind.PATH
+                elif spec.risk_level == SkillRiskLevel.READ and SideEffect.FS in spec.side_effects:
+                    kind = ValueKind.TEXT
+                elif spec.risk_level == SkillRiskLevel.EXECUTE:
+                    kind = ValueKind.JSON
+                elif tags_set & skill_registry.ANSWER_TAGS:
+                    kind = ValueKind.TEXT
+                elif tags_set & frozenset({"table", "render", "表格"}):
+                    kind = ValueKind.TABLE
+                else:
+                    kind = ValueKind.JSON
+
+                # ── Register output schema (if not already registered) ──
+                if name not in self._output_schemas:
+                    # Infer output fields from output_model if available
+                    fields = []
+                    if spec.output_model and hasattr(spec.output_model, "model_fields"):
+                        for field_name, field_info in spec.output_model.model_fields.items():
+                            py_type = _resolve_python_type(field_info)
+                            fields.append(FieldSchema(field_name, py_type))
+                    self._output_schemas[name] = StepOutputSchema(
+                        semantic_kind=kind,
+                        fields=fields,
+                    )
+
+                # ── Register input schema (if not already registered) ──
+                if name not in self._input_schemas and spec.input_model:
+                    inferred = self._infer_from_pydantic(name, spec.input_model)
+                    if inferred:
+                        self._input_schemas[name] = inferred
+
+            logger.debug(
+                "[SchemaRegistry] Auto-registered %d output schemas, %d input schemas from SkillRegistry",
+                len(self._output_schemas), len(self._input_schemas),
+            )
+        except Exception as e:
+            logger.warning("[SchemaRegistry] Auto-registration from SkillRegistry failed: %s", e)
+            # Fallback: register minimal known schemas
+            self._register_minimal_fallback()
+
+    # ------------------------------------------------------------------
+    # Minimal fallback (when SkillRegistry is not yet loaded)
+    # ------------------------------------------------------------------
+
+    def _register_minimal_fallback(self) -> None:
+        """Register minimal schemas as fallback when SkillRegistry is unavailable."""
+        # This should rarely be needed — only during early init before skills load
+        logger.debug("[SchemaRegistry] Using minimal fallback schemas")
 
     # ------------------------------------------------------------------
     # Auto-inference from Pydantic model

@@ -107,26 +107,26 @@ class GoalCoverageTracker:
                     new_evidence = f"step:{node.id}"
                     break
 
-            # Priority 1.5: fs.write/fs.copy/fs.move 成功即判定覆盖
-            # 这些 skill 成功意味着文件已确定性写入，不需要文本匹配
-            _FS_WRITE_SKILLS = {"fs.write", "fs.copy", "fs.move"}
+            # Priority 1.5: fs write skills 成功即判定覆盖
+            # risk_level == WRITE + SideEffect.FS 的 skill 成功意味着文件已确定性写入
             if not new_satisfied:
                 for node in succeeded_nodes:
-                    if node.capability_name in _FS_WRITE_SKILLS:
-                        outputs = node.outputs or {}
-                        if outputs.get("success") is not False:
-                            new_satisfied = True
-                            written_path = outputs.get("path") or outputs.get("output") or ""
-                            new_evidence = f"fs_write:{node.id}:{written_path}"
-                            break
+                    if not self._is_fs_write_skill(node.capability_name):
+                        continue
+                    outputs = node.outputs or {}
+                    if outputs.get("success") is not False:
+                        new_satisfied = True
+                        written_path = outputs.get("path") or outputs.get("output") or ""
+                        new_evidence = f"fs_write:{node.id}:{written_path}"
+                        break
 
-            # Priority 1.6: python.run 产物识别
-            # python.run 不走 _output() 协议时，ArtifactCollector 会把实际产物路径
-            # 写入 __artifact_paths__，或 output_processor 会写 artifact_semantic。
-            _CODE_SKILLS = {"python.run"}
+            # Priority 1.6: code execution skill 产物识别
+            # risk_level == EXECUTE 的 skill 不走 _output() 协议时，
+            # ArtifactCollector 会把实际产物路径写入 __artifact_paths__，
+            # 或 output_processor 会写 artifact_semantic。
             if not new_satisfied:
                 for node in succeeded_nodes:
-                    if node.capability_name not in _CODE_SKILLS:
+                    if not self._is_code_skill(node.capability_name):
                         continue
                     outputs = node.outputs or {}
                     metadata = node.metadata or {}
@@ -150,12 +150,12 @@ class GoalCoverageTracker:
                         new_evidence = f"code_file:{node.id}:{fp}"
                         break
 
-            # Priority 1.7: llm.fallback / 纯文本产出型 skill 成功即覆盖
-            # 对于翻译/问答/总结等任务，llm.fallback 成功且有非空输出即判定覆盖
-            _TEXT_SKILLS = {"llm.fallback"}
+            # Priority 1.7: 纯文本产出型 skill 成功即覆盖
+            # 对于翻译/问答/总结等任务，带 "answer"/"fallback" tag 的 skill
+            # 成功且有非空输出即判定覆盖
             if not new_satisfied:
                 for node in succeeded_nodes:
-                    if node.capability_name not in _TEXT_SKILLS:
+                    if not self._is_text_answer_skill(node.capability_name):
                         continue
                     outputs = node.outputs or {}
                     # llm.fallback 输出有 result/output/content 字段
@@ -170,11 +170,11 @@ class GoalCoverageTracker:
                         new_evidence = f"text_output:{node.id}:{len(text_out)}chars"
                         break
 
-            # Priority 1.8: python.run stdout-only 成功（无文件产物但有 stdout 输出）
+            # Priority 1.8: code execution skill stdout-only 成功（无文件产物但有 stdout 输出）
             # 覆盖"列出文件名并打印"等 info-display 任务
             if not new_satisfied:
                 for node in succeeded_nodes:
-                    if node.capability_name not in _CODE_SKILLS:
+                    if not self._is_code_skill(node.capability_name):
                         continue
                     outputs = node.outputs or {}
                     stdout = outputs.get("stdout") or ""
@@ -241,6 +241,37 @@ class GoalCoverageTracker:
                 f"{summary.deliverable_satisfied_count}/{summary.deliverable_total_count} deliverables"
             )
         return summary
+
+    # ------------------------------------------------------------------
+    # Skill classification helpers (registry-based, no hardcoded names)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_fs_write_skill(skill_name: str) -> bool:
+        """Check if skill is a file-writing skill (risk_level WRITE + SideEffect.FS)."""
+        try:
+            from app.avatar.skills.registry import skill_registry
+            return skill_registry.is_fs_write_skill(skill_name)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_code_skill(skill_name: str) -> bool:
+        """Check if skill is a code execution skill (risk_level == EXECUTE)."""
+        try:
+            from app.avatar.skills.registry import skill_registry
+            return skill_registry.is_code_skill(skill_name)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_text_answer_skill(skill_name: str) -> bool:
+        """Check if skill is a text answer/reply skill (tags contain answer/fallback/reply)."""
+        try:
+            from app.avatar.skills.registry import skill_registry
+            return skill_registry.is_answer_skill(skill_name)
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Matching helpers

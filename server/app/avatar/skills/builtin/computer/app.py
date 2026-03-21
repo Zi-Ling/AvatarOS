@@ -31,6 +31,7 @@ class AppLaunchSkill(BaseSkill):
         side_effects={SideEffect.EXEC},
         risk_level=SkillRiskLevel.EXECUTE,
         aliases=["open_app", "launch_app", "start_app"],
+        tags=["launch", "open", "start", "app", "启动", "打开", "应用"],
     )
 
     async def run(self, ctx, input_data: AppLaunchInput) -> SkillOutput:
@@ -61,6 +62,7 @@ class WindowFocusSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.WRITE,
         aliases=["focus_window", "switch_window", "maximize_window"],
+        tags=["window", "focus", "switch", "maximize", "窗口", "聚焦", "切换", "最大化"],
     )
 
     async def run(self, ctx, input_data: WindowFocusInput) -> SkillOutput:

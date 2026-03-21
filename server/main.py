@@ -73,6 +73,10 @@ fastapi_app.add_middleware(
     allow_headers=["*"],
 )
 
+# 可选的 API Token 认证
+from app.core.auth import OptionalTokenAuthMiddleware
+fastapi_app.add_middleware(OptionalTokenAuthMiddleware, token=config.api_token)
+
 # 全局异常处理
 @fastapi_app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

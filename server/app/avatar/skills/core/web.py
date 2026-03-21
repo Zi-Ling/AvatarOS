@@ -26,6 +26,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,14 @@ class WebSearchInput(SkillInput):
         _DEFAULT_MAX_RESULTS,
         description="Maximum number of results to return (1-10)",
         ge=1, le=10,
+    )
+    time_range: Optional[str] = Field(
+        None,
+        description=(
+            "Time range filter for search results. "
+            "Values: 'd' (past day), 'w' (past week), 'm' (past month), 'y' (past year). "
+            "Use 'd' or 'w' for news/current events queries."
+        ),
     )
 
 
@@ -65,10 +74,15 @@ class SearchProvider(ABC):
 
     @abstractmethod
     async def search(
-        self, query: str, max_results: int
+        self, query: str, max_results: int, time_range: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """执行搜索，返回统一格式的结果列表。
         每条: {title, url, snippet, published_at}
+
+        Args:
+            query: 搜索关键词
+            max_results: 最大结果数
+            time_range: 时间过滤 'd'=过去一天, 'w'=过去一周, 'm'=过去一月, 'y'=过去一年
         """
         ...
 
@@ -94,11 +108,14 @@ class BraveProvider(SearchProvider):
     def is_available(self) -> bool:
         return bool(self._api_key)
 
-    async def search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+    async def search(self, query: str, max_results: int, time_range: Optional[str] = None) -> List[Dict[str, Any]]:
+        # Brave freshness: pd=past day, pw=past week, pm=past month, py=past year
+        _freshness_map = {"d": "pd", "w": "pw", "m": "pm", "y": "py"}
+        freshness = _freshness_map.get(time_range, "pd")
         async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
             resp = await client.get(
                 "https://api.search.brave.com/res/v1/web/search",
-                params={"q": query, "count": max_results, "freshness": "pd"},
+                params={"q": query, "count": max_results, "freshness": freshness},
                 headers={
                     "Accept": "application/json",
                     "Accept-Encoding": "gzip",
@@ -143,7 +160,10 @@ class GoogleCSEProvider(SearchProvider):
     def is_available(self) -> bool:
         return bool(self._api_key and self._cx)
 
-    async def search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+    async def search(self, query: str, max_results: int, time_range: Optional[str] = None) -> List[Dict[str, Any]]:
+        # Google dateRestrict: d1=past day, w1=past week, m1=past month, y1=past year
+        _date_restrict_map = {"d": "d1", "w": "w1", "m": "m1", "y": "y1"}
+        date_restrict = _date_restrict_map.get(time_range, "d1")
         async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
             resp = await client.get(
                 "https://www.googleapis.com/customsearch/v1",
@@ -152,7 +172,7 @@ class GoogleCSEProvider(SearchProvider):
                     "cx": self._cx,
                     "q": query,
                     "num": min(max_results, 10),
-                    "dateRestrict": "d1",  # 过去 1 天
+                    "dateRestrict": date_restrict,
                 },
             )
             resp.raise_for_status()
@@ -193,7 +213,7 @@ class TavilyProvider(SearchProvider):
     def is_available(self) -> bool:
         return bool(self._api_key)
 
-    async def search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+    async def search(self, query: str, max_results: int, time_range: Optional[str] = None) -> List[Dict[str, Any]]:
         async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.tavily.com/search",
@@ -256,17 +276,20 @@ class SearXNGProvider(SearchProvider):
             logger.warning(f"[SearXNG] Health check failed for {self._url}")
         return self._healthy
 
-    async def search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+    async def search(self, query: str, max_results: int, time_range: Optional[str] = None) -> List[Dict[str, Any]]:
         if not await self._health_check():
             return []
+
+        # SearXNG time_range: day, week, month, year
+        _time_map = {"d": "day", "w": "week", "m": "month", "y": "year"}
+        params = {"q": query, "format": "json"}
+        if time_range and time_range in _time_map:
+            params["time_range"] = _time_map[time_range]
 
         async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
             resp = await client.get(
                 f"{self._url}/search",
-                params={
-                    "q": query,
-                    "format": "json",
-                },
+                params=params,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -290,7 +313,7 @@ class DuckDuckGoProvider(SearchProvider):
     def is_available(self) -> bool:
         return True  # 永远可用
 
-    async def search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+    async def search(self, query: str, max_results: int, time_range: Optional[str] = None) -> List[Dict[str, Any]]:
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -298,12 +321,16 @@ class DuckDuckGoProvider(SearchProvider):
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
         }
+        # DuckDuckGo df param: d=past day, w=past week, m=past month
+        params = {"q": query}
+        if time_range and time_range in ("d", "w", "m"):
+            params["df"] = time_range
         async with httpx.AsyncClient(
             timeout=_SEARCH_TIMEOUT, follow_redirects=True, headers=headers
         ) as client:
             resp = await client.get(
                 "https://html.duckduckgo.com/html/",
-                params={"q": query},
+                params=params,
             )
             resp.raise_for_status()
             html = resp.text
@@ -361,7 +388,7 @@ class ProviderRouter:
         logger.info(f"[web.search] Available providers: {available}")
 
     async def search(
-        self, query: str, max_results: int
+        self, query: str, max_results: int, time_range: Optional[str] = None,
     ) -> tuple:
         """返回 (results, source, errors)"""
         errors: List[str] = []
@@ -369,7 +396,7 @@ class ProviderRouter:
             if not provider.is_available():
                 continue
             try:
-                results = await provider.search(query, max_results)
+                results = await provider.search(query, max_results, time_range=time_range)
                 if results:
                     logger.info(
                         f"[web.search] {provider.name} returned "
@@ -434,6 +461,8 @@ class WebSearchSkill(BaseSkill[WebSearchInput, WebSearchOutput]):
         side_effects={SideEffect.NETWORK},
         risk_level=SkillRiskLevel.READ,
         aliases=["web_search", "search_web", "internet_search"],
+        tags=["search", "搜索", "查找", "查询", "检索", "find"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: WebSearchInput) -> WebSearchOutput:
@@ -454,7 +483,7 @@ class WebSearchSkill(BaseSkill[WebSearchInput, WebSearchOutput]):
 
         max_results = min(max(params.max_results, 1), 10)
         router = _get_router()
-        results, source, errors = await router.search(query, max_results)
+        results, source, errors = await router.search(query, max_results, time_range=params.time_range)
 
         if not results:
             error_detail = "; ".join(errors) if errors else "no results"

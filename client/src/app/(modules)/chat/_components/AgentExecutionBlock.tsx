@@ -276,7 +276,7 @@ export function AgentExecutionBlock({ runId }: AgentExecutionBlockProps) {
     return (
       <div className="flex items-center gap-2 py-2 text-xs text-slate-400">
         <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" />
-        <span>正在分析任务...</span>
+        <span>思考中...</span>
       </div>
     );
   }

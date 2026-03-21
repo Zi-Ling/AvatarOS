@@ -98,14 +98,18 @@ class PromptBuilder:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _system_instruction(self) -> str:
-        return """# Graph Execution Planner
+        from datetime import date as _date
+        _today = _date.today()
+        return f"""# Graph Execution Planner
 
 You are an AI assistant that plans execution graphs for achieving goals.
 You work with Skills (atomic operations) and create execution plans
 by adding nodes and edges to a graph.
 
+**Current Date:** {_today.isoformat()} ({_today.strftime('%A')}), Year {_today.year}
+
 **Key Principles:**
-1. Use the `output` field to reference node results: `{{node_id.output}}`
+1. Use the `output` field to reference node results: `{{{{node_id.output}}}}`
 2. Create data dependencies using edges between nodes
 3. Optimize for parallel execution when possible"""
 
@@ -169,6 +173,11 @@ by adding nodes and edges to a graph.
 
 Think step-by-step about what needs to be done next.
 
+**CRITICAL — python.run data flow rules:**
+- When a python.run node depends on an upstream node (via edge), the upstream output is AUTOMATICALLY injected as a variable named `{node_id}_output` (e.g. `n1_output`).
+- Do NOT hardcode upstream output content into the `code` parameter. Just reference the variable directly.
+- The `code` parameter must contain ONLY the processing logic, never the input data.
+
 **Response format (JSON):**
 ```json
 {
@@ -194,6 +203,18 @@ Or to finish:
 ## Instructions
 
 Plan the COMPLETE execution graph upfront.
+
+**CRITICAL — python.run data flow rules:**
+- When a python.run node depends on an upstream node (via edge), the upstream output is AUTOMATICALLY injected as a variable named `{node_id}_output` (e.g. `n1_output`).
+- Do NOT hardcode upstream output content into the `code` parameter. Just reference the variable directly.
+- Example: if n1 reads a file and n2 processes it, n2's code should use `n1_output` directly:
+  ```python
+  # n1_output is auto-injected — do NOT redefine it
+  lines = n1_output.split('\\n')
+  for line in lines:
+      ...
+  ```
+- The `code` parameter must contain ONLY the processing logic, never the input data.
 
 **Response format (JSON):**
 ```json
@@ -328,7 +349,9 @@ class PlannerPromptBuilder:
 
         # Assemble with token budget
         fixed_parts = [goal_section, coverage_section, repair_section, domain_hint_section, skills_section]
-        truncatable = [artifact_section, workspace_section, graph_section]
+        # Truncation priority (high → low): graph_state > workspace > artifacts
+        # graph_state is critical for planner to know what's been done/failed
+        truncatable = [graph_section, workspace_section, artifact_section]
 
         prompt = "\n".join(p for p in fixed_parts if p)
         token_budget = self.max_prompt_tokens - self._estimate_tokens(prompt)
@@ -415,11 +438,15 @@ class PlannerPromptBuilder:
         return "\n".join(parts)
 
     def _build_repair_section(self, feedback: _Any) -> str:
-        """Format repair feedback as '上一轮失败原因与修复建议' paragraph."""
+        """Format repair feedback as '上一轮失败原因与修复建议' paragraph.
+        Capped at 2000 chars to prevent prompt bloat from verbose error traces.
+        """
         if hasattr(feedback, "to_planner_summary"):
             summary = feedback.to_planner_summary()
         else:
             summary = str(feedback)
+        if len(summary) > 2000:
+            summary = summary[:2000] + "\n...[truncated]"
         return f"\n## 上一轮失败原因与修复建议\n{summary}"
 
     def _estimate_tokens(self, text: str) -> int:

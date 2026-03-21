@@ -16,6 +16,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,8 @@ class NetGetSkill(BaseSkill[NetGetInput, NetGetOutput]):
         side_effects={SideEffect.NETWORK},
         risk_level=SkillRiskLevel.READ,
         aliases=["http_get", "fetch", "get_url"],
+        tags=["fetch", "get", "download", "request", "获取", "下载", "请求"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: NetGetInput) -> NetGetOutput:
@@ -196,6 +199,8 @@ class NetPostSkill(BaseSkill[NetPostInput, NetPostOutput]):
         side_effects={SideEffect.NETWORK},
         risk_level=SkillRiskLevel.WRITE,
         aliases=["http_post", "post_url"],
+        tags=["post", "send", "submit", "发送", "提交"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: NetPostInput) -> NetPostOutput:
@@ -260,6 +265,8 @@ class NetDownloadSkill(BaseSkill[NetDownloadInput, NetDownloadOutput]):
         side_effects={SideEffect.NETWORK, SideEffect.FS},
         risk_level=SkillRiskLevel.WRITE,
         aliases=["download_file", "http_download", "fetch_file"],
+        tags=["download", "fetch", "save", "下载", "获取"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.PATH, transport_mode=TransportMode.REF),
     )
 
     async def run(self, ctx: SkillContext, params: NetDownloadInput) -> NetDownloadOutput:

@@ -74,6 +74,9 @@ class Config(BaseSettings):
         default=["http://localhost:3000", "http://127.0.0.1:3000"]
     )
 
+    # API Token 认证（可选，设置后所有 API 请求需携带 Bearer Token）
+    api_token: str = ""
+
     # 日志级别
     log_level: str = "INFO"
 
@@ -91,6 +94,10 @@ class Config(BaseSettings):
     # Agent 自纠错配置
     max_replan_attempts: int = 2
 
+    # 结构化数据层配置
+    data_db_path: Path = AVATAR_HOME / "data.db"
+    data_backend: str = "sqlite"  # sqlite | postgresql（MVP 仅 sqlite）
+
     # Router 技能相关性阈值（旧配置，向后兼容）
     skill_relevance_threshold: float = 0.50
 
@@ -104,11 +111,6 @@ class Config(BaseSettings):
     # 路由决策配置
     router_enable_complex_detection: bool = True
     router_complex_force_planner: bool = True
-
-    # Embedding 模型配置
-    embedding_model_path: Path = Path("./app/models/embeddings/multilingual/bge-m3/onnx")
-    embedding_model_name: str = "bge-m3"
-    embedding_use_local: bool = True
 
     @model_validator(mode="after")
     def _ensure_directories(self) -> "Config":

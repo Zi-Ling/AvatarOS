@@ -325,3 +325,100 @@ class CollaborationHub(_HubBase):
             self._audit_trail.append(entry)
         except Exception as exc:
             logger.debug("[CollaborationHub] audit recording error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # HandoffEnvelope management (Multi-Agent extension)
+    # Requirements: 9.4, 9.5, 9.6, 9.7, 23.1, 23.2, 23.3, 23.4
+    # ------------------------------------------------------------------
+
+    def validate_and_deliver(
+        self,
+        envelope: Any,
+        registry: Any = None,
+    ) -> tuple:
+        """校验 HandoffEnvelope 载荷并投递.
+
+        1. 根据 target_role 的 RoleSpec.input_schema 校验 payload
+        2. Schema 前置校验不通过时直接拒绝，不进入执行流程
+        3. 校验通过记录到 HandoffHistory，发出 handoff.created AgentEvent
+        Returns (success: bool, message: str).
+        """
+        if not hasattr(self, "_handoff_history"):
+            self._handoff_history: List[Any] = []
+
+        target_role = getattr(envelope, "target_role", "")
+        payload = getattr(envelope, "payload", {})
+
+        # Schema validation
+        if registry is not None and target_role:
+            spec = registry.get(target_role) if hasattr(registry, "get") else None
+            if spec is not None:
+                input_schema = getattr(spec, "input_schema", {})
+                if input_schema and input_schema.get("type") == "object":
+                    required = input_schema.get("required", [])
+                    for req_field in required:
+                        if req_field not in payload:
+                            if hasattr(envelope, "status"):
+                                envelope.status = "rejected"
+                            return (False, f"Missing required field: {req_field}")
+
+        # Deliver
+        if hasattr(envelope, "status"):
+            envelope.status = "delivered"
+        self._handoff_history.append(envelope)
+
+        # Emit event
+        self._push_to_event_stream("handoff.created", {
+            "envelope_id": getattr(envelope, "envelope_id", ""),
+            "source_role": getattr(envelope, "source_role", ""),
+            "target_role": target_role,
+            "task_id": getattr(envelope, "task_id", ""),
+        })
+
+        return (True, "delivered")
+
+    def mark_received(self, envelope_id: str) -> None:
+        """标记信封已被目标角色接收，发出 handoff.received 事件."""
+        if not hasattr(self, "_handoff_history"):
+            return
+        for env in self._handoff_history:
+            if getattr(env, "envelope_id", "") == envelope_id:
+                env.status = "received"
+                self._push_to_event_stream("handoff.received", {
+                    "envelope_id": envelope_id,
+                })
+                return
+
+    def mark_completed(self, envelope_id: str) -> None:
+        """标记信封处理完成，发出 handoff.completed 事件."""
+        if not hasattr(self, "_handoff_history"):
+            return
+        for env in self._handoff_history:
+            if getattr(env, "envelope_id", "") == envelope_id:
+                env.status = "completed"
+                self._push_to_event_stream("handoff.completed", {
+                    "envelope_id": envelope_id,
+                })
+                return
+
+    def query_history(
+        self,
+        source_role: Optional[str] = None,
+        target_role: Optional[str] = None,
+        time_range: Optional[tuple] = None,
+    ) -> List[Any]:
+        """按条件查询交接历史."""
+        if not hasattr(self, "_handoff_history"):
+            return []
+        results = []
+        for env in self._handoff_history:
+            if source_role is not None and getattr(env, "source_role", "") != source_role:
+                continue
+            if target_role is not None and getattr(env, "target_role", "") != target_role:
+                continue
+            if time_range is not None:
+                created_at = getattr(env, "created_at", 0)
+                if created_at < time_range[0] or created_at > time_range[1]:
+                    continue
+            results.append(env)
+        return results

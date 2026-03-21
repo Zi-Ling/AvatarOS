@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Dict, List, Any, Optional
 from enum import Enum
 from datetime import datetime, UTC
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import uuid
 
 
@@ -63,9 +63,7 @@ class ExecutionGraph(BaseModel):
         description="Map of node_id to list of outgoing edge_ids"
     )
     
-    class Config:
-        # Allow field aliases
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
     
     def add_node(self, node: 'StepNode') -> None:
         """

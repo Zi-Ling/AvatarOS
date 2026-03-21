@@ -1,11 +1,11 @@
 """
 Event emission and narrative helper mixin for GraphController.
 
-Handles emitting plan.generated events and providing narrative context
-summaries for nodes.
+Unified event source: GraphController is the single source of truth for
+step lifecycle events (step.start, step.end, step.failed). Events are
+emitted in real-time during execution via EventBus → SocketBridge → frontend.
 
-Extracted from graph_controller.py to keep the controller focused on
-orchestration logic.
+executor.py's _emit_plan_and_steps is no longer needed — all events originate here.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import logging
 
 if TYPE_CHECKING:
     from app.avatar.runtime.graph.models.execution_graph import ExecutionGraph
+    from app.avatar.runtime.graph.models.step_node import StepNode
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,121 @@ class EventEmitterMixin:
             self.runtime.event_bus.publish(event)
         except Exception as e:
             logger.warning(f"[GraphController] Failed to emit plan.generated: {e}")
+
+    # ── Real-time step lifecycle events ─────────────────────────────────
+
+    def _emit_step_start(self, node: 'StepNode', env_context: Dict[str, Any]) -> None:
+        """Emit step.start when a node begins execution. Called from the ReAct loop."""
+        if not self.runtime.event_bus:
+            return
+        try:
+            from app.avatar.runtime.events.types import Event, EventType
+            event = Event(
+                type=EventType.STEP_START,
+                source="graph_controller",
+                step_id=str(node.id),
+                payload={
+                    "session_id": env_context.get("session_id", ""),
+                    "skill_name": node.capability_name,
+                    "description": (node.metadata or {}).get("description") or node.capability_name,
+                    "params": node.params or {},
+                },
+            )
+            self.runtime.event_bus.publish(event)
+        except Exception as e:
+            logger.debug(f"[EventEmitter] step.start failed for {node.id}: {e}")
+
+    def _emit_step_end(self, node: 'StepNode', env_context: Dict[str, Any]) -> None:
+        """Emit step.end when a node completes successfully."""
+        if not self.runtime.event_bus:
+            return
+        try:
+            from app.avatar.runtime.events.types import Event, EventType
+            outputs = node.outputs or {}
+            b64_image = outputs.get("base64_image") if isinstance(outputs, dict) else None
+            artifact_ids = outputs.get("__artifacts__", []) if isinstance(outputs, dict) else []
+
+            event = Event(
+                type=EventType.STEP_END,
+                source="graph_controller",
+                step_id=str(node.id),
+                payload={
+                    "session_id": env_context.get("session_id", ""),
+                    "skill_name": node.capability_name,
+                    "status": "completed",
+                    "raw_output": {k: v for k, v in outputs.items() if k != "__artifacts__"} if isinstance(outputs, dict) else outputs,
+                    "base64_image": b64_image,
+                    "artifact_ids": artifact_ids,
+                },
+            )
+            self.runtime.event_bus.publish(event)
+        except Exception as e:
+            logger.debug(f"[EventEmitter] step.end failed for {node.id}: {e}")
+
+    def _emit_step_failed(self, node: 'StepNode', env_context: Dict[str, Any]) -> None:
+        """Emit step.failed when a node fails."""
+        if not self.runtime.event_bus:
+            return
+        try:
+            from app.avatar.runtime.events.types import Event, EventType
+            outputs = node.outputs or {}
+            event = Event(
+                type=EventType.STEP_FAILED,
+                source="graph_controller",
+                step_id=str(node.id),
+                payload={
+                    "session_id": env_context.get("session_id", ""),
+                    "skill_name": node.capability_name,
+                    "status": "failed",
+                    "raw_output": outputs if isinstance(outputs, dict) else {},
+                    "error": node.error_message,
+                },
+            )
+            self.runtime.event_bus.publish(event)
+        except Exception as e:
+            logger.debug(f"[EventEmitter] step.failed for {node.id}: {e}")
+
+    def _emit_task_completed(self, graph: 'ExecutionGraph', env_context: Dict[str, Any]) -> None:
+        """Emit task.completed when the entire graph finishes."""
+        if not self.runtime.event_bus:
+            return
+        try:
+            from app.avatar.runtime.events.types import Event, EventType
+            from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+            is_failed = graph.status == GraphStatus.FAILED
+            event = Event(
+                type=EventType.TASK_COMPLETED,
+                source="graph_controller",
+                payload={
+                    "session_id": env_context.get("session_id", ""),
+                    "task": {
+                        "id": str(graph.id),
+                        "status": "FAILED" if is_failed else "SUCCESS",
+                    },
+                    "step_count": len(graph.nodes),
+                },
+            )
+            self.runtime.event_bus.publish(event)
+        except Exception as e:
+            logger.debug(f"[EventEmitter] task.completed failed: {e}")
+
+    # ── Helpers ─────────────────────────────────────────────────────────
+
+
+    def _emit_realtime_step_events(self, s: Any, env_context: Dict[str, Any]) -> None:
+        """Emit step.start/step.end/step.failed for nodes processed this iteration.
+
+        Called after execute_ready_nodes in the ReAct loop. Replaces the old
+        post-hoc _emit_plan_and_steps in executor.py.
+        """
+        from app.avatar.runtime.graph.models.step_node import NodeStatus
+        for node in s.graph.nodes.values():
+            if node.id not in s.pending_node_ids:
+                continue
+            if node.status == NodeStatus.SUCCESS:
+                self._emit_step_end(node, env_context)
+            elif node.status == NodeStatus.FAILED:
+                self._emit_step_failed(node, env_context)
 
     @staticmethod
     def _summarize_params(params: Optional[Dict[str, Any]]) -> Optional[str]:

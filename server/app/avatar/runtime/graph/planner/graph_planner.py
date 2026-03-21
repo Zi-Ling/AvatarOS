@@ -21,7 +21,6 @@ from app.avatar.runtime.graph.models.graph_patch import (
     PatchOperation,
 )
 from app.avatar.runtime.graph.models.step_node import StepNode, NodeStatus
-import logging
 
 if TYPE_CHECKING:
     from app.avatar.runtime.graph.models.execution_graph import ExecutionGraph
@@ -149,7 +148,8 @@ class GraphPlanner:
 
         # Convert Step to GraphPatch
         if step is None:
-            # Task is finished
+            # Task is finished — preserve direct reply message if available
+            _final_message = getattr(self.interactive_planner, '_last_final_message', '') or ''
             return GraphPatch(
                 actions=[
                     PatchAction(
@@ -157,7 +157,11 @@ class GraphPlanner:
                     )
                 ],
                 reasoning="Task completed successfully",
-                metadata={"tokens_used": tokens_used, "cost": cost_usd},
+                metadata={
+                    "tokens_used": tokens_used,
+                    "cost": cost_usd,
+                    "final_message": _final_message,
+                },
             )
         
         # Create ADD_NODE action
@@ -419,9 +423,17 @@ class GraphPlanner:
         loop = asyncio.get_event_loop()
         raw_response = await loop.run_in_executor(None, self.interactive_planner._call_llm, prompt)
         
-        # Parse response
+        # Parse response — extract JSON from LLM output
         try:
-            data = self.interactive_planner._parse_json(raw_response)
+            import json as _json
+            import re as _re
+            # Try to extract JSON block from markdown fences or raw text
+            _json_match = _re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_response, _re.DOTALL)
+            if _json_match:
+                data = _json.loads(_json_match.group(1))
+            else:
+                # Try direct JSON parse
+                data = _json.loads(raw_response)
         except Exception as e:
             logger.error(f"Failed to parse repair response: {e}")
             raise ValueError(f"LLM repair output malformed: {e}\nRaw: {raw_response}")

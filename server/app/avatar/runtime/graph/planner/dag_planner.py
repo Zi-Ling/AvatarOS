@@ -243,7 +243,7 @@ class DAGPlanner:
                     source_node=edge_data.get("source_node"),
                     source_field=edge_data.get("source_field", "output"),
                     target_node=edge_data.get("target_node"),
-                    target_param=edge_data.get("target_param"),
+                    target_param=edge_data.get("target_param", "input"),
                     transformer_name=edge_data.get("transformer_name"),
                     optional=edge_data.get("optional", False),
                 )

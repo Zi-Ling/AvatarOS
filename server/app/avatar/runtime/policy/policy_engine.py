@@ -235,6 +235,7 @@ class PolicyRuleV2(PolicyRule):
     default_on_timeout: str = "deny" # fail-closed default
     specificity: int = 0             # higher = more specific rule
     schema_version: str = "1.0.0"
+    role_type: Optional[str] = None  # 适用的角色类型（multi-agent）
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -252,6 +253,7 @@ class PolicyRuleV2(PolicyRule):
             "default_on_timeout": self.default_on_timeout,
             "specificity": self.specificity,
             "schema_version": self.schema_version,
+            "role_type": self.role_type,
         }
 
     @classmethod
@@ -289,6 +291,7 @@ class PolicyRuleV2(PolicyRule):
             default_on_timeout=data.get("default_on_timeout", "deny"),
             specificity=data.get("specificity", 0),
             schema_version=data.get("schema_version", "1.0.0"),
+            role_type=data.get("role_type"),
         )
 
 
@@ -368,6 +371,11 @@ class PolicyEngineV2(PolicyEngine):
             for rule in rules_snapshot:
                 if not rule.enabled:
                     continue
+                # V2: role_type matching for multi-agent
+                if isinstance(rule, PolicyRuleV2) and rule.role_type is not None:
+                    agent_role = ctx.get("agent_role", "")
+                    if agent_role and agent_role != rule.role_type:
+                        continue  # 角色不匹配，跳过此规则
                 value_kind = ctx.get("value_kind", "")
                 if self._match_rule(rule, skill_name, target_path, value_kind, ctx):
                     v2_decision = self._map_v1_decision(rule.decision)
@@ -458,12 +466,13 @@ class PolicyEngineV2(PolicyEngine):
 
         return decision, rule, reason
 
-    def load_from_config(self, config: Dict[str, Any], source: str = "") -> None:
+    def load_from_config(self, config: Dict[str, Any], source: str = "", role_registry: Any = None) -> None:
         """Load policy rules from a config dict (parsed from YAML/JSON).
 
         Supports hot-reload — replaces all rules atomically.
         Expected format:
             {"rules": [{"rule_id": ..., "rule_type": ..., ...}, ...]}
+        If role_registry is provided, validates that role_type references exist.
         """
         raw_rules = config.get("rules", [])
         new_rules: List[PolicyRuleV2] = []
@@ -472,6 +481,13 @@ class PolicyEngineV2(PolicyEngine):
                 rule = PolicyRuleV2.from_dict(raw)
                 if source:
                     rule.config_source = source
+                # Validate role_type reference if registry provided
+                if rule.role_type and role_registry is not None:
+                    if hasattr(role_registry, "get") and role_registry.get(rule.role_type) is None:
+                        logger.warning(
+                            "[PolicyEngineV2] rule %s references unknown role_type '%s'",
+                            rule.rule_id, rule.role_type,
+                        )
                 new_rules.append(rule)
             except Exception as exc:
                 logger.warning(

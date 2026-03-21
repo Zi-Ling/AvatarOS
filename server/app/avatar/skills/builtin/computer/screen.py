@@ -4,6 +4,7 @@ import json
 from ...base import BaseSkill, SkillSpec, SkillOutput, SideEffect, SkillRiskLevel
 from ...registry import register_skill
 from ....actions.gui.drivers import ScreenDriver
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 
 # --- Models ---
 class ScreenCaptureInput(BaseModel):
@@ -49,6 +50,8 @@ class ScreenCaptureSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.READ,
         aliases=["screen.capture", "screenshot", "take_screenshot"],
+        tags=["screenshot", "capture", "screen", "截图", "屏幕", "截屏"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.BINARY, transport_mode=TransportMode.ARTIFACT),
     )
 
     async def run(self, ctx: "SkillContext", input_data: ScreenCaptureInput) -> ScreenCaptureOutput:
@@ -70,6 +73,8 @@ class ScreenInfoSkill(BaseSkill):
         side_effects=set(),
         risk_level=SkillRiskLevel.READ,
         aliases=["screen.info", "get_screen_size"],
+        tags=["screen", "resolution", "cursor", "屏幕", "分辨率", "鼠标位置"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.JSON, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: "SkillContext", input_data: ScreenInfoInput) -> ScreenInfoOutput:

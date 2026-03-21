@@ -9,6 +9,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 
 
 class FallbackInput(SkillInput):
@@ -74,6 +75,11 @@ class LLMFallbackSkill(BaseSkill[FallbackInput, FallbackOutput]):
         side_effects=set(),
         risk_level=SkillRiskLevel.SAFE,
         aliases=["fallback", "llm.catch_all", "default_response"],
+        tags=["answer", "reply", "question", "ask", "chat", "fallback",
+              "translate", "summarize", "rewrite", "generate", "explain",
+              "回答", "回复", "提问", "翻译", "摘要", "改写", "生成", "解释"],
+        dedup_mode="exact",
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     # ── 文本任务关键词 ────────────────────────────────────────────────

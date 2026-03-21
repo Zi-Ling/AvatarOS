@@ -74,3 +74,13 @@ class ReactLoopState:
 
     # ── Per-iteration transient state ───────────────────────────────────
     pending_node_ids: Set[str] = field(default_factory=set)
+
+    # ── FINISH rejection tracking ──────────────────────────────────────
+    consecutive_finish_rejections: int = 0
+    MAX_CONSECUTIVE_FINISH_REJECTIONS: int = 3
+
+    # ── SelfMonitor progress tracking ──────────────────────────────────
+    _prev_completed_count: int = 0
+
+    # ── Direct reply from Planner (FINISH with message, no skill needed) ─
+    direct_reply: Optional[str] = None

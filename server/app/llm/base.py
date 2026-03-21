@@ -4,6 +4,7 @@ from typing import List, Optional, Iterator, Dict, Any, Tuple
 import json
 import uuid
 import logging
+import httpx
 
 from app.llm.types import LLMMessage, LLMConfig, LLMResponse, LLMRole, ToolCall
 from app.llm.logging import LLMLogger, NullLLMLogger
@@ -28,7 +29,7 @@ class BaseLLMClient(ABC):
             base_delay=1.0,
             max_delay=10.0,
             exponential_base=2.0,
-            retryable_exceptions=(ConnectionError, TimeoutError, OSError),
+            retryable_exceptions=(ConnectionError, TimeoutError, OSError, httpx.TransportError),
         )
 
     # ── Shared helpers ──

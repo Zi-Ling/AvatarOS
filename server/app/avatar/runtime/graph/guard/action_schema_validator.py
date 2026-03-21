@@ -143,9 +143,27 @@ def _check_binary_format_misuse(
     skill_name: str,
     params: Dict[str, Any],
 ) -> Optional['BinaryFormatViolation']:
-    """Block text-only skills (fs.write, fs.read) targeting binary file formats."""
-    _TEXT_ONLY_SKILLS = {"fs.write", "fs.read"}
-    if skill_name not in _TEXT_ONLY_SKILLS:
+    """Block text-only skills targeting binary file formats.
+
+    A skill is considered text-only if its risk_level is READ or WRITE
+    and it has SideEffect.FS but NOT SideEffect.EXEC (i.e. it does raw
+    file I/O without code execution that could use binary libraries).
+    """
+    try:
+        from app.avatar.skills.registry import skill_registry
+        from app.avatar.skills.base import SkillRiskLevel, SideEffect
+        cls = skill_registry.get(skill_name)
+        if not cls:
+            return None
+        spec = cls.spec
+        is_text_only = (
+            spec.risk_level in (SkillRiskLevel.READ, SkillRiskLevel.WRITE)
+            and SideEffect.FS in spec.side_effects
+            and SideEffect.EXEC not in spec.side_effects
+        )
+        if not is_text_only:
+            return None
+    except Exception:
         return None
 
     # Extract path from params — try common param names

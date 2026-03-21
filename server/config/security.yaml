@@ -204,8 +204,8 @@ profiles:
       default_executor: "local"
   
   staging:
-    # Use default policies
-    pass
+    # Use default policies (inherits top-level settings)
+    _inherit: true
   
   production:
     capability_policies:

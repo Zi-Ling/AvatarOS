@@ -10,6 +10,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 from app.services.approval_service import get_approval_service
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,8 @@ class ApprovalRequestSkill(BaseSkill[ApprovalRequestInput, ApprovalRequestOutput
         side_effects={SideEffect.HUMAN},
         risk_level=SkillRiskLevel.SYSTEM,
         aliases=["request_approval", "ask_permission"],
+        tags=["approve", "permission", "审批", "授权"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.JSON, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: ApprovalRequestInput) -> ApprovalRequestOutput:

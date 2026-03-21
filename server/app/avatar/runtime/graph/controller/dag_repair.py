@@ -29,6 +29,7 @@ class DagRepairHelper:
         Fixes:
         - Duplicate node IDs (rename duplicates)
         - Invalid field references (remove invalid edges)
+        - Circular dependencies (remove back-edges that form cycles)
         - Missing edges (log only)
 
         Returns dict with keys: repaired (bool), repairs (list), patch (GraphPatch).
@@ -41,6 +42,8 @@ class DagRepairHelper:
         node_id_counter: Dict[str, int] = {}
         node_outputs: Dict[str, List[str]] = {}
         new_actions = []
+        # Collect edges for cycle detection
+        edge_actions = []
 
         for action in patch.actions:
             if action.operation == PatchOperation.ADD_NODE and action.node:
@@ -79,9 +82,26 @@ class DagRepairHelper:
                         repairs.append(f"Removed edge with invalid field '{sf}' from '{src}'")
                         repaired = True
                         continue
-                new_actions.append(action)
+                # Defer edge for cycle detection
+                edge_actions.append(action)
             else:
                 new_actions.append(action)
+
+        # ── Cycle detection: build adjacency and remove back-edges ──
+        adjacency: Dict[str, set] = {nid: set() for nid in node_ids}
+        valid_edges = []
+        for action in edge_actions:
+            src = action.edge.source_node
+            tgt = action.edge.target_node
+            # Check if adding this edge would create a cycle (DFS reachability)
+            if DagRepairHelper._would_create_cycle(adjacency, src, tgt):
+                repairs.append(f"Removed cycle-forming edge {src} → {tgt}")
+                repaired = True
+            else:
+                adjacency[src].add(tgt)
+                valid_edges.append(action)
+
+        new_actions.extend(valid_edges)
 
         if repaired:
             logger.info(f"[DagRepair] {len(repairs)} repairs made")
@@ -96,6 +116,23 @@ class DagRepairHelper:
         return {'repaired': repaired, 'repairs': repairs, 'patch': repaired_patch}
 
     @staticmethod
+    def _would_create_cycle(adjacency: Dict[str, set], src: str, tgt: str) -> bool:
+        """Check if adding edge src→tgt would create a cycle via DFS from tgt to src."""
+        if src == tgt:
+            return True
+        visited = set()
+        stack = [tgt]
+        while stack:
+            node = stack.pop()
+            if node == src:
+                return True
+            if node in visited:
+                continue
+            visited.add(node)
+            stack.extend(adjacency.get(node, set()))
+        return False
+
+    @staticmethod
     async def invoke_planner_for_repair(
         planner: 'GraphPlanner',
         graph: 'ExecutionGraph',
@@ -103,11 +140,14 @@ class DagRepairHelper:
         error_message: str,
         env_context: Dict[str, Any],
         recovery_attempts: Dict[str, int],
+        timeout_seconds: float = 30.0,
     ) -> Optional['GraphPatch']:
         """
-        Invoke planner for error recovery with attempt tracking.
-        Returns recovery patch or None if limit exceeded.
+        Invoke planner for error recovery with attempt tracking and timeout.
+        Returns recovery patch or None if limit exceeded or timeout.
         """
+        import asyncio
+
         current = recovery_attempts.get(failed_node_id, 0)
         max_attempts = 3
         if current >= max_attempts:
@@ -122,11 +162,19 @@ class DagRepairHelper:
         )
 
         try:
-            patch = await planner.plan_repair(
-                graph, failed_node_id, error_message, env_context,
+            patch = await asyncio.wait_for(
+                planner.plan_repair(
+                    graph, failed_node_id, error_message, env_context,
+                ),
+                timeout=timeout_seconds,
             )
             logger.info(f"Recovery patch: {len(patch.actions)} actions")
             return patch
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Planner repair timed out for {failed_node_id} after {timeout_seconds}s"
+            )
+            return None
         except Exception as e:
             logger.error(f"Planner repair failed for {failed_node_id}: {e}", exc_info=True)
             return None

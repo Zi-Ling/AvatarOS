@@ -62,6 +62,23 @@ class EventType(str, Enum):
     NODE_COMPLETED = "node_completed"
     NODE_FAILED = "node_failed"
 
+    # Multi-Agent events
+    AGENT_CREATED = "agent.created"
+    AGENT_ACTIVATED = "agent.activated"
+    AGENT_IDLE = "agent.idle"
+    AGENT_TERMINATED = "agent.terminated"
+    AGENT_TASK_ASSIGNED = "agent.task_assigned"
+    AGENT_TASK_COMPLETED = "agent.task_completed"
+
+    HANDOFF_CREATED = "handoff.created"
+    HANDOFF_RECEIVED = "handoff.received"
+    HANDOFF_COMPLETED = "handoff.completed"
+    HANDOFF_REJECTED = "handoff.rejected"
+
+    MULTI_AGENT_STARTED = "multi_agent.started"
+    MULTI_AGENT_COMPLETED = "multi_agent.completed"
+    MULTI_AGENT_MODE_DECISION = "multi_agent.mode_decision"
+
 
 @dataclass
 class Event:

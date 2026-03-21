@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Type, Generic, TypeVar, Set
+from typing import List, Type, Generic, TypeVar, Set, Optional, TYPE_CHECKING
 from enum import Enum
 
 from .context import SkillContext
 from .schema import SkillInput, SkillOutput
+
+if TYPE_CHECKING:
+    from app.avatar.runtime.graph.models.output_contract import SkillOutputContract
 
 InT = TypeVar("InT", bound=SkillInput)
 OutT = TypeVar("OutT", bound=SkillOutput)
@@ -21,6 +24,8 @@ class SideEffect(str, Enum):
     EXEC = "exec"
     HUMAN = "human"
     BROWSER = "browser"  # 浏览器自动化：需要联网沙箱（browser sandbox）
+    DATA_READ = "data_read"  # 结构化数据层：读操作
+    DATA_WRITE = "data_write"  # 结构化数据层：写操作
 
 
 class SkillRiskLevel(str, Enum):
@@ -54,6 +59,8 @@ class SkillSpec:
     - aliases: 召回优化（fuzzy match + 向量搜索）
     - code_params: 包含可执行代码的参数名集合。这些参数中的
       step_N_output 引用由运行时变量注入处理，不创建 DataEdge。
+    - tags: 语义标签（中英文），用于 GoalTracker 的 sub-goal 覆盖匹配。
+      每个 skill 声明自己的 tags，GoalTracker 从 registry 读取。
     """
     name: str
     description: str
@@ -63,6 +70,9 @@ class SkillSpec:
     risk_level: SkillRiskLevel = SkillRiskLevel.SAFE
     aliases: List[str] = field(default_factory=list)
     code_params: Set[str] = field(default_factory=set)
+    tags: List[str] = field(default_factory=list)
+    dedup_mode: str = "fuzzy"  # "skip" | "exact" | "fuzzy"
+    output_contract: Optional['SkillOutputContract'] = None  # 声明式输出契约，避免运行时推断
 
 
 class BaseSkill(ABC, Generic[InT, OutT]):

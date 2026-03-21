@@ -105,6 +105,52 @@ class SkillRegistry:
             lines.append(f"- {name}: {desc}")
         return "\n".join(lines)
 
+    # ── Tag-based classification queries ─────────────────────────────────
+    # Centralized tag sets and classification methods.
+    # All runtime code should use these instead of inline tag checks.
+
+    ANSWER_TAGS = frozenset({"answer", "reply", "fallback", "回答", "回复"})
+    SEARCH_TAGS = frozenset({"search", "搜索", "查找", "检索"})
+
+    def has_tags(self, skill_name: str, tag_set: frozenset) -> bool:
+        """Check if a skill's tags intersect with the given tag set."""
+        cls = self.get(skill_name)
+        if not cls:
+            return False
+        return bool(set(cls.spec.tags) & tag_set)
+
+    def is_answer_skill(self, skill_name: str) -> bool:
+        """Check if skill is a text answer/reply/fallback skill."""
+        return self.has_tags(skill_name, self.ANSWER_TAGS)
+
+    def is_search_skill(self, skill_name: str) -> bool:
+        """Check if skill is a search/retrieval skill."""
+        return self.has_tags(skill_name, self.SEARCH_TAGS)
+
+    def is_fs_write_skill(self, skill_name: str) -> bool:
+        """Check if skill is a file-writing skill (WRITE + FS side effect)."""
+        from .base import SkillRiskLevel, SideEffect
+        cls = self.get(skill_name)
+        if not cls:
+            return False
+        spec = cls.spec
+        return spec.risk_level == SkillRiskLevel.WRITE and SideEffect.FS in spec.side_effects
+
+    def is_code_skill(self, skill_name: str) -> bool:
+        """Check if skill is a code execution skill (risk_level == EXECUTE)."""
+        from .base import SkillRiskLevel
+        cls = self.get(skill_name)
+        if not cls:
+            return False
+        return cls.spec.risk_level == SkillRiskLevel.EXECUTE
+
+    def find_by_tags(self, tag_set: frozenset) -> Optional[Type[BaseSkill]]:
+        """Find the first skill whose tags intersect with the given tag set."""
+        for cls in self._skills.values():
+            if set(cls.spec.tags) & tag_set:
+                return cls
+        return None
+
     # ── Skill Search (keyword-based, no embedding) ───────────────────────────
 
     def search_skills(self, query: str, limit: int = 15) -> Dict[str, Any]:

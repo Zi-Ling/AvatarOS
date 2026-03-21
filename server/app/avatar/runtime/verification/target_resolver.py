@@ -197,28 +197,32 @@ class TargetResolver:
             logger.debug(f"[TargetResolver] artifact_paths extraction failed: {e}")
         return targets
 
-    # fs skill 名称集合，用于从节点输出中提取实际写入的文件路径
-    _FS_WRITE_SKILLS = {"fs.write", "fs.copy", "fs.move"}
-
     def _from_fs_node_outputs(
         self,
         graph: "ExecutionGraph",
         workspace: "SessionWorkspace",
     ) -> List[VerificationTarget]:
         """
-        从已成功的 fs.write/fs.copy/fs.move 节点的 outputs 中反向提取实际写入的文件路径。
+        从已成功的文件写入 skill 节点的 outputs 中反向提取实际写入的文件路径。
 
-        这解决了 TargetResolver 无法从 goal 文本推断运行时文件名的问题：
-        Planner 在运行时决定文件名（如 random_sentence_ja.txt），TargetResolver
-        在 FINISH 前无法猜到。但 fs.write 节点执行后，outputs 里有实际写入的路径。
+        Uses SkillSpec metadata (risk_level WRITE + SideEffect.FS) to identify
+        file-producing skills instead of hardcoded skill names.
         """
         targets: List[VerificationTarget] = []
         try:
             from app.avatar.runtime.graph.models.step_node import NodeStatus
+            from app.avatar.skills.registry import skill_registry
+            from app.avatar.skills.base import SkillRiskLevel, SideEffect
+
             for node in graph.nodes.values():
                 if node.status != NodeStatus.SUCCESS:
                     continue
-                if node.capability_name not in self._FS_WRITE_SKILLS:
+                # Check if skill is a file-writing skill via registry metadata
+                cls = skill_registry.get(node.capability_name)
+                if not cls:
+                    continue
+                spec = cls.spec
+                if not (spec.risk_level == SkillRiskLevel.WRITE and SideEffect.FS in spec.side_effects):
                     continue
 
                 outputs = node.outputs or {}
@@ -240,14 +244,15 @@ class TargetResolver:
             logger.debug(f"[TargetResolver] fs node output extraction failed: {e}")
         return targets
 
-    _CODE_SKILLS = {"python.run"}
-
     def _from_code_node_outputs(
         self,
         graph: "ExecutionGraph",
     ) -> List[VerificationTarget]:
         """
-        从已成功的 python.run 节点中提取文件产物。
+        从已成功的代码执行 skill 节点中提取文件产物。
+
+        Uses SkillSpec metadata (risk_level == EXECUTE) to identify
+        code execution skills instead of hardcoded skill names.
 
         来源优先级：
         1. node.outputs["file_path"]（_save_binary 写的单文件）
@@ -260,10 +265,15 @@ class TargetResolver:
         targets: List[VerificationTarget] = []
         try:
             from app.avatar.runtime.graph.models.step_node import NodeStatus
+            from app.avatar.skills.registry import skill_registry
+            from app.avatar.skills.base import SkillRiskLevel
+
             for node in graph.nodes.values():
                 if node.status != NodeStatus.SUCCESS:
                     continue
-                if node.capability_name not in self._CODE_SKILLS:
+                # Check if skill is a code execution skill via registry metadata
+                cls = skill_registry.get(node.capability_name)
+                if not cls or cls.spec.risk_level != SkillRiskLevel.EXECUTE:
                     continue
 
                 outputs = node.outputs or {}

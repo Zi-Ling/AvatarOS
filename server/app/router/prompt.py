@@ -4,7 +4,7 @@
 【第二层】任务理解 Prompt
 
 职责：提取任务信息（goal、task_mode）
-前提：用户输入已被 IntentClassifier 判定为 "task"
+前提：用户输入已通过 Router 进入任务处理流程
 
 特点：
 - 轻量级（约 30-40 行）

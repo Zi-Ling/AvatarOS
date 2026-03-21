@@ -117,18 +117,18 @@ class OutputContractAdapter:
         mode: OutputCompatMode = OutputCompatMode.COMPATIBLE,
         trace_store: Any = None,
         session_id: Optional[str] = None,
+        skill_name: Optional[str] = None,
     ) -> SkillOutputContract:
         """
         Convert raw skill output dict to SkillOutputContract.
 
-        Inference rules (compatible mode):
-        - has 'hex' field → BINARY + ARTIFACT
-        - has 'file_path' field → PATH + REF
-        - has 'output'/'result' and value is dict → JSON + INLINE
-        - has 'stdout'/'output' and value is str → TEXT + INLINE
-        - fallback → TEXT + INLINE with DeprecationWarning
+        Resolution order:
+        1. raw_output contains value_kind + transport_mode → use directly
+        2. skill_name provided → lookup SkillSpec.output_contract from registry
+        3. Compatible mode → infer from output fields + DeprecationWarning
+        4. Strict mode → raise InvalidOutputContractError
         """
-        # If already typed, return directly
+        # 1. If already typed in output dict, return directly
         if "value_kind" in raw_output and "transport_mode" in raw_output:
             try:
                 vk = ValueKind(raw_output["value_kind"])
@@ -144,6 +144,16 @@ class OutputContractAdapter:
                     semantic_label=raw_output.get("semantic_label"),
                 )
             except (ValueError, InvalidTransportError):
+                pass
+
+        # 2. Lookup from SkillSpec.output_contract (declarative, no warning)
+        if skill_name:
+            try:
+                from app.avatar.skills.registry import skill_registry
+                skill_cls = skill_registry.get(skill_name)
+                if skill_cls and skill_cls.spec.output_contract is not None:
+                    return skill_cls.spec.output_contract
+            except Exception:
                 pass
 
         if mode == OutputCompatMode.STRICT:

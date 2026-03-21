@@ -41,41 +41,69 @@ class ReactFinishHandlerMixin:
 
         logger.info("Planner returned FINISH")
 
-        # ── Sub-goal coverage ───────────────────────────────────────────
-        uncovered = self._goal_tracker.get_uncovered_sub_goals(
-            s.sub_goals, s.graph
+        # ── Consecutive FINISH rejection cap ───────────────────────────
+        # If Planner keeps returning FINISH despite rejection hints,
+        # force-accept after MAX_CONSECUTIVE_FINISH_REJECTIONS to avoid
+        # burning the entire budget on a loop the Planner can't resolve.
+        _at_rejection_cap = (
+            s.consecutive_finish_rejections >= s.MAX_CONSECUTIVE_FINISH_REJECTIONS
         )
-        if uncovered:
+        if _at_rejection_cap:
             logger.warning(
-                f"[GoalTracker] FINISH rejected: {len(uncovered)} uncovered: {uncovered}"
+                f"[GoalTracker] FINISH force-accepted after "
+                f"{s.consecutive_finish_rejections} consecutive rejections — "
+                f"Planner cannot resolve remaining gaps"
             )
+            # Clear stale hints so they don't pollute the final result
             s.env_context = dict(s.env_context)
-            s.env_context["uncovered_sub_goals"] = uncovered
-            s.env_context["goal_tracker_hint"] = (
-                f"The following sub-goals are NOT yet completed: {uncovered}. "
-                f"You MUST complete them before finishing."
+            s.env_context.pop("uncovered_sub_goals", None)
+            s.env_context.pop("unsatisfied_deliverables", None)
+            s.env_context.pop("goal_tracker_hint", None)
+            # Fall through to verification gate (skip sub-goal/deliverable checks)
+        else:
+            # ── Sub-goal coverage ───────────────────────────────────────
+            uncovered = self._goal_tracker.get_uncovered_sub_goals(
+                s.sub_goals, s.graph
             )
-            return "continue"
-
-        # ── Deliverable coverage ────────────────────────────────────────
-        if s.deliverables:
-            _unsatisfied = self._goal_tracker.get_unsatisfied_deliverables(
-                s.deliverables, s.graph
-            )
-            if _unsatisfied:
-                _missing_fmts = [f"{d.id}:{d.format}" for d in _unsatisfied]
+            if uncovered:
+                s.consecutive_finish_rejections += 1
                 logger.warning(
-                    f"[GoalTracker] FINISH rejected: {len(_unsatisfied)} "
-                    f"unsatisfied deliverables: {_missing_fmts}"
+                    f"[GoalTracker] FINISH rejected ({s.consecutive_finish_rejections}/"
+                    f"{s.MAX_CONSECUTIVE_FINISH_REJECTIONS}): "
+                    f"{len(uncovered)} uncovered: {uncovered}"
                 )
                 s.env_context = dict(s.env_context)
-                s.env_context["unsatisfied_deliverables"] = _missing_fmts
+                s.env_context["uncovered_sub_goals"] = uncovered
                 s.env_context["goal_tracker_hint"] = (
-                    f"The following deliverables have NOT been produced yet: "
-                    f"{_missing_fmts}. You MUST produce ALL requested file "
-                    f"formats before finishing."
+                    f"The following sub-goals are NOT yet completed: {uncovered}. "
+                    f"You MUST complete them before finishing."
                 )
                 return "continue"
+
+            # ── Deliverable coverage ────────────────────────────────────
+            if s.deliverables:
+                _unsatisfied = self._goal_tracker.get_unsatisfied_deliverables(
+                    s.deliverables, s.graph
+                )
+                if _unsatisfied:
+                    s.consecutive_finish_rejections += 1
+                    _missing_fmts = [f"{d.id}:{d.format}" for d in _unsatisfied]
+                    logger.warning(
+                        f"[GoalTracker] FINISH rejected ({s.consecutive_finish_rejections}/"
+                        f"{s.MAX_CONSECUTIVE_FINISH_REJECTIONS}): "
+                        f"{len(_unsatisfied)} unsatisfied deliverables: {_missing_fmts}"
+                    )
+                    s.env_context = dict(s.env_context)
+                    s.env_context["unsatisfied_deliverables"] = _missing_fmts
+                    s.env_context["goal_tracker_hint"] = (
+                        f"The following deliverables have NOT been produced yet: "
+                        f"{_missing_fmts}. You MUST produce ALL requested file "
+                        f"formats before finishing."
+                    )
+                    return "continue"
+
+        # Reset rejection counter — FINISH passed sub-goal + deliverable checks
+        s.consecutive_finish_rejections = 0
 
         # ── Long-task: DeliveryGate ─────────────────────────────────────
         if s.lt_ctx is not None:

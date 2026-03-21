@@ -28,6 +28,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +264,8 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
         risk_level=SkillRiskLevel.EXECUTE,
         aliases=["browser_run", "playwright_run", "web_automation"],
         code_params={"script"},
+        tags=["browse", "visit", "scrape", "浏览", "访问", "抓取", "截图"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: BrowserRunInput) -> BrowserRunOutput:

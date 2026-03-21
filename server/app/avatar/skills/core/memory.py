@@ -10,6 +10,7 @@ from ..base import BaseSkill, SkillSpec, SideEffect, SkillRiskLevel
 from ..schema import SkillInput, SkillOutput
 from ..registry import register_skill
 from ..context import SkillContext
+from app.avatar.runtime.graph.models.output_contract import SkillOutputContract, ValueKind, TransportMode
 from app.services.memory_service import get_memory_service
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,8 @@ class MemoryStoreSkill(BaseSkill[MemoryStoreInput, MemoryStoreOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.WRITE,
         aliases=["store_memory", "save_memory"],
+        tags=["remember", "store", "记住", "存储", "记忆"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: MemoryStoreInput) -> MemoryStoreOutput:
@@ -71,6 +74,8 @@ class MemorySearchSkill(BaseSkill[MemorySearchInput, MemorySearchOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.READ,
         aliases=["search_memory", "recall_memory"],
+        tags=["recall", "retrieve", "remember", "回忆", "检索", "搜索"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.JSON, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: MemorySearchInput) -> MemorySearchOutput:
@@ -103,6 +108,8 @@ class MemoryDeleteSkill(BaseSkill[MemoryDeleteInput, MemoryDeleteOutput]):
         side_effects={SideEffect.FS},
         risk_level=SkillRiskLevel.WRITE,
         aliases=["delete_memory", "forget"],
+        tags=["delete", "forget", "删除", "遗忘"],
+        output_contract=SkillOutputContract(value_kind=ValueKind.TEXT, transport_mode=TransportMode.INLINE),
     )
 
     async def run(self, ctx: SkillContext, params: MemoryDeleteInput) -> MemoryDeleteOutput:

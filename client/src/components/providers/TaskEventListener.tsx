@@ -70,6 +70,53 @@ export function TaskEventListener() {
         return;
       }
 
+      // ── 0. Chat direct reply (Planner FINISH with no skill execution) ──
+      // When the LLM gate classifies as "task" but Planner immediately
+      // returns FINISH (e.g. "你是谁"), the backend sends chat.direct_reply
+      // instead of task.summary. We render it as a normal chat message,
+      // bypassing the task execution UI entirely.
+      if (type === "chat.direct_reply" && payload?.content) {
+        const chatState = useChatStore.getState();
+        chatState.setIsTyping(false);
+        chatState.setCanCancel(false);
+
+        const placeholderId = chatState.currentTaskMessageId;
+        if (placeholderId) {
+          updateMessage(placeholderId, {
+            content: payload.content,
+            isStreaming: false,
+            messageType: "chat",
+            kind: undefined,
+            subtype: undefined,
+          });
+          chatState.setCurrentTaskMessageId(null);
+        } else {
+          // Find the last streaming assistant message as fallback
+          const lastStreaming = chatState.messages.findLast(
+            (m: Message) => m.role === "assistant" && m.isStreaming
+          );
+          if (lastStreaming) {
+            updateMessage(lastStreaming.id, {
+              content: payload.content,
+              isStreaming: false,
+              messageType: "chat",
+              kind: undefined,
+              subtype: undefined,
+            });
+          } else {
+            addMessage({
+              id: `direct-${Date.now()}`,
+              role: "assistant",
+              content: payload.content,
+              timestamp: new Date().toISOString(),
+              isStreaming: false,
+              messageType: "chat",
+            });
+          }
+        }
+        return;
+      }
+
       let { messages, currentTaskMessageId, setIsTyping, setCurrentTaskMessageId } =
         useChatStore.getState();
 
@@ -371,6 +418,7 @@ export function TaskEventListener() {
             hadApproval, success: backendSummary.success ?? (backendSummary.failed_steps === 0),
             terminalStatus: backendSummary.terminal_status,
             finalAnswer: backendSummary.final_answer || undefined,
+            structuredOutput: payload.structured_output ?? undefined,
             keyOutputs: (backendSummary.key_outputs ?? []).map((o: any) => ({
               stepName: o.step_name, skillName: o.skill_name, summary: o.summary,
               artifacts: o.artifacts ?? [],

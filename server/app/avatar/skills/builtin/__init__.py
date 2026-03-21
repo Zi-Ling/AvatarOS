@@ -20,6 +20,7 @@ from ..core import web  # noqa: F401
 from ..core import state  # noqa: F401
 from ..core import memory  # noqa: F401
 from ..core import approval  # noqa: F401
+from ..core import data  # noqa: F401
 
 # ============================================================================
 # 专用边界（Specialized Boundaries）
@@ -39,6 +40,7 @@ __all__ = [
     "state",
     "memory",
     "approval",
+    "data",
     # Specialized Boundaries
     "computer",
     # Fallback

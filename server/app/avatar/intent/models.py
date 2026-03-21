@@ -48,6 +48,12 @@ class IntentSpec:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-safe dict.
+
+        Private metadata keys (prefixed with ``_``) are stripped because they
+        carry live runtime objects (e.g. ``_memory_manager``) that must never
+        be persisted or serialized.
+        """
         return {
             "id": self.id,
             "goal": self.goal,
@@ -57,5 +63,8 @@ class IntentSpec:
             "safety_level": self.safety_level.value,
             "raw_user_input": self.raw_user_input,
             "action_type": self.action_type,
-            "metadata": self.metadata
+            "metadata": {
+                k: v for k, v in self.metadata.items()
+                if not k.startswith("_")
+            },
         }

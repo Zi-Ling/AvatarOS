@@ -110,11 +110,17 @@ class ReflectionGating:
             self.update_baseline(task_type, cost)
             return True
 
-        # 条件 4：新任务类型
+        # 条件 4：新任务类型 — 仅建立 baseline，不触发反思
+        # 走到这里 outcome 一定不是 FAILED（条件 1 已拦截），所以新任务类型
+        # 到达此处必然是成功的。成功的新任务没有可学习的教训，只需建立 baseline。
+        # 避免浪费两次 LLM 调用（小模型 + 大模型）产出 confidence=0 的无用候选。
         if not baseline or baseline.sample_count == 0:
-            logger.info(f"[ReflectionGating] trigger: new task type={task_type}")
+            logger.info(
+                f"[ReflectionGating] skip: new task type={task_type} "
+                f"succeeded — baseline only"
+            )
             self.update_baseline(task_type, cost)
-            return True
+            return False
 
         # 正常成功 → 跳过反思，仅更新基线
         self.update_baseline(task_type, cost)

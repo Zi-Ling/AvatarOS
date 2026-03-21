@@ -61,7 +61,18 @@ class SkillExecutorMixin:
         # python.run: inject upstream node outputs as variables
         _code_params = getattr(skill_cls.spec, "code_params", set()) if hasattr(skill_cls, "spec") else set()
         if _code_params and context is not None:
-            params = self._inject_node_outputs_into_code(params, context)
+            # 判断该 skill 是否会在 Docker/Sandbox 中执行，
+            # 以决定注入代码中的路径应该用容器路径还是宿主机路径。
+            _sandboxed = False
+            try:
+                from app.avatar.runtime.executor.factory import ExecutorFactory as _EF
+                from app.avatar.runtime.executor.sandbox import SandboxExecutor as _SBX
+                from app.avatar.runtime.executor.docker import DockerExecutor as _DKR
+                _chosen_executor = _EF.get_executor(skill_cls)
+                _sandboxed = isinstance(_chosen_executor, (_SBX, _DKR))
+            except Exception:
+                pass
+            params = self._inject_node_outputs_into_code(params, context, sandboxed=_sandboxed)
             params = self._sanitize_code_host_paths(params)
 
         # 构建 extra：workspace 优先从 context 取，保证 session 隔离
