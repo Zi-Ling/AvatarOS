@@ -7,6 +7,7 @@ from .execution_graph import ExecutionGraph, GraphStatus, generate_uuid7
 from .step_node import StepNode, NodeStatus, RetryPolicy, StreamEvent
 from .data_edge import DataEdge, generate_edge_id
 from .graph_patch import GraphPatch, PatchAction, PatchOperation
+from .execution_frontier import ExecutionFrontier, CompletedNodeInfo, RunningNodeInfo
 
 __all__ = [
     # ExecutionGraph
@@ -28,4 +29,9 @@ __all__ = [
     'GraphPatch',
     'PatchAction',
     'PatchOperation',
+    
+    # ExecutionFrontier
+    'ExecutionFrontier',
+    'CompletedNodeInfo',
+    'RunningNodeInfo',
 ]

@@ -62,7 +62,12 @@ class ApprovalService:
 
     def __init__(self, default_timeout: int = 60):
         self.default_timeout = default_timeout
-        self._pending_futures: Dict[str, asyncio.Future] = {}
+        # 审批超时策略配置
+        self._timeout_config = {
+            "quick": 300,       # 5 分钟
+            "standard": 3600,   # 1 小时
+            "complex": 0,       # 无限期
+        }
 
     # ------------------------------------------------------------------
     # Grant Store
@@ -157,14 +162,22 @@ class ApprovalService:
         step_id: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
         timeout_seconds: Optional[int] = None,
+        approval_type: str = "quick",
+        timeout_action: str = "mark_timeout",
+        parent_request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """创建审批请求（幂等）"""
         existing = self.get_request(request_id)
         if existing:
             return existing
 
-        timeout = timeout_seconds or self.default_timeout
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=timeout)
+        # 根据 approval_type 确定超时时间
+        if timeout_seconds is None:
+            timeout_seconds = self._timeout_config.get(approval_type, self.default_timeout)
+
+        expires_at = None
+        if timeout_seconds > 0:
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
 
         req = ApprovalRequest(
             request_id=request_id,
@@ -175,6 +188,9 @@ class ApprovalService:
             details=details,
             expires_at=expires_at,
             status=ApprovalStatus.PENDING.value,
+            approval_type=approval_type,
+            timeout_action=timeout_action,
+            parent_request_id=parent_request_id,
         )
         with Session(engine) as session:
             session.add(req)
@@ -267,49 +283,89 @@ class ApprovalService:
                 ttl_seconds=grant_ttl_seconds,
             )
 
-        # 通知等待的 Future
-        if request_id in self._pending_futures:
-            future = self._pending_futures.pop(request_id)
-            if not future.done():
-                future.set_result(approved)
+        # 注意：不再通知内存 Future，审批恢复由 RecoveryEngine 处理
 
         return True
 
-    async def wait_for_approval(
+    # ------------------------------------------------------------------
+    # Durable Interrupt 方法（替换旧 wait_for_approval）
+    # ------------------------------------------------------------------
+
+    def request_approval_and_interrupt(
         self,
         request_id: str,
+        message: str,
+        operation: str,
+        task_id: str,
+        step_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
         timeout_seconds: Optional[int] = None,
-    ) -> bool:
-        """异步等待审批结果"""
-        req = self.get_request(request_id)
-        if not req:
-            raise ValueError(f"Approval request not found: {request_id}")
+        approval_type: str = "quick",
+        timeout_action: str = "mark_timeout",
+    ) -> Dict[str, Any]:
+        """
+        创建审批请求并触发 durable interrupt。
 
-        if req["status"] == ApprovalStatus.APPROVED.value:
-            return True
-        if req["status"] == ApprovalStatus.DENIED.value:
-            return False
-        if req["status"] != ApprovalStatus.PENDING.value:
-            raise ValueError(f"Invalid approval status: {req['status']}")
+        调用方（DurableStateMixin）在调用此方法后应：
+        1. 持久化当前状态到 DB
+        2. 创建 state_transition Checkpoint
+        3. 转换任务状态到 waiting_approval
+        4. 退出执行流程（raise DurableInterruptSignal）
+        """
+        return self.create_request(
+            request_id=request_id,
+            message=message,
+            operation=operation,
+            task_id=task_id,
+            step_id=step_id,
+            details=details,
+            timeout_seconds=timeout_seconds,
+            approval_type=approval_type,
+            timeout_action=timeout_action,
+        )
 
-        if request_id not in self._pending_futures:
-            loop = asyncio.get_running_loop()
-            self._pending_futures[request_id] = loop.create_future()
+    def get_pending_by_task(self, task_id: str) -> List[Dict[str, Any]]:
+        """获取任务的所有 pending 审批请求（重连推送用）。"""
+        with Session(engine) as session:
+            reqs = session.exec(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.task_id == task_id,
+                    ApprovalRequest.status == ApprovalStatus.PENDING.value,
+                )
+            ).all()
+            return [
+                {
+                    "request_id": r.request_id,
+                    "message": r.message,
+                    "operation": r.operation,
+                    "status": r.status,
+                    "details": r.details,
+                    "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+                    "task_id": r.task_id,
+                    "step_id": r.step_id,
+                    "approval_type": r.approval_type,
+                    "timeout_action": r.timeout_action,
+                }
+                for r in reqs
+            ]
 
-        future = self._pending_futures[request_id]
-        timeout = timeout_seconds or self.default_timeout
+    def reopen_approval(self, original_request_id: str) -> Optional[Dict[str, Any]]:
+        """超时后重新发起审批，关联原审批记录。"""
+        original = self.get_request(original_request_id)
+        if not original:
+            return None
 
-        try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-        except asyncio.TimeoutError:
-            with Session(engine) as session:
-                r = session.get(ApprovalRequest, request_id)
-                if r and r.status == ApprovalStatus.PENDING.value:
-                    r.status = ApprovalStatus.TIMEOUT.value
-                    session.add(r)
-                    session.commit()
-            logger.warning(f"[ApprovalService] Request timeout: {request_id}")
-            raise TimeoutError(f"Approval request timeout: {request_id}")
+        import uuid
+        new_request_id = str(uuid.uuid4())
+        return self.create_request(
+            request_id=new_request_id,
+            message=original["message"],
+            operation=original["operation"],
+            task_id=original.get("task_id"),
+            step_id=original.get("step_id"),
+            details=original.get("details"),
+            parent_request_id=original_request_id,
+        )
 
     def cleanup_expired(self) -> int:
         """将过期的 PENDING 请求标记为 EXPIRED"""

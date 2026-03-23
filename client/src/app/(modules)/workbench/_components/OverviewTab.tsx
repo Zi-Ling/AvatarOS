@@ -1,17 +1,15 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
-  CheckCircle2, Clock, Zap, FileText, FolderOpen,
-  Package, ExternalLink, XCircle, Loader2, Pause, Play, X,
-  ChevronDown, ChevronRight, Paperclip, Shield, AlertTriangle,
-  ArrowRight, RotateCcw,
+  CheckCircle2, Zap,
+  XCircle, Loader2, Pause, Play, X,
+  Paperclip, Shield, AlertTriangle, ArrowRight, RotateCcw,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { historyApi, type SessionItem, type ArtifactRecord } from "@/lib/api/history";
 import { approvalApi } from "@/lib/api/history";
 import { scheduleApi } from "@/lib/api/schedule";
-import { artifactApi } from "@/lib/api/history";
 import { useSocket } from "@/components/providers/SocketProvider";
 import { useTaskStore } from "@/stores/taskStore";
 import { useRunStore } from "@/stores/runStore";
@@ -42,102 +40,134 @@ function formatDuration(ms: number | null): string {
   return `${Math.floor(s / 60)}m${s % 60}s`;
 }
 
-function fileIcon(filename: string) {
-  const ext = filename.split(".").pop()?.toLowerCase();
-  if (["pdf", "doc", "docx", "md", "txt"].includes(ext || "")) return FileText;
-  if (["zip", "tar", "gz"].includes(ext || "")) return Package;
-  return FolderOpen;
-}
+// ── Activity Ring (SVG) ──────────────────────────────────────────────────────
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-type HeroMode = "attention" | "live" | "calm";
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// HERO A: Attention — 有 pending approval 时显示
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function AttentionHero({ approval, onApprove, onReject, submitting }: {
-  approval: ApprovalRequest;
-  onApprove: () => void;
-  onReject: () => void;
-  submitting: boolean;
+function ActivityRing({ value, max, color, size = 80, strokeWidth = 6, label, icon: Icon }: {
+  value: number; max: number; color: string; size?: number;
+  strokeWidth?: number; label: string; icon: any;
 }) {
-  // 从 details 提取风险等级
-  const risk = approval.details?.risk_level as string | undefined;
-  const affectedCount = approval.details?.affected_files as number | undefined;
-  const riskLabel = risk === "high" ? "高风险：不可恢复操作"
-    : risk === "medium" ? "中风险：请确认操作"
-    : affectedCount ? `影响 ${affectedCount} 个文件` : null;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const progress = max > 0 ? Math.min(value / max, 1) : 0;
+  const offset = circumference * (1 - progress);
+
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <div className="relative" style={{ width: size, height: size }}>
+        <svg width={size} height={size} className="-rotate-90">
+          {/* Track */}
+          <circle
+            cx={size / 2} cy={size / 2} r={radius}
+            fill="none" strokeWidth={strokeWidth}
+            className="stroke-slate-100 dark:stroke-slate-800"
+          />
+          {/* Progress */}
+          <motion.circle
+            cx={size / 2} cy={size / 2} r={radius}
+            fill="none" strokeWidth={strokeWidth}
+            stroke={color} strokeLinecap="round"
+            strokeDasharray={circumference}
+            initial={{ strokeDashoffset: circumference }}
+            animate={{ strokeDashoffset: offset }}
+            transition={{ duration: 1, ease: "easeOut" }}
+          />
+        </svg>
+        {/* Center content */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <Icon className="w-3.5 h-3.5 mb-0.5" style={{ color }} />
+          <span className="text-sm font-bold text-slate-700 dark:text-slate-200">{value}</span>
+        </div>
+      </div>
+      <span className="text-[10px] text-slate-400 dark:text-slate-500 font-medium">{label}</span>
+    </div>
+  );
+}
+
+// ── Pulse Wave (for live mode) ───────────────────────────────────────────────
+
+function PulseWave({ isPaused }: { isPaused: boolean }) {
+  return (
+    <div className="relative w-full h-8 overflow-hidden rounded-lg">
+      {[0, 1, 2].map(i => (
+        <motion.div
+          key={i}
+          className={cn(
+            "absolute inset-0 rounded-lg",
+            isPaused ? "bg-amber-400/10" : "bg-indigo-500/10"
+          )}
+          animate={isPaused ? {} : {
+            scaleX: [1, 1.5, 1],
+            opacity: [0.3, 0, 0.3],
+          }}
+          transition={{
+            duration: 2,
+            repeat: Infinity,
+            delay: i * 0.6,
+            ease: "easeInOut",
+          }}
+        />
+      ))}
+      <div className={cn(
+        "absolute inset-0 rounded-lg",
+        isPaused
+          ? "bg-gradient-to-r from-amber-500/5 via-amber-500/10 to-amber-500/5"
+          : "bg-gradient-to-r from-indigo-500/5 via-indigo-500/15 to-indigo-500/5"
+      )} />
+    </div>
+  );
+}
+
+// ── Timeline Node ────────────────────────────────────────────────────────────
+
+function TimelineNode({ step, index }: { step: NarrativeStepView; index: number }) {
+  const isCurrent = step.status === "running";
+  const isDone = step.status === "completed";
+  const isFailed = step.status === "failed";
 
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.96 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="flex flex-col items-center justify-center flex-1 px-6"
+      initial={{ opacity: 0, x: -12 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ delay: index * 0.04 }}
+      className="flex items-start gap-3 relative"
     >
-      {/* Pulsing ring */}
-      <div className="relative mb-5">
-        <span className="absolute inset-0 rounded-full bg-amber-400/20 animate-ping" style={{ animationDuration: "2s" }} />
-        <div className="relative w-12 h-12 rounded-full bg-amber-100 dark:bg-amber-900/40 flex items-center justify-center">
-          <Shield className="w-6 h-6 text-amber-600 dark:text-amber-400" />
+      {/* Timeline line + dot */}
+      <div className="flex flex-col items-center shrink-0 pt-0.5">
+        <div className={cn(
+          "w-2.5 h-2.5 rounded-full border-2 transition-colors relative",
+          isCurrent && "border-indigo-500 bg-indigo-500",
+          isDone && "border-emerald-500 bg-emerald-500",
+          isFailed && "border-red-400 bg-red-400",
+          !isCurrent && !isDone && !isFailed && "border-slate-300 dark:border-slate-600 bg-transparent",
+        )}>
+          {isCurrent && (
+            <span className="absolute inset-0 rounded-full bg-indigo-400 animate-ping opacity-75" />
+          )}
         </div>
       </div>
 
-      {/* What */}
-      <p className="text-base font-medium text-slate-800 dark:text-slate-100 text-center leading-snug mb-1.5 max-w-xs">
-        {approval.message}
-      </p>
-
-      {/* Why — operation detail */}
-      <p className="text-xs text-slate-500 dark:text-slate-400 text-center mb-2 max-w-xs">
-        操作: {approval.operation}
-      </p>
-
-      {/* Risk badge */}
-      {riskLabel && (
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 mb-4">
-          <AlertTriangle className="w-3 h-3 text-amber-500" />
-          <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">{riskLabel}</span>
+      {/* Content */}
+      <div className="flex-1 min-w-0 pb-3">
+        <div className="flex items-center gap-2">
+          <span className={cn(
+            "text-xs truncate flex-1",
+            isCurrent ? "text-slate-800 dark:text-slate-100 font-medium" : "text-slate-500 dark:text-slate-400",
+          )}>
+            {step.title}
+          </span>
+          {step.duration_ms && (
+            <span className="text-[10px] text-slate-400 shrink-0 tabular-nums">{formatDuration(step.duration_ms)}</span>
+          )}
+          {step.has_artifact && (
+            <Paperclip className="w-2.5 h-2.5 text-indigo-400 shrink-0" />
+          )}
         </div>
-      )}
-
-      {/* Consequence — what happens if you don't act */}
-      {approval.expires_at && (
-        <p className="text-[11px] text-slate-400 dark:text-slate-500 mb-5">
-          不操作将在 {timeAgo(approval.expires_at)} 过期
-        </p>
-      )}
-
-      {/* Actions */}
-      <div className="flex gap-3">
-        <button
-          onClick={onReject}
-          disabled={submitting}
-          className="px-5 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50"
-        >
-          拒绝
-        </button>
-        <button
-          onClick={onApprove}
-          disabled={submitting}
-          className="px-5 py-2 rounded-lg text-sm font-medium bg-amber-500 hover:bg-amber-600 text-white transition-colors disabled:opacity-50 flex items-center gap-1.5"
-        >
-          {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-          批准
-        </button>
       </div>
     </motion.div>
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HERO B: Live — 有 running task 时显示（沉浸式执行视图）
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Live Hero (Mission Control style) ────────────────────────────────────────
 
 function LiveHero({ session, stepViews, narrativePhase, isActive, controlStatus, onPauseResume, onCancel, isActioning }: {
   session: SessionItem;
@@ -152,8 +182,6 @@ function LiveHero({ session, stepViews, narrativePhase, isActive, controlStatus,
   const progress = session.total_nodes > 0
     ? Math.round((session.completed_nodes / session.total_nodes) * 100) : 0;
   const isPaused = controlStatus === "paused";
-
-  // 找到当前正在执行的步骤
   const currentStep = stepViews.find(s => s.status === "running");
   const headline = currentStep?.title || narrativePhase?.description || session.goal || "执行中…";
 
@@ -161,132 +189,73 @@ function LiveHero({ session, stepViews, narrativePhase, isActive, controlStatus,
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      className="flex flex-col flex-1 px-5 pt-4 pb-2"
+      className="flex flex-col flex-1 min-h-0"
     >
-      {/* ── Current Focus: 当前焦点，大字 ── */}
-      <div className="mb-4">
-        <div className="flex items-center gap-2 mb-2">
-          {isPaused
-            ? <div className="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0" />
-            : <div className="relative w-2.5 h-2.5 shrink-0">
-                <span className="absolute inset-0 rounded-full bg-indigo-400 animate-ping opacity-75" />
-                <span className="relative block w-2.5 h-2.5 rounded-full bg-indigo-500" />
-              </div>
-          }
-          <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+      {/* Pulse wave header */}
+      <div className="px-4 pt-3">
+        <PulseWave isPaused={isPaused} />
+      </div>
+
+      {/* Current focus */}
+      <div className="px-4 pt-3 pb-2">
+        <div className="flex items-center gap-2 mb-1.5">
+          <div className={cn(
+            "w-2 h-2 rounded-full shrink-0",
+            isPaused ? "bg-amber-400" : "bg-indigo-500"
+          )}>
+            {!isPaused && (
+              <span className="block w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
+            )}
+          </div>
+          <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">
             {isPaused ? "已暂停" : `步骤 ${session.completed_nodes + 1}/${session.total_nodes}`}
           </span>
-          <span className="text-[11px] text-slate-400 ml-auto">{timeAgo(session.started_at)}</span>
+          <span className="text-[10px] text-slate-400 ml-auto tabular-nums">{progress}%</span>
         </div>
 
-        <p className="text-lg font-semibold text-slate-800 dark:text-slate-100 leading-snug line-clamp-2">
+        <p className="text-base font-semibold text-slate-800 dark:text-slate-100 leading-snug line-clamp-2 mb-2">
           {headline}
         </p>
 
-        {/* Narrative description (如果和 headline 不同) */}
-        {narrativePhase?.description && narrativePhase.description !== headline && (
-          <p className="text-sm text-indigo-600 dark:text-indigo-400 mt-1 truncate">
-            {narrativePhase.description}
-          </p>
-        )}
-      </div>
-
-      {/* ── Progress bar ── */}
-      <div className="mb-4">
-        <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5">
+        {/* Progress bar */}
+        <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1">
           <motion.div
-            className={cn("h-1.5 rounded-full", isPaused ? "bg-amber-400" : "bg-indigo-500")}
+            className={cn("h-1 rounded-full", isPaused ? "bg-amber-400" : "bg-indigo-500")}
             initial={{ width: 0 }}
             animate={{ width: `${progress}%` }}
-            transition={{ duration: 0.5, ease: "easeOut" }}
+            transition={{ duration: 0.6, ease: "easeOut" }}
           />
-        </div>
-        <div className="flex justify-between mt-1">
-          <span className="text-[11px] text-slate-400">{progress}%</span>
-          {session.completed_nodes > 0 && (
-            <span className="text-[11px] text-slate-400">
-              {session.completed_nodes} 步完成
-            </span>
-          )}
         </div>
       </div>
 
-      {/* ── Step Timeline: 过程证据 ── */}
+      {/* Step timeline */}
       {stepViews.length > 0 && (
-        <div className="flex-1 min-h-0 overflow-y-auto mb-3">
-          <div className="space-y-0.5">
-            {stepViews.map((step, i) => {
-              const isCurrent = step.status === "running";
-              const isDone = step.status === "completed";
-              const isFailed = step.status === "failed";
-
-              return (
-                <motion.div
-                  key={step.step_id}
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.03 }}
-                  className={cn(
-                    "flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors",
-                    isCurrent && "bg-indigo-50 dark:bg-indigo-950/30",
-                  )}
-                >
-                  {/* Status indicator */}
-                  {isCurrent ? (
-                    <Loader2 className="w-3.5 h-3.5 text-indigo-500 animate-spin shrink-0" />
-                  ) : isDone ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                  ) : isFailed ? (
-                    <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                  ) : (
-                    <div className="w-3.5 h-3.5 rounded-full border-2 border-slate-200 dark:border-slate-700 shrink-0" />
-                  )}
-
-                  {/* Title */}
-                  <span className={cn(
-                    "flex-1 truncate",
-                    isCurrent ? "text-slate-800 dark:text-slate-100 font-medium" : "text-slate-500 dark:text-slate-400",
-                  )}>
-                    {step.title}
-                  </span>
-
-                  {/* Duration */}
-                  {step.duration_ms && (
-                    <span className="text-[10px] text-slate-400 shrink-0">{formatDuration(step.duration_ms)}</span>
-                  )}
-
-                  {/* Artifact badge */}
-                  {step.has_artifact && (
-                    <Paperclip className="w-3 h-3 text-indigo-400 shrink-0" />
-                  )}
-                </motion.div>
-              );
-            })}
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-2 pb-1">
+          <div className="relative">
+            {/* Vertical line */}
+            <div className="absolute left-[4.5px] top-2 bottom-2 w-px bg-slate-200 dark:bg-slate-800" />
+            {stepViews.map((step, i) => (
+              <TimelineNode key={step.step_id} step={step} index={i} />
+            ))}
           </div>
         </div>
       )}
 
-      {/* ── Controls ── */}
+      {/* Controls */}
       {isActive && onPauseResume && onCancel && (
-        <div className="flex gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-          <button
-            onClick={onPauseResume}
-            disabled={isActioning}
+        <div className="shrink-0 flex gap-2 px-4 py-2 border-t border-slate-100 dark:border-slate-800">
+          <button onClick={onPauseResume} disabled={isActioning}
             className={cn(
-              "flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium transition-colors disabled:opacity-50",
+              "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50",
               isPaused
                 ? "bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-500/10 dark:text-indigo-400"
                 : "bg-amber-50 text-amber-600 hover:bg-amber-100 dark:bg-amber-500/10 dark:text-amber-400"
-            )}
-          >
+            )}>
             {isPaused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
-            {isPaused ? "恢复执行" : "暂停"}
+            {isPaused ? "恢复" : "暂停"}
           </button>
-          <button
-            onClick={onCancel}
-            disabled={isActioning}
-            className="px-4 py-2 rounded-lg text-xs font-medium bg-red-50 text-red-500 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 transition-colors disabled:opacity-50"
-          >
+          <button onClick={onCancel} disabled={isActioning}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-500 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 transition-colors disabled:opacity-50">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -295,66 +264,59 @@ function LiveHero({ session, stepViews, narrativePhase, isActive, controlStatus,
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HERO C: Calm — 空闲时显示
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Calm Hero (Mission Control idle) ─────────────────────────────────────────
 
-function CalmHero({ todayCompleted, todayFailed, nextSchedule, lastFailedGoal }: {
+function CalmHero({ todayCompleted, todayFailed, nextSchedule, pendingCount, runningCount, lastFailedGoal }: {
   todayCompleted: number;
   todayFailed: number;
   nextSchedule: string;
+  pendingCount: number;
+  runningCount: number;
   lastFailedGoal: string | null;
 }) {
-  const successRate = todayCompleted + todayFailed > 0
-    ? Math.round((todayCompleted / (todayCompleted + todayFailed)) * 100) : 100;
+  const total = todayCompleted + todayFailed;
+  const successRate = total > 0 ? Math.round((todayCompleted / total) * 100) : 100;
 
   return (
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      className="flex flex-col items-center justify-center flex-1 px-6"
+      className="flex flex-col items-center justify-center flex-1 px-5"
     >
-      {/* Calm icon */}
-      <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-950/40 dark:to-purple-950/40 flex items-center justify-center mb-4">
-        <Zap className="w-5 h-5 text-indigo-400" />
+      {/* Activity Rings */}
+      <div className="flex items-end gap-5 mb-5">
+        <ActivityRing
+          value={todayCompleted} max={Math.max(todayCompleted, 10)}
+          color="#10b981" label="完成" icon={CheckCircle2} size={72} strokeWidth={5}
+        />
+        <ActivityRing
+          value={runningCount} max={Math.max(runningCount, 3)}
+          color="#6366f1" label="活跃" icon={Zap} size={72} strokeWidth={5}
+        />
+        <ActivityRing
+          value={pendingCount} max={Math.max(pendingCount, 3)}
+          color="#f59e0b" label="待确认" icon={AlertTriangle} size={72} strokeWidth={5}
+        />
       </div>
 
-      {/* Stats */}
-      {todayCompleted > 0 ? (
-        <div className="text-center mb-3">
-          <p className="text-2xl font-bold text-slate-800 dark:text-slate-100">{todayCompleted}</p>
-          <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">今日完成任务</p>
-        </div>
+      {/* Summary line */}
+      {total > 0 ? (
+        <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+          今日 {total} 项任务 · 成功率 {successRate}%
+          {nextSchedule !== "--:--" && <span className="ml-2">· 下次调度 {nextSchedule}</span>}
+        </p>
       ) : (
-        <div className="text-center mb-3">
-          <p className="text-sm text-slate-500 dark:text-slate-400">系统待机中</p>
-        </div>
+        <p className="text-xs text-slate-400 dark:text-slate-500 mb-3">
+          系统待机中
+          {nextSchedule !== "--:--" && <span> · 下次调度 {nextSchedule}</span>}
+        </p>
       )}
 
-      {/* Secondary stats row */}
-      <div className="flex items-center gap-4 text-[11px] text-slate-400 dark:text-slate-500 mb-4">
-        {todayCompleted > 0 && (
-          <span className="flex items-center gap-1">
-            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-            成功率 {successRate}%
-          </span>
-        )}
-        {nextSchedule !== "--:--" && (
-          <span className="flex items-center gap-1">
-            <Clock className="w-3 h-3 text-purple-400" />
-            下次 {nextSchedule}
-          </span>
-        )}
-      </div>
-
-      {/* Last failure hint */}
+      {/* Last failure */}
       {lastFailedGoal && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50/50 dark:bg-red-950/20 border border-red-100 dark:border-red-900/30 max-w-xs">
-          <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
-          <div className="min-w-0">
-            <p className="text-[11px] text-red-500 dark:text-red-400 truncate">{lastFailedGoal}</p>
-            <p className="text-[10px] text-red-400/70">最近失败的任务</p>
-          </div>
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50/60 dark:bg-red-950/20 border border-red-100 dark:border-red-900/30 max-w-[280px]">
+          <XCircle className="w-3 h-3 text-red-400 shrink-0" />
+          <p className="text-[11px] text-red-500 dark:text-red-400 truncate flex-1">{lastFailedGoal}</p>
           <RotateCcw className="w-3 h-3 text-red-400 shrink-0 cursor-pointer hover:text-red-500" />
         </div>
       )}
@@ -362,39 +324,40 @@ function CalmHero({ todayCompleted, todayFailed, nextSchedule, lastFailedGoal }:
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Secondary Active Tasks — Running 区下方的次要活跃任务条目
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Activity Ticker (scrolling recent activity) ──────────────────────────────
 
-function SecondaryTaskRow({ session, label, statusColor, action, onClick }: {
-  session: SessionItem;
-  label: string;
-  statusColor: string;
-  action?: React.ReactNode;
-  onClick?: () => void;
-}) {
+function ActivityTicker({ sessions }: { sessions: SessionItem[] }) {
+  const tickerRef = useRef<HTMLDivElement>(null);
+
   return (
-    <div
-      onClick={onClick}
-      className={cn(
-        "flex items-center gap-2.5 px-3 py-2 rounded-lg transition-colors",
-        "hover:bg-slate-100/50 dark:hover:bg-slate-800/30",
-        onClick && "cursor-pointer"
-      )}
-    >
-      <div className={cn("w-2 h-2 rounded-full shrink-0", statusColor)} />
-      <p className="text-xs text-slate-600 dark:text-slate-300 truncate flex-1">
-        {session.goal || "任务"}
-      </p>
-      <span className="text-[10px] text-slate-400 shrink-0">{label}</span>
-      {action}
+    <div className="relative overflow-hidden">
+      <div ref={tickerRef} className="flex gap-4 px-4 py-2 overflow-x-auto scrollbar-hide">
+        {sessions.map(s => {
+          const failed = s.status === "failed" || s.result_status === "failed";
+          return (
+            <div key={s.id} className="flex items-center gap-1.5 shrink-0 text-[11px]">
+              {failed
+                ? <XCircle className="w-3 h-3 text-red-300" />
+                : <CheckCircle2 className="w-3 h-3 text-emerald-400/70" />
+              }
+              <span className="text-slate-500 dark:text-slate-400 max-w-[160px] truncate">
+                {s.goal || "任务"}
+              </span>
+              <span className="text-slate-300 dark:text-slate-600 tabular-nums">
+                {timeAgo(s.completed_at || s.started_at)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {/* Fade edges */}
+      <div className="absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-slate-50 dark:from-slate-950 to-transparent pointer-events-none" />
+      <div className="absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-slate-50 dark:from-slate-950 to-transparent pointer-events-none" />
     </div>
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Activity Feed Item — 底部历史条目（极度克制）
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── Feed Item ────────────────────────────────────────────────────────────────
 
 function FeedItem({ session, artifacts, onClick }: {
   session: SessionItem;
@@ -425,9 +388,37 @@ function FeedItem({ session, artifacts, onClick }: {
           <Paperclip className="w-2.5 h-2.5" />{sessionArtifacts.length}
         </span>
       )}
-      <span className="text-[10px] text-slate-300 dark:text-slate-600 shrink-0">
+      <span className="text-[10px] text-slate-300 dark:text-slate-600 shrink-0 tabular-nums">
         {timeAgo(session.completed_at || session.started_at)}
       </span>
+    </div>
+  );
+}
+
+// ── Secondary Task Row ───────────────────────────────────────────────────────
+
+function SecondaryTaskRow({ session, onClick }: {
+  session: SessionItem;
+  onClick?: () => void;
+}) {
+  const pct = Math.round((session.completed_nodes / Math.max(session.total_nodes, 1)) * 100);
+  return (
+    <div
+      onClick={onClick}
+      className={cn(
+        "flex items-center gap-2.5 px-3 py-1.5 rounded-lg transition-colors",
+        "hover:bg-slate-100/50 dark:hover:bg-slate-800/30",
+        onClick && "cursor-pointer"
+      )}
+    >
+      <div className="relative w-2 h-2 shrink-0">
+        <span className="absolute inset-0 rounded-full bg-indigo-400 animate-ping opacity-50" />
+        <span className="relative block w-2 h-2 rounded-full bg-indigo-500" />
+      </div>
+      <p className="text-xs text-slate-600 dark:text-slate-300 truncate flex-1">
+        {session.goal || "任务"}
+      </p>
+      <span className="text-[10px] text-slate-400 shrink-0 tabular-nums">{pct}%</span>
     </div>
   );
 }
@@ -446,6 +437,8 @@ export function OverviewTab() {
 
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
+  // 缓存已拉取过 artifacts 的 session IDs，避免每次轮询重复请求
+  const fetchedArtifactSessionsRef = useRef<Set<string>>(new Set());
   const [nextSchedule, setNextSchedule] = useState<string>("--:--");
   const [loading, setLoading] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
@@ -461,19 +454,26 @@ export function OverviewTab() {
 
       if (sessionList.status === "fulfilled") {
         setSessions(sessionList.value);
+        // 只拉取尚未缓存的已完成 session 的 artifacts
         const recentCompleted = sessionList.value.filter(s => s.status === "completed").slice(0, 5);
-        const artifactResults = await Promise.allSettled(recentCompleted.map(s => historyApi.getArtifacts(s.id)));
-        const allArtifacts: ArtifactRecord[] = [];
-        artifactResults.forEach((r, idx) => {
-          if (r.status === "fulfilled") {
-            r.value.artifacts.forEach(a => allArtifacts.push({
-              artifact_id: a.artifact_id, step_id: a.step_id, filename: a.filename,
-              size: a.size, mime_type: a.mime_type, artifact_type: a.artifact_type,
-              created_at: a.created_at, session_id: recentCompleted[idx].id,
-            }));
+        const unfetched = recentCompleted.filter(s => !fetchedArtifactSessionsRef.current.has(s.id));
+        if (unfetched.length > 0) {
+          const artifactResults = await Promise.allSettled(unfetched.map(s => historyApi.getArtifacts(s.id)));
+          const newArtifacts: ArtifactRecord[] = [];
+          artifactResults.forEach((r, idx) => {
+            if (r.status === "fulfilled") {
+              fetchedArtifactSessionsRef.current.add(unfetched[idx].id);
+              r.value.artifacts.forEach(a => newArtifacts.push({
+                artifact_id: a.artifact_id, step_id: a.step_id, filename: a.filename,
+                size: a.size, mime_type: a.mime_type, artifact_type: a.artifact_type,
+                created_at: a.created_at, session_id: unfetched[idx].id,
+              }));
+            }
+          });
+          if (newArtifacts.length > 0) {
+            setArtifacts(prev => [...prev, ...newArtifacts]);
           }
-        });
-        setArtifacts(allArtifacts);
+        }
       }
 
       if (scheduleList.status === "fulfilled") {
@@ -525,12 +525,10 @@ export function OverviewTab() {
     return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVis); };
   }, [fetchData, runningCount]);
 
-  // ── Hero mode: strict priority ──
-  const heroMode: HeroMode = pendingApprovals.length > 0 ? "attention"
-    : runningCount > 0 ? "live"
-    : "calm";
+  // ── Hero mode — approval no longer hijacks the entire view ──
+  type HeroMode = "live" | "calm";
+  const heroMode: HeroMode = runningCount > 0 ? "live" : "calm";
 
-  // For live hero: pick the primary running session (activeTask match or first)
   const primaryRunning = running.find(s => s.id === activeTask?.id) ?? running[0] ?? null;
   const secondaryRunning = running.filter(s => s !== primaryRunning);
 
@@ -577,7 +575,7 @@ export function OverviewTab() {
   // ── Render ──
   return (
     <div className="flex flex-col h-full bg-slate-50 dark:bg-slate-950 overflow-hidden">
-      {/* ── Status Bar: 极简一行 ── */}
+      {/* ── Status Bar ── */}
       <div className="shrink-0 px-4 py-2 bg-white dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800">
         <div className="flex items-center gap-2.5 text-[11px] text-slate-400 dark:text-slate-500">
           <span className="relative flex h-2 w-2">
@@ -586,37 +584,63 @@ export function OverviewTab() {
             )}
             <span className={cn("relative inline-flex rounded-full h-2 w-2", isConnected ? "bg-emerald-500" : "bg-slate-400")} />
           </span>
-          {runningCount > 0 && <span>{runningCount} active</span>}
+          {runningCount > 0 && <span className="tabular-nums">{runningCount} active</span>}
           {pendingApprovals.length > 0 && (
-            <span className="text-amber-500 font-medium">{pendingApprovals.length} waiting</span>
+            <span className="text-amber-500 font-medium tabular-nums">{pendingApprovals.length} waiting</span>
           )}
           {runningCount === 0 && pendingApprovals.length === 0 && (
             <span>{loading ? "…" : "Ready"}</span>
           )}
+          <span className="ml-auto text-[10px] text-slate-300 dark:text-slate-700 tabular-nums">
+            {new Date().toLocaleDateString("zh-CN", { month: "short", day: "numeric", weekday: "short" })}
+          </span>
         </div>
       </div>
 
-      {/* ── Hero Zone: 视觉主体 ── */}
+      {/* ── Hero Zone ── */}
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+        {/* Approval banner — compact, doesn't hijack the view */}
+        {pendingApprovals.length > 0 && pendingApprovals[0] && (
+          <div className="shrink-0 mx-3 mt-2 mb-1 px-3 py-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/40">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="relative">
+                <motion.div
+                  className="absolute -inset-1 rounded-full bg-amber-400/20"
+                  animate={{ scale: [1, 1.3, 1], opacity: [0.4, 0, 0.4] }}
+                  transition={{ duration: 2, repeat: Infinity }}
+                />
+                <Shield className="relative w-4 h-4 text-amber-600 dark:text-amber-400" />
+              </div>
+              <p className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate flex-1">
+                {pendingApprovals[0].message}
+              </p>
+              {pendingApprovals.length > 1 && (
+                <span className="text-[10px] text-amber-500 font-medium shrink-0">+{pendingApprovals.length - 1}</span>
+              )}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={handleReject} disabled={approvalSubmitting}
+                className="px-3 py-1 rounded-md text-[11px] font-medium border border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50">
+                拒绝
+              </button>
+              <button onClick={handleApprove} disabled={approvalSubmitting}
+                className="px-3 py-1 rounded-md text-[11px] font-medium bg-amber-500 hover:bg-amber-600 text-white transition-colors disabled:opacity-50 flex items-center gap-1">
+                {approvalSubmitting && <Loader2 className="w-3 h-3 animate-spin" />}
+                批准
+              </button>
+            </div>
+          </div>
+        )}
+
         <AnimatePresence mode="wait">
           <motion.div
             key={heroMode}
-            initial={{ opacity: 0, y: 8 }}
+            initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.25 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.2 }}
             className="flex flex-col flex-1 min-h-0"
           >
-            {/* Hero content based on mode */}
-            {heroMode === "attention" && pendingApprovals[0] && (
-              <AttentionHero
-                approval={pendingApprovals[0]}
-                onApprove={handleApprove}
-                onReject={handleReject}
-                submitting={approvalSubmitting}
-              />
-            )}
-
             {heroMode === "live" && primaryRunning && (
               <LiveHero
                 session={primaryRunning}
@@ -629,65 +653,50 @@ export function OverviewTab() {
                 isActioning={isActioning}
               />
             )}
-
             {heroMode === "calm" && (
               <CalmHero
                 todayCompleted={todayCompleted}
                 todayFailed={todayFailed}
                 nextSchedule={nextSchedule}
+                pendingCount={pendingApprovals.length}
+                runningCount={runningCount}
                 lastFailedGoal={lastFailed?.goal ?? null}
               />
             )}
           </motion.div>
         </AnimatePresence>
 
-        {/* ── Secondary active tasks (below hero, above feed) ── */}
-        {(secondaryRunning.length > 0 || (heroMode === "attention" && running.length > 0)) && (
-          <div className="shrink-0 px-3 py-1.5 border-t border-slate-100 dark:border-slate-800">
-            {heroMode === "attention" && running.map(s => (
-              <SecondaryTaskRow
-                key={s.id}
-                session={s}
-                label={`${Math.round((s.completed_nodes / Math.max(s.total_nodes, 1)) * 100)}%`}
-                statusColor="bg-indigo-500"
-                onClick={() => setActiveTab("logs")}
-              />
-            ))}
-            {heroMode === "live" && secondaryRunning.map(s => (
-              <SecondaryTaskRow
-                key={s.id}
-                session={s}
-                label={`${Math.round((s.completed_nodes / Math.max(s.total_nodes, 1)) * 100)}%`}
-                statusColor="bg-indigo-400"
-                onClick={() => setActiveTab("logs")}
-              />
+        {/* ── Secondary running tasks ── */}
+        {secondaryRunning.length > 0 && (
+          <div className="shrink-0 px-2 py-1 border-t border-slate-100 dark:border-slate-800">
+            {secondaryRunning.map(s => (
+              <SecondaryTaskRow key={s.id} session={s} onClick={() => setActiveTab("logs")} />
             ))}
           </div>
         )}
 
-        {/* ── Feed: 最近完成（极度克制）── */}
+        {/* ── Activity Feed ── */}
         {completed.length > 0 && (
-          <div className="shrink-0 max-h-[35%] overflow-y-auto border-t border-slate-100 dark:border-slate-800">
-            <div className="flex items-center gap-2 px-4 pt-2.5 pb-1">
-              <span className="text-[10px] text-slate-300 dark:text-slate-600 uppercase tracking-wider font-medium">最近</span>
-            </div>
-            <div className="px-1 pb-2">
-              {completed.slice(0, 8).map(s => (
-                <FeedItem
-                  key={s.id}
-                  session={s}
-                  artifacts={artifacts}
-                  onClick={() => setActiveTab("history")}
-                />
-              ))}
-              {completed.length > 8 && (
-                <button
-                  onClick={() => setActiveTab("history")}
-                  className="flex items-center gap-1 px-3 py-1.5 text-[11px] text-indigo-500 hover:text-indigo-600 transition-colors"
-                >
-                  查看全部 <ArrowRight className="w-3 h-3" />
-                </button>
-              )}
+          <div className="shrink-0 max-h-[35%] overflow-hidden border-t border-slate-100 dark:border-slate-800">
+            {/* Ticker for quick glance */}
+            {completed.length > 3 && (
+              <ActivityTicker sessions={completed.slice(0, 10)} />
+            )}
+            {/* Detailed feed */}
+            <div className="overflow-y-auto max-h-[calc(100%-32px)]">
+              <div className="px-1 pb-2">
+                {completed.slice(0, 6).map(s => (
+                  <FeedItem key={s.id} session={s} artifacts={artifacts} onClick={() => setActiveTab("history")} />
+                ))}
+                {completed.length > 6 && (
+                  <button
+                    onClick={() => setActiveTab("history")}
+                    className="flex items-center gap-1 px-3 py-1.5 text-[11px] text-indigo-500 hover:text-indigo-600 transition-colors"
+                  >
+                    查看全部 <ArrowRight className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         )}

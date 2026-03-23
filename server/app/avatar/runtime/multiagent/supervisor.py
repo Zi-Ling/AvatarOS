@@ -61,12 +61,12 @@ class ComplexityEvaluator:
         "- Task requires independent verification of results\n"
         "- Task is complex enough that decomposition improves quality\n\n"
         "Respond in JSON format ONLY:\n"
-        '{"mode": "single_agent" or "multi_agent", '
+        '{{"mode": "single_agent" or "multi_agent", '
         '"estimated_subtask_count": <int>, '
         '"needs_verification": <bool>, '
         '"involves_multi_domain": <bool>, '
         '"reasoning": "<brief explanation>", '
-        '"confidence": <float 0-1>}\n\n'
+        '"confidence": <float 0-1>}}\n\n'
         "User intent: {intent}"
     )
 
@@ -102,7 +102,10 @@ class ComplexityEvaluator:
             try:
                 return self._evaluate_with_llm(intent)
             except Exception as e:
-                logger.warning(f"[ComplexityEvaluator] LLM evaluation failed, falling back to rules: {e}")
+                logger.warning(
+                    "[ComplexityEvaluator] LLM evaluation failed, falling back to rules: "
+                    "type=%s, error=%r", type(e).__name__, e,
+                )
 
         # 规则模式（fallback）
         return self._evaluate_with_rules(intent, env_context)
@@ -110,26 +113,52 @@ class ComplexityEvaluator:
     def _evaluate_with_llm(self, intent: str) -> ComplexityAssessment:
         """使用 LLM 评估复杂度。"""
         import json as _json
+        import re as _re
 
         prompt = self._LLM_PROMPT.format(intent=intent[:500])
-        # 同步调用 LLM（ComplexityEvaluator 在同步上下文中使用）
-        response = self._llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=200,
+        # 使用 call() 简化接口：string in, string out
+        raw_content = self._llm_client.call(prompt)
+        logger.debug(
+            "[ComplexityEvaluator] raw LLM response (first 300 chars): %r",
+            raw_content[:300] if raw_content else "<empty>",
         )
-
-        # 解析 LLM 响应
-        content = response.get("content", "") if isinstance(response, dict) else str(response)
+        content = raw_content
         # 提取 JSON（可能被 markdown 包裹）
         if "```" in content:
-            content = content.split("```")[1]
+            parts = content.split("```")
+            if len(parts) >= 3:
+                content = parts[1]
+            else:
+                content = parts[1]
             if content.startswith("json"):
                 content = content[4:]
-        data = _json.loads(content.strip())
+        # 尝试提取 {...} 块（LLM 可能在 JSON 前后加了多余文本）
+        stripped = content.strip()
+        if not stripped.startswith("{"):
+            match = _re.search(r'\{.*\}', stripped, _re.DOTALL)
+            if match:
+                stripped = match.group(0)
+        logger.debug(
+            "[ComplexityEvaluator] cleaned JSON (first 300 chars): %r",
+            stripped[:300] if stripped else "<empty>",
+        )
+        data = _json.loads(stripped)
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Expected JSON object, got {type(data).__name__}: {str(data)[:200]}"
+            )
+
+        mode = data.get("mode", "single_agent")
+        # 防御：确保 mode 是合法值
+        if mode not in ("single_agent", "multi_agent"):
+            logger.warning(
+                "[ComplexityEvaluator] unexpected mode value: %r, defaulting to single_agent",
+                mode,
+            )
+            mode = "single_agent"
 
         return ComplexityAssessment(
-            mode=data.get("mode", "single_agent"),
+            mode=mode,
             estimated_subtask_count=data.get("estimated_subtask_count", 1),
             needs_independent_verification=data.get("needs_verification", False),
             involves_multi_domain=data.get("involves_multi_domain", False),

@@ -136,3 +136,56 @@ class PathSanitizerMixin:
             logger.debug("[GraphExecutor] Sanitized host paths in python.run code")
             return {**params, "code": new_code}
         return params
+
+    @staticmethod
+    def _replace_workspace_template_vars(params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Replace LLM-generated template variables like {{workspace_path}}
+        with the actual container mount path /workspace.
+
+        LLMs sometimes emit {{workspace_path}} as a placeholder instead of
+        using the literal /workspace path. This safety net catches those cases.
+        """
+        code = params.get("code", "")
+        if not code or "{{" not in code:
+            return params
+
+        from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH
+
+        import re as _re
+        # Match {{workspace_path}}, {{ workspace_path }}, etc.
+        new_code = _re.sub(
+            r'\{\{\s*workspace_path\s*\}\}',
+            CONTAINER_WORKSPACE_PATH,
+            code,
+        )
+        if new_code != code:
+            logger.debug("[GraphExecutor] Replaced {{workspace_path}} template variable with %s", CONTAINER_WORKSPACE_PATH)
+            return {**params, "code": new_code}
+        return params
+
+    @staticmethod
+    def _replace_template_vars_in_params(params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Replace {{workspace_path}} template variables in ALL string params
+        (not just code). Handles paths in fs.write, fs.read, etc.
+        """
+        from app.avatar.runtime.workspace.session_workspace import CONTAINER_WORKSPACE_PATH
+        import re as _re
+
+        _pattern = _re.compile(r'\{\{\s*workspace_path\s*\}\}')
+        changed = False
+        new_params = {}
+        for k, v in params.items():
+            if isinstance(v, str) and "{{" in v:
+                replaced = _pattern.sub(CONTAINER_WORKSPACE_PATH, v)
+                if replaced != v:
+                    changed = True
+                    new_params[k] = replaced
+                    continue
+            new_params[k] = v
+
+        if changed:
+            logger.debug("[GraphExecutor] Replaced {{workspace_path}} in skill params")
+            return new_params
+        return params

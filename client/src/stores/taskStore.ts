@@ -14,6 +14,11 @@ interface TaskStore {
   pendingApprovals: ApprovalRequest[];
   autoSwitchedForTask: string | null;
 
+  /** 多任务注册表：task_id → TaskState */
+  tasks: Record<string, TaskState>;
+  /** 每个任务的最后已处理 sequence（用于去重） */
+  lastSequences: Record<string, number>;
+
   // Actions
   setActiveTask: (task: TaskState | null) => void;
   updateTaskStatus: (status: TaskState['status']) => void;
@@ -29,6 +34,12 @@ interface TaskStore {
   removePendingApproval: (requestId: string) => void;
   setAutoSwitchedForTask: (taskId: string | null) => void;
 
+  // Multi-task Registry actions
+  upsertTask: (task: TaskState) => void;
+  removeTask: (taskId: string) => void;
+  getActiveTasks: () => TaskState[];
+  updateLastSequence: (taskId: string, sequence: number) => void;
+
   // Backward compat shims
   /** @deprecated 用 controlStatus === 'paused' 替代 */
   isPaused: boolean;
@@ -43,11 +54,20 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   controlStatus: 'running',
   pendingApprovals: [],
   autoSwitchedForTask: null,
+  tasks: {},
+  lastSequences: {},
 
   // Derived shim
   get isPaused() { return get().controlStatus === 'paused'; },
 
-  setActiveTask: (task) => set({ activeTask: task }),
+  setActiveTask: (task) => set((state) => {
+    const newState: Partial<TaskStore> = { activeTask: task };
+    // 同步到 tasks registry
+    if (task) {
+      newState.tasks = { ...state.tasks, [task.id]: task };
+    }
+    return newState;
+  }),
 
   updateTaskStatus: (status) =>
     set((state) => ({
@@ -116,4 +136,35 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     })),
 
   setAutoSwitchedForTask: (taskId) => set({ autoSwitchedForTask: taskId }),
+
+  // Multi-task Registry actions
+  upsertTask: (task) =>
+    set((state) => ({
+      tasks: { ...state.tasks, [task.id]: task },
+      // 如果是当前 activeTask，同步更新
+      activeTask: state.activeTask?.id === task.id ? task : state.activeTask,
+    })),
+
+  removeTask: (taskId) =>
+    set((state) => {
+      const { [taskId]: _, ...rest } = state.tasks;
+      const { [taskId]: __, ...seqRest } = state.lastSequences;
+      return {
+        tasks: rest,
+        lastSequences: seqRest,
+        activeTask: state.activeTask?.id === taskId ? null : state.activeTask,
+      };
+    }),
+
+  getActiveTasks: () => {
+    const { tasks } = get();
+    return Object.values(tasks).filter(
+      (t) => t.status === 'executing' || t.status === 'pending'
+    );
+  },
+
+  updateLastSequence: (taskId, sequence) =>
+    set((state) => ({
+      lastSequences: { ...state.lastSequences, [taskId]: sequence },
+    })),
 }));

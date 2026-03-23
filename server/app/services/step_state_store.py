@@ -155,3 +155,33 @@ class StepStateStore:
                 obj.updated_at = now
                 db.add(obj)
                 db.commit()
+
+    # ------------------------------------------------------------------
+    # 幂等查询（持久化状态机扩展）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_by_idempotency_key(task_session_id: str, key: str) -> Optional[StepState]:
+        """
+        按幂等键查询 StepState。
+
+        利用 (task_session_id, idempotency_key) 唯一约束保证结果唯一。
+        """
+        with Session(engine) as db:
+            return db.exec(
+                select(StepState).where(
+                    StepState.task_session_id == task_session_id,
+                    StepState.idempotency_key == key,
+                )
+            ).first()
+
+    @staticmethod
+    def generate_idempotency_key(task_id: str, node_id: str, input_params: str) -> str:
+        """
+        生成幂等键：task_id:node_id:SHA256(input_params)
+
+        确定性：相同输入产生相同 key。
+        """
+        import hashlib
+        input_hash = hashlib.sha256(input_params.encode("utf-8")).hexdigest()
+        return f"{task_id}:{node_id}:{input_hash}"

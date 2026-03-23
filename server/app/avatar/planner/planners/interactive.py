@@ -341,7 +341,8 @@ Please try a DIFFERENT approach:
 - Workspace: /workspace
 
 > CRITICAL: Always use the exact paths above when the user refers to system directories (e.g. "桌面"→Desktop, "下载"→Downloads). Never guess Linux paths on Windows or vice versa.
-> CRITICAL: In `python.run` code, the workspace is mounted at `/workspace`. Always use `/workspace/...` paths in python.run code, NEVER use Windows host paths like `D:\\...` or `C:\\...`.
+> CRITICAL: In `python.run` code, the workspace is mounted at `/workspace`. Always use the literal string `/workspace/...` in python.run code. NEVER use Windows host paths like `D:\\...` or `C:\\...`.
+> CRITICAL: Do NOT use template variables like `{{{{workspace_path}}}}` in code. The workspace path is always the literal string `/workspace`. Write it directly as `/workspace`.
 
 """
 

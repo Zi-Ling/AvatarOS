@@ -204,37 +204,57 @@ class TaskControlManager:
         """
         取消任务。幂等。
         返回 (accepted, previous_status, current_status)
+        同时更新 DB 中的 TaskSession 状态。
         """
         handle = self._handles.get(task_id)
         if handle is None:
             return False, "unknown", "unknown"
         prev = handle.status.value
         accepted = handle.request_cancel()
+        if accepted:
+            self._persist_transition(task_id, "cancelled", f"cancel_from_{prev}")
         return accepted, prev, handle.status.value
 
     def pause_task(self, task_id: str) -> tuple[bool, str, str]:
         """
         暂停任务。幂等。
         返回 (accepted, previous_status, current_status)
+        同时更新 DB 中的 TaskSession 状态。
         """
         handle = self._handles.get(task_id)
         if handle is None:
             return False, "unknown", "unknown"
         prev = handle.status.value
         accepted = handle.request_pause()
+        if accepted:
+            self._persist_transition(task_id, "paused", f"pause_from_{prev}")
         return accepted, prev, handle.status.value
 
     def resume_task(self, task_id: str) -> tuple[bool, str, str]:
         """
         恢复任务。幂等。
         返回 (accepted, previous_status, current_status)
+        同时更新 DB 中的 TaskSession 状态。
         """
         handle = self._handles.get(task_id)
         if handle is None:
             return False, "unknown", "unknown"
         prev = handle.status.value
         accepted = handle.request_resume()
+        if accepted:
+            self._persist_transition(task_id, "executing", f"resume_from_{prev}")
         return accepted, prev, handle.status.value
+
+    def _persist_transition(self, task_id: str, new_status: str, reason: str) -> None:
+        """将控制操作持久化到 DB（非阻塞，失败不影响内存操作）。"""
+        try:
+            from app.services.task_session_store import TaskSessionStore
+            TaskSessionStore.transition(
+                task_id, new_status,
+                last_transition_reason=reason,
+            )
+        except Exception as e:
+            logger.warning(f"[TaskControl] DB persist failed for {task_id} → {new_status}: {e}")
 
     # ── 兼容旧接口（供未迁移的调用方使用）────────────────────────────────
 

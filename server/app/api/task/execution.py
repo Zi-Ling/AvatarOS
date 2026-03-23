@@ -2,11 +2,14 @@
 """
 Task 执行记录 API（Task/Run/Step）
 """
+import logging
 from fastapi import APIRouter, HTTPException, Depends
 from sqlmodel import Session
 
 from app.db import get_db, TaskStore, RunStore, StepStore
 from app.api.task.models import TaskListResponse, TaskDetailResponse, TaskListItemResponse, RunResponse, StepResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -199,6 +202,13 @@ async def resume_task(task_id: str):
                 "current_status": curr_status,
             },
         })
+        # 通过 RecoveryEngine 从 Checkpoint 恢复执行
+        try:
+            from app.services.recovery_engine import RecoveryEngine
+            engine = RecoveryEngine()
+            await engine.resume_from_pause(task_id)
+        except Exception as e:
+            logger.warning(f"[resume_task] RecoveryEngine resume failed (non-fatal): {e}")
     return {
         "task_id": task_id,
         "accepted": accepted,

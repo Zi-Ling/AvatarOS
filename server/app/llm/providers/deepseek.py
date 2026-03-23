@@ -64,6 +64,13 @@ class DeepSeekClient(BaseLLMClient):
                 resp.raise_for_status()
                 data = resp.json()
 
+            # Defensive: log response structure if "choices" is missing
+            if "choices" not in data or not data["choices"]:
+                logger.error(
+                    "[DeepSeek] Unexpected response structure (no choices): keys=%s, data_preview=%s",
+                    list(data.keys()), str(data)[:500],
+                )
+
             message = data["choices"][0]["message"]
             content = message.get("content") or ""
             tool_calls = self._parse_tool_calls_from_list(message.get("tool_calls"))
@@ -98,6 +105,11 @@ class DeepSeekClient(BaseLLMClient):
             raise
 
         except Exception as e:
+            import traceback as _tb
+            logger.error(
+                "[DeepSeek] Unexpected error in _chat_impl: type=%s, error=%r\n%s",
+                type(e).__name__, e, _tb.format_exc(),
+            )
             self._log_end(llm_log_id, success=False, error=str(e))
             raise
 

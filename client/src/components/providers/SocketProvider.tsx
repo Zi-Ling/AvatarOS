@@ -92,6 +92,24 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
           syncTaskStatus(taskId);
         });
       }
+
+      // 重连后拉取活跃任务和 pending approvals（Durable Task State Machine）
+      (async () => {
+        try {
+          const activeRes = await fetch(`${API_BASE}/api/durable/tasks/active`);
+          if (activeRes.ok) {
+            const activeTasks = await activeRes.json();
+            const { upsertTask } = (await import('@/stores/taskStore')).useTaskStore.getState();
+            for (const task of activeTasks) {
+              upsertTask(task);
+              activeTasksRef.current.add(task.id);
+            }
+            console.log(`[SocketProvider] Synced ${activeTasks.length} active durable tasks`);
+          }
+        } catch (e) {
+          console.warn('[SocketProvider] Failed to fetch active tasks on reconnect:', e);
+        }
+      })();
     }
 
     function onDisconnect(reason: string) {

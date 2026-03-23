@@ -25,6 +25,7 @@ interface ChatState {
   setCurrentTaskMessageId: (id: string | null) => void;
   setSessionId: (id: string) => void;
   setCanCancel: (canCancel: boolean) => void;
+  deleteMessage: (id: string) => void;
   clearChat: () => void;
   addAttachment: (attachment: Attachment) => void;
   removeAttachment: (id: string) => void;
@@ -56,7 +57,8 @@ export const useChatStore = create<ChatState>()(
           // GUARD: never overwrite a run_block message's kind/subtype —
           // the execution block must remain visible even after completion.
           if (msg.kind === "run" && msg.subtype === "block") {
-            const { kind: _k, subtype: _s, messageType: _mt, ...safeUpdates } = updates as any;
+            const { kind: _k, subtype: _s, messageType: _mt, ...safeUpdates } = updates as
+              Partial<Message> & { kind?: Message["kind"]; subtype?: Message["subtype"]; messageType?: Message["messageType"] };
             return { ...msg, ...safeUpdates };
           }
           return { ...msg, ...updates };
@@ -69,15 +71,24 @@ export const useChatStore = create<ChatState>()(
         attachments: [...state.attachments, attachment]
       })),
 
-      removeAttachment: (id) => set((state) => ({
-        attachments: state.attachments.filter(a => a.id !== id)
-      })),
+      removeAttachment: (id) => set((state) => {
+        const removed = state.attachments.find(a => a.id === id);
+        // Revoke blob URL to prevent memory leak
+        if (removed?.url?.startsWith("blob:")) {
+          URL.revokeObjectURL(removed.url);
+        }
+        return { attachments: state.attachments.filter(a => a.id !== id) };
+      }),
 
       setCurrentTaskMessageId: (id) => set({ currentTaskMessageId: id }),
       
       setSessionId: (id) => set({ sessionId: id }),
       
       setCanCancel: (canCancel) => set({ canCancel }),
+
+      deleteMessage: (id) => set((state) => ({
+        messages: state.messages.filter((m) => m.id !== id),
+      })),
       
       clearChat: () => set({ 
         messages: [], 

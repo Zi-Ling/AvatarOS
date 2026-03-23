@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from sqlmodel import SQLModel, Field
+from sqlalchemy import UniqueConstraint
 from datetime import datetime, timezone
 from typing import Optional
 import uuid
@@ -43,6 +44,20 @@ class TaskSession(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = Field(default=None)
+
+    # Lease 字段（持久化状态机扩展）
+    worker_id: Optional[str] = Field(default=None, description="持有 Lease 的 worker 标识")
+    lease_expiry: Optional[datetime] = Field(default=None, description="Lease 过期时间")
+    last_heartbeat_at: Optional[datetime] = Field(default=None, description="最后心跳时间")
+    heartbeat_interval_s: int = Field(default=30, description="心跳间隔秒数")
+    lease_timeout_s: int = Field(default=90, description="Lease 过期阈值秒数")
+
+    # 转换元数据
+    last_transition_reason: Optional[str] = Field(default=None, description="最后一次转换原因")
+    recovery_chain_json: Optional[str] = Field(default=None, description="恢复链路 JSON")
+
+    # Event Sequence 持久化
+    last_event_sequence: int = Field(default=0, description="该任务最后发出的事件 sequence 号")
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +114,9 @@ class StepState(SQLModel, table=True):
         stale / skipped / cancelled / waiting / retry_scheduled
     """
     __tablename__ = "step_states"
+    __table_args__ = (
+        UniqueConstraint("task_session_id", "idempotency_key", name="uq_step_state_idempotency"),
+    )
 
     id: str = Field(primary_key=True, description="step_node_id")
     task_session_id: str = Field(index=True)
@@ -116,6 +134,11 @@ class StepState(SQLModel, table=True):
     last_heartbeat_at: Optional[datetime] = Field(default=None)
     heartbeat_interval_s: int = Field(default=30)
     stale_threshold_s: int = Field(default=120)
+
+    # 幂等字段（持久化状态机扩展）
+    idempotency_key: Optional[str] = Field(default=None, description="task_id+node_id+input_hash")
+    attempt_id: Optional[str] = Field(default=None, description="执行尝试标识")
+    input_hash: Optional[str] = Field(default=None, description="输入参数 SHA-256")
 
     # 轻量查询字段
     started_at: Optional[datetime] = Field(default=None)
@@ -187,6 +210,12 @@ class Checkpoint(SQLModel, table=True):
     checksum: str = Field(description="Checkpoint 数据完整性校验值")
     graph_version: int = Field(description="对应的 graph 版本号")
 
+    # 持久化状态机扩展字段
+    execution_frontier_json: Optional[str] = Field(default=None, description="执行前沿快照")
+    idempotency_metadata_json: Optional[str] = Field(default=None, description="幂等键映射快照")
+    effect_ledger_snapshot_json: Optional[str] = Field(default=None, description="副作用账本快照")
+    pending_requests_json: Optional[str] = Field(default=None, description="待处理审批请求快照")
+
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_deleted: bool = Field(default=False, description="软删除标记，保留策略使用")
 
@@ -234,3 +263,25 @@ class TaskQueueEntry(SQLModel, table=True):
     enqueued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
+
+
+# ---------------------------------------------------------------------------
+# 10. EffectLedgerEntry — 副作用账本
+# ---------------------------------------------------------------------------
+class EffectLedgerEntry(SQLModel, table=True):
+    """副作用账本条目。"""
+    __tablename__ = "effect_ledger"
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    task_session_id: str = Field(index=True)
+    step_id: str = Field(index=True)
+    effect_type: str = Field(description="fs/network/exec/human/browser 等")
+    status: str = Field(default="prepared", index=True, description="prepared/committed/unknown/compensated")
+    external_request_id: Optional[str] = Field(default=None, description="外部请求 ID")
+    target_path: Optional[str] = Field(default=None, description="目标路径")
+    content_hash: Optional[str] = Field(default=None, description="文件 hash")
+    remote_receipt: Optional[str] = Field(default=None, description="远端回执")
+    metadata_json: Optional[str] = Field(default=None, description="额外元数据")
+    compensation_details: Optional[str] = Field(default=None, description="补偿操作详情")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -116,7 +116,9 @@ def retry_with_backoff(
                     
                     # 检查是否可重试
                     if not config.is_retryable(e):
-                        logger.warning(f"[Retry] Non-retryable error: {type(e).__name__}: {e}")
+                        logger.warning(
+                            f"[Retry] Non-retryable error: {type(e).__name__}: {e!r}"
+                        )
                         raise
                     
                     # 最后一次尝试失败，不再重试

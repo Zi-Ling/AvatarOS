@@ -2,6 +2,7 @@
 
 import { useRef, useCallback } from "react";
 import { sendChatMessage, parseSSELine } from "@/lib/api/chat";
+import { cancelTask as cancelTaskApi } from "@/lib/api/task";
 import { useChatStore, Message } from "@/stores/chatStore";
 import { useTaskStore } from "@/stores/taskStore";
 import { SessionManager } from "@/lib/session";
@@ -71,8 +72,13 @@ export function useChat() {
     const userInput = sendInput;
     const userAttachments = [...attachments];
 
+    // 使用 crypto.randomUUID 避免 Date.now() 毫秒级碰撞
+    const userMessageId = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: userMessageId,
       role: "user",
       content: userInput,
       timestamp: new Date().toISOString(),
@@ -82,12 +88,17 @@ export function useChat() {
     addMessage(userMessage);
     setInputValue("");
     useChatStore.getState().setAttachments([]);
-    useTaskStore.getState().resetTask();
+
+    // 只重置 UI 控制状态，不清除 activeTask — 避免破坏正在运行的任务的 UI
+    useTaskStore.getState().setControlStatus("running");
+    useTaskStore.getState().setAutoSwitchedForTask(null);
 
     setIsTyping(true);
     setCanCancel(true);
 
-    const aiMessageId = (Date.now() + 1).toString();
+    const aiMessageId = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     setCurrentTaskMessageId(aiMessageId);
 
     try {
@@ -208,8 +219,11 @@ export function useChat() {
       if (exists) {
         updateMessage(aiMessageId, { content: errorMessage, isStreaming: false });
       } else {
+        const fallbackId = typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         addMessage({
-          id: (Date.now() + 1).toString(),
+          id: fallbackId,
           role: "assistant",
           content: errorMessage,
           timestamp: new Date().toISOString(),
@@ -235,17 +249,15 @@ export function useChat() {
     // 2. 取消后台任务 — 统一走 REST API（单一控制通道），Socket 只负责广播状态变化
     if (activeTask && storedSessionId) {
       setIsCancelling(true);
-      import("@/lib/api/task").then(({ cancelTask }) => {
-        cancelTask(activeTask.id).catch((e) => {
-          console.error("cancel failed via REST:", e);
-          // Fallback: try socket if REST fails
-          if (socket) {
-            socket.emit("cancel_task", {
-              session_id: storedSessionId,
-              task_id: activeTask.id,
-            });
-          }
-        });
+      cancelTaskApi(activeTask.id).catch((e) => {
+        console.error("cancel failed via REST:", e);
+        // Fallback: try socket if REST fails
+        if (socket) {
+          socket.emit("cancel_task", {
+            session_id: storedSessionId,
+            task_id: activeTask.id,
+          });
+        }
       });
     }
 

@@ -24,11 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 class TaskEventStream:
-    """统一事件流，每个 TaskSession 独立实例。"""
+    """统一事件流，每个 TaskSession 独立实例。支持可选 DB 持久化。"""
 
-    def __init__(self, task_session_id: str):
+    def __init__(self, task_session_id: str, persist_to_db: bool = False):
         self._task_session_id = task_session_id
         self._events: list[dict] = []  # In-memory buffer
+        self._persist_to_db = persist_to_db
 
     def emit(self, event_type: str, payload: dict | None = None) -> None:
         """Emit an event to the stream."""
@@ -39,9 +40,33 @@ class TaskEventStream:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._events.append(event)
+
+        # 可选 DB 持久化（用于审计和事件回源）
+        if self._persist_to_db:
+            self._persist_event(event)
+
         logger.info(
             f"[TaskEventStream] {self._task_session_id}: {event_type}"
         )
+
+    def _persist_event(self, event: dict) -> None:
+        """将事件持久化到 AuditLog（审计用途）。"""
+        try:
+            from sqlmodel import Session
+            from app.db.database import engine
+            from app.db.system import AuditLog
+
+            log = AuditLog(
+                event_type=f"task_event.{event['event_type']}",
+                resource=self._task_session_id,
+                operation=event["event_type"],
+                details=event.get("payload"),
+            )
+            with Session(engine) as db:
+                db.add(log)
+                db.commit()
+        except Exception as e:
+            logger.debug(f"[TaskEventStream] DB persist failed (non-fatal): {e}")
 
     def get_events(
         self, event_type: str | None = None, limit: int = 100

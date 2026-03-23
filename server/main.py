@@ -42,6 +42,8 @@ from app.api.task_session import router as task_session_router
 from app.api.task_scheduler_api import router as task_scheduler_router
 from app.api.workflow import orchestration_router
 from app.api.health import router as health_router
+from app.api.task.durable_endpoints import router as task_durable_router
+from app.api.task.ops_endpoints import router as task_ops_router
 from app.core.config import config
 from app.io.manager import SocketManager
 
@@ -112,6 +114,10 @@ for router in [
     orchestration_router,
     # health & resilience
     health_router,
+    # durable task state machine API
+    task_durable_router,
+    # ops/admin API
+    task_ops_router,
 ]:
     fastapi_app.include_router(router)
 

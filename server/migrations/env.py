@@ -28,6 +28,11 @@ from app.db.logging.router import RouterRequest                       # noqa: F4
 from app.db.workflow import WorkflowTemplateDB, WorkflowRunDB, WorkflowStageRunDB  # noqa: F401
 from app.db.system import ApprovalRequest, Grant, KVState, AuditLog, ExecutionSession, PlannerInvocation  # noqa: F401
 from app.db.file_artifact import FileArtifact                         # noqa: F401
+from app.db.long_task_models import (                                  # noqa: F401
+    TaskSession, PlanGraphSnapshot, PatchLogEntry, StepState,
+    ArtifactVersionRecord, ArtifactDependency, Checkpoint,
+    ChangeRequestRecord, TaskQueueEntry, EffectLedgerEntry,
+)
 from app.db.artifact_record import ArtifactRecord                     # noqa: F401
 from app.db.artifact_registry_record import ArtifactRegistryRecord    # noqa: F401
 from app.avatar.runtime.graph.storage.step_trace_store import SessionTraceRecord, StepTraceRecord  # noqa: F401

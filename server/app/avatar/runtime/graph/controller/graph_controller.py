@@ -34,6 +34,8 @@ from app.avatar.runtime.graph.controller.fan_node_executor import FanNodeExecuto
 from app.avatar.runtime.graph.controller.event_emitter import EventEmitterMixin
 from app.avatar.runtime.graph.controller.verification_gate import VerificationGateMixin
 from app.avatar.runtime.graph.controller.long_task_helpers import LongTaskContext, LongTaskMixin
+from app.avatar.runtime.graph.controller.durable_state_mixin import DurableContext, DurableStateMixin
+from app.avatar.runtime.graph.controller.durable_interrupt import DurableInterruptSignal
 from app.avatar.runtime.graph.controller.react_setup import ReactSetupMixin
 from app.avatar.runtime.graph.controller.react_finish_handler import ReactFinishHandlerMixin
 from app.avatar.runtime.graph.controller.recovery_handler import RecoveryHandlerMixin
@@ -65,6 +67,7 @@ class GraphController(
     EventEmitterMixin,
     VerificationGateMixin,
     LongTaskMixin,
+    DurableStateMixin,
     ReactSetupMixin,
     ReactFinishHandlerMixin,
     RecoveryHandlerMixin,
@@ -242,6 +245,17 @@ class GraphController(
 
         # ── Long-task runtime context ───────────────────────────────────
         s.lt_ctx = LongTaskContext.from_env(s.env_context)
+
+        # ── Durable state machine context ───────────────────────────────
+        # 灰度路由：根据 DurableStateConfig 决定是否激活 durable_ctx
+        from app.config.durable_state_config import get_durable_config
+        _durable_cfg = get_durable_config()
+        if _durable_cfg.enabled:
+            s.durable_ctx = DurableContext.from_env(s.env_context)
+            if s.durable_ctx:
+                self._start_heartbeat(s.durable_ctx)
+        else:
+            s.durable_ctx = None
 
         # ── NarrativeManager ────────────────────────────────────────────
         s.narrative_manager = self._setup_narrative_manager(
@@ -501,6 +515,14 @@ class GraphController(
                 if s.lt_ctx is not None:
                     await self._lt_persist_step_results(s.graph, s.lt_ctx)
 
+                # ── Durable: after-step hook ────────────────────────────
+                if s.durable_ctx is not None:
+                    from app.avatar.runtime.graph.models.step_node import NodeStatus as _DurNS
+                    for _dn in s.graph.nodes.values():
+                        if _dn.id in s.pending_node_ids and _dn.status == _DurNS.SUCCESS:
+                            _output_digest = str(hash(str(getattr(_dn, 'result', ''))))
+                            await self._durable_after_step(str(_dn.id), _output_digest, s.durable_ctx)
+
                 await self._emit_step_narrative_events(s)
 
                 # Long-task: routine checkpoint
@@ -559,10 +581,21 @@ class GraphController(
             s.final_result = self._compute_final_result(s, intent)
             return s.final_result
 
+        except DurableInterruptSignal as _dis:
+            # Durable interrupt: 审批等待/暂停 — 安全退出执行循环
+            logger.info(f"[GraphController] DurableInterrupt: {_dis.reason}")
+            s.lifecycle_status = "interrupted"
+            s.result_status = _dis.reason
+            s.final_result = self._compute_final_result(s, intent)
+            return s.final_result
+
         finally:
             # Cancel background task understanding if still pending
             if not _task_understanding_resolved and not _task_understanding_task.done():
                 _task_understanding_task.cancel()
+            # Stop durable heartbeat if active
+            if s.durable_ctx is not None:
+                self._stop_heartbeat(s.durable_ctx)
             await self._finalize_react_session(s)
 
     # ── ReAct helper methods ────────────────────────────────────────────

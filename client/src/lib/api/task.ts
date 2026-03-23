@@ -155,3 +155,61 @@ export async function resumeTask(taskId: string): Promise<void> {
   }
 }
 
+
+// ============ v2 API 方法（Durable Task State Machine） ============
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+/**
+ * 获取所有活跃任务
+ */
+export async function getActiveTasks(): Promise<any[]> {
+  const response = await fetch(`${API_BASE}/api/durable/tasks/active`);
+  if (!response.ok) throw new Error(`获取活跃任务失败: ${response.status}`);
+  return await response.json();
+}
+
+/**
+ * 获取任务 Checkpoint 列表
+ */
+export async function getTaskCheckpoints(taskId: string): Promise<any[]> {
+  const response = await fetch(`${API_BASE}/api/durable/tasks/${taskId}/checkpoints`);
+  if (!response.ok) throw new Error(`获取 Checkpoint 失败: ${response.status}`);
+  return await response.json();
+}
+
+/**
+ * 获取任务 Effect Ledger
+ */
+export async function getTaskEffects(taskId: string): Promise<any[]> {
+  const response = await fetch(`${API_BASE}/api/durable/tasks/${taskId}/effects`);
+  if (!response.ok) throw new Error(`获取 Effect Ledger 失败: ${response.status}`);
+  return await response.json();
+}
+
+/**
+ * 手动触发任务恢复
+ */
+export async function recoverTask(taskId: string): Promise<any> {
+  const response = await fetch(`${API_BASE}/api/durable/tasks/${taskId}/recover`, { method: "POST" });
+  if (!response.ok) throw new Error(`恢复任务失败: ${response.status}`);
+  return await response.json();
+}
+
+/**
+ * 重新发起审批
+ */
+export async function reopenApproval(requestId: string): Promise<any> {
+  const response = await fetch(`${API_BASE}/api/durable/approvals/${requestId}/reopen`, { method: "POST" });
+  if (!response.ok) throw new Error(`重新发起审批失败: ${response.status}`);
+  return await response.json();
+}
+
+/**
+ * 补齐缺失事件
+ */
+export async function getTaskEvents(taskId: string, afterSequence: number = 0): Promise<any> {
+  const response = await fetch(`${API_BASE}/api/durable/tasks/${taskId}/events?after_sequence=${afterSequence}`);
+  if (!response.ok) throw new Error(`获取事件失败: ${response.status}`);
+  return await response.json();
+}

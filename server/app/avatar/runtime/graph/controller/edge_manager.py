@@ -38,17 +38,39 @@ class EdgeManagerMixin:
         env_context: Optional[Dict[str, Any]] = None,
     ) -> None:
         from app.avatar.runtime.graph.models.graph_patch import PatchOperation
+
+        # Phase 1: Apply ADD_NODE first so all node IDs exist before edges
+        # are validated.  Planner output order is not guaranteed to place
+        # ADD_NODE before ADD_EDGE referencing that node.
+        deferred_edges: list = []
+        other_actions: list = []
+
         for action in patch.actions:
             if action.operation == PatchOperation.ADD_NODE and action.node:
                 graph.add_node(action.node)
                 logger.debug(f"Added node: {action.node.id}")
                 self._inject_implicit_edges(action.node, graph)
+                if lt_ctx is not None:
+                    lt_ctx.graph_version += 1
+                    self._lt_record_patch(lt_ctx, action, graph)
             elif action.operation == PatchOperation.ADD_EDGE and action.edge:
-                self._validate_edge_types(action.edge, graph, env_context)
-                self._ensure_binding_spec(action.edge, graph)
-                graph.add_edge(action.edge)
-                logger.debug(f"Added edge: {action.edge.source_node} → {action.edge.target_node}")
-            elif action.operation == PatchOperation.REMOVE_NODE and action.node_id:
+                deferred_edges.append(action)
+            else:
+                other_actions.append(action)
+
+        # Phase 2: Apply ADD_EDGE (all nodes now registered)
+        for action in deferred_edges:
+            self._validate_edge_types(action.edge, graph, env_context)
+            self._ensure_binding_spec(action.edge, graph)
+            graph.add_edge(action.edge)
+            logger.debug(f"Added edge: {action.edge.source_node} → {action.edge.target_node}")
+            if lt_ctx is not None:
+                lt_ctx.graph_version += 1
+                self._lt_record_patch(lt_ctx, action, graph)
+
+        # Phase 3: Apply remaining actions (REMOVE_NODE, REMOVE_EDGE, FINISH)
+        for action in other_actions:
+            if action.operation == PatchOperation.REMOVE_NODE and action.node_id:
                 if action.node_id in graph.nodes:
                     del graph.nodes[action.node_id]
                     logger.debug(f"Removed node: {action.node_id}")
@@ -59,7 +81,6 @@ class EdgeManagerMixin:
             elif action.operation == PatchOperation.FINISH:
                 logger.debug("FINISH operation in patch")
 
-            # Long-task: record each action as a PatchLogEntry
             if lt_ctx is not None and action.operation != PatchOperation.FINISH:
                 lt_ctx.graph_version += 1
                 self._lt_record_patch(lt_ctx, action, graph)

@@ -156,6 +156,21 @@ class SocketManager:
             )
             
             if success:
+                # 触发 RecoveryEngine 恢复/处理
+                try:
+                    from app.services.recovery_engine import RecoveryEngine
+                    recovery = RecoveryEngine()
+                    req = service.get_request(request_id) if hasattr(service, 'get_request') else None
+                    task_id = req.get("task_id") if req else data.get("task_id")
+
+                    if task_id:
+                        if approved:
+                            await recovery.resume_from_approval(task_id, request_id)
+                        else:
+                            await recovery.handle_approval_rejection(task_id, request_id)
+                except Exception as re_err:
+                    logger.warning(f"[SocketManager] RecoveryEngine trigger failed (non-fatal): {re_err}")
+
                 # 发送审批确认事件
                 await self.emit("server_event", {
                     "type": "approval.responded",
@@ -194,6 +209,58 @@ class SocketManager:
                 
         except Exception as e:
             logger.error(f"Failed to emit socket event '{event}': {e}")
+
+    async def emit_task_event(self, task_id: str, event_type: str, payload: dict) -> None:
+        """
+        带 Event Envelope 的任务事件发送。
+        sequence 从 DB 原子递增，保证跨重启单调性。
+        """
+        import uuid as _uuid
+        from datetime import datetime, timezone
+
+        seq = self._next_sequence(task_id)
+
+        envelope = {
+            "event_id": str(_uuid.uuid4()),
+            "task_id": task_id,
+            "sequence": seq,
+            "emitted_at": datetime.now(timezone.utc).isoformat(),
+            "type": event_type,
+            "payload": payload,
+        }
+        await self.emit("server_event", envelope)
+
+    def _next_sequence(self, task_id: str) -> int:
+        """
+        从 DB 原子递增 TaskSession.last_event_sequence。
+        使用条件更新保证并发安全，跨重启保持单调递增。
+        """
+        try:
+            from sqlmodel import Session as DBSession, text
+            from app.db.database import engine
+
+            with DBSession(engine) as db:
+                result = db.exec(
+                    text(
+                        "UPDATE task_sessions "
+                        "SET last_event_sequence = last_event_sequence + 1 "
+                        "WHERE id = :task_id"
+                    ).bindparams(task_id=task_id)
+                )
+                if result.rowcount == 0:
+                    logger.warning(f"[SocketManager] No task_session found for sequence: {task_id}")
+                    return 0
+
+                row = db.exec(
+                    text(
+                        "SELECT last_event_sequence FROM task_sessions WHERE id = :task_id"
+                    ).bindparams(task_id=task_id)
+                ).first()
+                db.commit()
+                return row[0] if row else 0
+        except Exception as e:
+            logger.warning(f"[SocketManager] Failed to get next sequence: {e}")
+            return 0
     
     def _cache_event(self, event_data: dict):
         """
@@ -268,3 +335,8 @@ class SocketManager:
         except Exception as e:
             logger.error(f"Failed to cleanup cache: {e}")
 
+
+
+def get_socket_manager() -> SocketManager:
+    """获取 SocketManager 单例实例。"""
+    return SocketManager.get_instance()

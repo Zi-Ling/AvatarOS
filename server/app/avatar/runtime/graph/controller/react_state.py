@@ -72,6 +72,9 @@ class ReactLoopState:
     # ── Long-task ───────────────────────────────────────────────────────
     lt_ctx: Optional[Any] = None  # LongTaskContext
 
+    # ── Durable state machine ────────────────────────────────────────
+    durable_ctx: Optional[Any] = None  # DurableContext
+
     # ── Per-iteration transient state ───────────────────────────────────
     pending_node_ids: Set[str] = field(default_factory=set)
 

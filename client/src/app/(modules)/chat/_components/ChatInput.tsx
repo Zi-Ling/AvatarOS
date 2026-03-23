@@ -3,7 +3,6 @@
 import { RefObject, useState, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { useLanguage } from "@/theme/i18n/LanguageContext";
-import { cn } from "@/lib/utils";
 
 type Attachment = {
   id: string;
@@ -35,7 +34,7 @@ interface ChatInputProps {
   formatFileSize: (bytes: number) => string;
   canCancel?: boolean;
   hasActiveTask?: boolean;
-  hasPendingApproval?: boolean; // 有待审批请求
+  pendingApprovalCount?: number; // 待审批数量（仅用于提示，不阻塞输入）
 }
 
 export function ChatInput({
@@ -43,7 +42,7 @@ export function ChatInput({
   isTyping, audioLevel = 0, isThinkEnabled, toggleThinkMode, fileInputRef,
   handleSend, handleKeyPress, handleFileUpload, removeAttachment, handleNewChat,
   handleStopGeneration, toggleRecording, formatFileSize,
-  canCancel = false, hasActiveTask = false, hasPendingApproval = false,
+  canCancel = false, hasActiveTask = false, pendingApprovalCount = 0,
 }: ChatInputProps) {
   const { t, language } = useLanguage();
   const shouldShowStopButton = isTyping || hasActiveTask;
@@ -198,13 +197,8 @@ export function ChatInput({
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyPress}
             onContextMenu={handleContextMenu}
-            placeholder={hasPendingApproval ? "请先处理上方的审批请求..." : t.chat.placeholder}
-            className={cn(
-              "w-full min-h-[100px] max-h-[240px] resize-none bg-transparent px-4 pt-3 pb-12 text-sm placeholder:text-slate-400 dark:placeholder:text-white/40 focus:outline-none",
-              hasPendingApproval
-                ? "text-slate-400 dark:text-slate-500"
-                : "text-slate-800 dark:text-white"
-            )}
+            placeholder={t.chat.placeholder}
+            className="w-full min-h-[100px] max-h-[240px] resize-none bg-transparent px-4 pt-3 pb-12 text-sm text-slate-800 dark:text-white placeholder:text-slate-400 dark:placeholder:text-white/40 focus:outline-none"
             disabled={isRecording || isTranscribing}
           />
 
@@ -292,16 +286,8 @@ export function ChatInput({
                     <rect x="6" y="6" width="12" height="12" rx="1" />
                   </svg>
                 </button>
-              ) : hasPendingApproval ? (
-                /* 待审批提示按钮 */
-                <div className="flex items-center gap-1.5 px-2.5 h-8 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 text-xs font-medium">
-                  <svg className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                  </svg>
-                  <span>待审批</span>
-                </div>
               ) : (
-                /* 发送按钮 */
+                /* 发送按钮 — 始终可用，不被审批阻塞 */
                 <button
                   type="button"
                   onClick={() => handleSend()}

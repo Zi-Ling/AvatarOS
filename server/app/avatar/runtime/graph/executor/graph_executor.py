@@ -196,6 +196,33 @@ class GraphExecutor(
             resolved_params = self._resolve_parameters(graph, node, context)
             final_params = {**node.params, **resolved_params}
 
+            # Proactive coercion: LLM tool calls sometimes return nested
+            # structures (list/dict) as stringified Python repr or JSON.
+            # Coerce them before Pydantic validation to avoid unnecessary retries.
+            final_params = self._coerce_string_params(final_params)
+
+            # Schema-aware unwrap: if a param value is a dict but the skill
+            # schema expects a list, try to extract the list from the dict.
+            final_params = self._schema_aware_unwrap(node.capability_name, final_params)
+
+            # Replace LLM-generated template variables like {{workspace_path}}
+            # with the actual container mount path /workspace.
+            final_params = self._replace_template_vars_in_params(final_params)
+
+            # Safety net: detect unresolved node-reference templates like
+            # {{n1.output}} which indicate a missing DataEdge (e.g. removed
+            # by dag_repair due to action ordering).  Fail early with a clear
+            # message instead of passing the raw template to Pydantic.
+            import re as _re_tpl
+            for _pk, _pv in final_params.items():
+                if isinstance(_pv, str) and _re_tpl.search(r'\{\{\s*n\d+\.', _pv):
+                    raise ExecutionError(
+                        f"Unresolved node reference in param '{_pk}': {_pv!r}. "
+                        f"This usually means the DAG is missing an edge from the "
+                        f"upstream node. Check planner output and dag_repair logs.",
+                        retryable=True,
+                    )
+
             # Auto-inject search results into text-answer skill context
             # When Planner calls a text-answer skill after a search skill but doesn't pass
             # context (or can't due to token limits), we inject it automatically.

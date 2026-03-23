@@ -74,6 +74,7 @@ class SkillExecutorMixin:
                 pass
             params = self._inject_node_outputs_into_code(params, context, sandboxed=_sandboxed)
             params = self._sanitize_code_host_paths(params)
+            params = self._replace_workspace_template_vars(params)
 
         # 构建 extra：workspace 优先从 context 取，保证 session 隔离
         extra: Dict[str, Any] = {}
@@ -179,7 +180,104 @@ class SkillExecutorMixin:
 
         return result_dict
 
+    @staticmethod
+    def _schema_aware_unwrap(skill_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Unwrap dict values when the skill schema expects a list.
+
+        When an upstream node outputs ``{"files": [...], "folder": "..."}``,
+        and the downstream skill expects ``writes: List[...]``, the dict
+        needs to be unwrapped.  This method uses the skill's Pydantic model
+        to detect list-typed fields and extract the inner list.
+        """
+        try:
+            from app.avatar.skills.registry import skill_registry
+            skill_cls = skill_registry.get(skill_name)
+            if skill_cls is None:
+                return params
+            schema = skill_cls.spec.input_model.model_json_schema()
+            props = schema.get("properties", {})
+        except Exception:
+            return params
+
+        changed = False
+        result = dict(params)
+        for key, val in result.items():
+            if not isinstance(val, dict):
+                continue
+            # Check if the skill schema expects a list/array for this param
+            prop_schema = props.get(key, {})
+            # Handle anyOf / type patterns for Optional[List[...]]
+            expects_list = False
+            if prop_schema.get("type") == "array":
+                expects_list = True
+            for variant in prop_schema.get("anyOf", []):
+                if isinstance(variant, dict) and variant.get("type") == "array":
+                    expects_list = True
+                    break
+            if not expects_list:
+                continue
+            # Exact key match first
+            if key in val and isinstance(val[key], list):
+                result[key] = val[key]
+                changed = True
+                continue
+            # Heuristic: single list-valued key in the dict
+            list_keys = [k for k, v in val.items() if isinstance(v, list)]
+            if len(list_keys) == 1:
+                result[key] = val[list_keys[0]]
+                changed = True
+        return result if changed else params
+
     # Keep _execute_sequential for backward compat with existing tests
+    @staticmethod
+    def _coerce_string_params(params: Dict[str, Any]) -> Dict[str, Any]:
+        """Try to coerce string values that look like list/dict literals.
+
+        LLM tool calls sometimes return nested structures as stringified
+        Python repr (single-quoted) or JSON. This helper attempts to parse
+        them back into native objects so Pydantic validation succeeds.
+        """
+        import json as _json
+        import ast as _ast
+
+        changed = False
+        coerced = dict(params)
+        for key, val in coerced.items():
+            # Unwrap: if val is already a dict containing a key matching
+            # the param name, extract the inner value.
+            if isinstance(val, dict) and key in val:
+                coerced[key] = val[key]
+                changed = True
+                continue
+            if not isinstance(val, str):
+                continue
+            stripped = val.strip()
+            if not stripped or stripped[0] not in ('[', '{'):
+                continue
+            # Try JSON first
+            try:
+                parsed = _json.loads(stripped)
+                if isinstance(parsed, (list, dict)):
+                    coerced[key] = parsed
+                    changed = True
+                    continue
+            except (_json.JSONDecodeError, ValueError):
+                pass
+            # Fallback: Python literal
+            try:
+                parsed = _ast.literal_eval(stripped)
+                if isinstance(parsed, (list, dict)):
+                    coerced[key] = parsed
+                    changed = True
+            except (ValueError, SyntaxError):
+                pass
+        # Second pass: unwrap dicts that contain a key matching the param name
+        for key, val in coerced.items():
+            if isinstance(val, dict) and key in val:
+                coerced[key] = val[key]
+                changed = True
+        return coerced if changed else params
+
     async def _execute_sequential(
         self,
         capability_or_skill,

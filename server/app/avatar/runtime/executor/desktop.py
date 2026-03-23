@@ -276,14 +276,25 @@ class DesktopExecutor(SkillExecutor):
             timeout_seconds=60,
         )
 
-        try:
-            approved = await self._approval_service.wait_for_approval(
-                request_id=request_id, timeout_seconds=60,
-            )
-            return approved
-        except TimeoutError:
-            logger.warning(f"[DesktopExecutor] Approval timeout for {skill_name}")
-            return False
+        # Poll for approval decision (ApprovalService is DB-based, no async wait)
+        import asyncio as _aio
+        timeout_seconds = 60
+        poll_interval = 1.0
+        elapsed = 0.0
+        while elapsed < timeout_seconds:
+            req = self._approval_service.get_request(request_id)
+            if req and req.get("status") != "pending":
+                approved = req.get("status") == "approved"
+                logger.info(
+                    f"[DesktopExecutor] Approval result for {skill_name}: "
+                    f"{req.get('status')} (waited {elapsed:.1f}s)"
+                )
+                return approved
+            await _aio.sleep(poll_interval)
+            elapsed += poll_interval
+
+        logger.warning(f"[DesktopExecutor] Approval timeout for {skill_name} after {timeout_seconds}s")
+        return False
 
     def _audit_operation(
         self,

@@ -44,48 +44,61 @@ class DagRepairHelper:
         new_actions = []
         # Collect edges for cycle detection
         edge_actions = []
+        # Collect non-node/non-edge actions
+        other_actions = []
 
+        # ── Phase 1: Process all ADD_NODE first to build node_ids ──
+        node_actions_raw = []
+        edge_actions_raw = []
         for action in patch.actions:
             if action.operation == PatchOperation.ADD_NODE and action.node:
-                original_id = action.node.id
-                if original_id in node_ids:
-                    if original_id not in node_id_counter:
-                        node_id_counter[original_id] = 1
-                    node_id_counter[original_id] += 1
-                    new_id = f"{original_id}_{node_id_counter[original_id]}"
-                    action.node.id = new_id
-                    repairs.append(f"Renamed duplicate node '{original_id}' to '{new_id}'")
-                    repaired = True
-                node_ids.add(action.node.id)
-                node_outputs[action.node.id] = ['output']
-                new_actions.append(action)
-
+                node_actions_raw.append(action)
             elif action.operation == PatchOperation.ADD_EDGE and action.edge:
-                src = action.edge.source_node
-                tgt = action.edge.target_node
-                sf = action.edge.source_field
-
-                if src not in node_ids:
-                    repairs.append(f"Removed edge with invalid source '{src}' (target: {tgt})")
-                    repaired = True
-                    continue
-                if tgt not in node_ids:
-                    repairs.append(f"Removed edge with invalid target '{tgt}' (source: {src})")
-                    repaired = True
-                    continue
-                if sf not in node_outputs.get(src, []):
-                    if 'output' in node_outputs.get(src, []):
-                        action.edge.source_field = 'output'
-                        repairs.append(f"Fixed field '{sf}' to 'output' for {src} → {tgt}")
-                        repaired = True
-                    else:
-                        repairs.append(f"Removed edge with invalid field '{sf}' from '{src}'")
-                        repaired = True
-                        continue
-                # Defer edge for cycle detection
-                edge_actions.append(action)
+                edge_actions_raw.append(action)
             else:
-                new_actions.append(action)
+                other_actions.append(action)
+
+        for action in node_actions_raw:
+            original_id = action.node.id
+            if original_id in node_ids:
+                if original_id not in node_id_counter:
+                    node_id_counter[original_id] = 1
+                node_id_counter[original_id] += 1
+                new_id = f"{original_id}_{node_id_counter[original_id]}"
+                action.node.id = new_id
+                repairs.append(f"Renamed duplicate node '{original_id}' to '{new_id}'")
+                repaired = True
+            node_ids.add(action.node.id)
+            node_outputs[action.node.id] = ['output']
+            new_actions.append(action)
+
+        # ── Phase 2: Process ADD_EDGE (now all node_ids are known) ──
+        for action in edge_actions_raw:
+            src = action.edge.source_node
+            tgt = action.edge.target_node
+            sf = action.edge.source_field
+
+            if src not in node_ids:
+                repairs.append(f"Removed edge with invalid source '{src}' (target: {tgt})")
+                repaired = True
+                continue
+            if tgt not in node_ids:
+                repairs.append(f"Removed edge with invalid target '{tgt}' (source: {src})")
+                repaired = True
+                continue
+            if sf not in node_outputs.get(src, []):
+                if 'output' in node_outputs.get(src, []):
+                    action.edge.source_field = 'output'
+                    repairs.append(f"Fixed field '{sf}' to 'output' for {src} → {tgt}")
+                    repaired = True
+                else:
+                    repairs.append(f"Removed edge with invalid field '{sf}' from '{src}'")
+                    repaired = True
+                    continue
+            # Defer edge for cycle detection
+            edge_actions.append(action)
+
+        new_actions.extend(other_actions)
 
         # ── Cycle detection: build adjacency and remove back-edges ──
         adjacency: Dict[str, set] = {nid: set() for nid in node_ids}

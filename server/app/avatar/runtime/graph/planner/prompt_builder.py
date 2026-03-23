@@ -177,6 +177,8 @@ Think step-by-step about what needs to be done next.
 - When a python.run node depends on an upstream node (via edge), the upstream output is AUTOMATICALLY injected as a variable named `{node_id}_output` (e.g. `n1_output`).
 - Do NOT hardcode upstream output content into the `code` parameter. Just reference the variable directly.
 - The `code` parameter must contain ONLY the processing logic, never the input data.
+- The workspace is mounted at `/workspace` inside the container. Use the literal path `/workspace/...` directly. Do NOT use template variables like `{{workspace_path}}`.
+- **python.run has an injected helper `_output(value)`** — call it to pass structured data to downstream steps. Without `_output()`, the step output is empty.
 
 **Response format (JSON):**
 ```json
@@ -215,6 +217,10 @@ Plan the COMPLETE execution graph upfront.
       ...
   ```
 - The `code` parameter must contain ONLY the processing logic, never the input data.
+- The workspace is mounted at `/workspace` inside the container. Use the literal path `/workspace/...` directly. Do NOT use template variables like `{{workspace_path}}`.
+- **python.run has an injected helper `_output(value)`** — call it to pass structured data (list/dict/int/str) to downstream nodes via edges. If a python.run node has outgoing edges, it MUST call `_output()` with the data the downstream node needs. Without `_output()`, downstream nodes receive empty string.
+- fs.write/move/copy/delete support batch mode. Build batch lists in python.run using `_output()`, then pass via edge to fs.write.
+  Example: python.run calls `_output([{"path": "a.txt", "content": "hello"}, ...])` → edge delivers the list to fs.write's `writes` param.
 
 **Response format (JSON):**
 ```json

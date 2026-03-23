@@ -44,7 +44,6 @@ export default function ChatInterface() {
   const [messageToDelete, setMessageToDelete] = useState<string | null>(null);
 
   const { pendingApprovals } = useTaskStore();
-  const hasPendingApproval = pendingApprovals.length > 0;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { isRecording, isTranscribing, audioLevel, toggleRecording } = VoiceRecording();
@@ -66,12 +65,13 @@ export default function ChatInterface() {
       if (!files || files.length === 0) return;
 
       Array.from(files).forEach((file) => {
+        const blobUrl = URL.createObjectURL(file);
         addAttachment({
           id: `${Date.now()}-${Math.random()}`,
           name: file.name,
           size: file.size,
           type: file.type,
-          url: URL.createObjectURL(file),
+          url: blobUrl,
           file,
         });
       });
@@ -82,6 +82,17 @@ export default function ChatInterface() {
     },
     [addAttachment]
   );
+
+  // Revoke blob URLs on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      attachments.forEach((att) => {
+        if (att.url?.startsWith("blob:")) {
+          URL.revokeObjectURL(att.url);
+        }
+      });
+    };
+  }, []);
 
   const formatFileSize = useCallback((bytes: number): string => {
     if (bytes === 0) return "0 B";
@@ -98,9 +109,7 @@ export default function ChatInterface() {
 
   const confirmDeleteMessage = useCallback(() => {
     if (messageToDelete) {
-      useChatStore.setState((state) => ({
-        messages: state.messages.filter((m) => m.id !== messageToDelete),
-      }));
+      useChatStore.getState().deleteMessage(messageToDelete);
       setMessageToDelete(null);
     }
   }, [messageToDelete]);
@@ -134,9 +143,7 @@ export default function ChatInterface() {
       if (!lastUserMessage) return;
 
       // Remove the AI message being regenerated
-      useChatStore.setState((state) => ({
-        messages: state.messages.filter((m) => m.id !== id),
-      }));
+      useChatStore.getState().deleteMessage(id);
 
       // Pass content directly to handleSend to avoid async state issue
       handleSend(lastUserMessage.content);
@@ -177,7 +184,7 @@ export default function ChatInterface() {
         formatFileSize={formatFileSize}
         canCancel={canCancel}
         hasActiveTask={!!activeTask && activeTask.status === "executing"}
-        hasPendingApproval={hasPendingApproval}
+        pendingApprovalCount={pendingApprovals.length}
       />
 
       <ConfirmDialog

@@ -160,3 +160,117 @@ class TaskSessionStore:
                     )
                 ).all()
             )
+
+    # ------------------------------------------------------------------
+    # Lease 管理（持久化状态机扩展）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def acquire_lease(task_session_id: str, worker_id: str, timeout_s: int = 90) -> bool:
+        """
+        获取 Lease，使用条件更新防竞态。
+
+        仅当 worker_id 为空或 Lease 已过期时才允许获取。
+        返回 True 表示获取成功。
+        """
+        now = datetime.now(timezone.utc)
+        from datetime import timedelta
+        expiry = now + timedelta(seconds=timeout_s)
+
+        with Session(engine) as db:
+            result = db.exec(
+                text(
+                    "UPDATE task_sessions "
+                    "SET worker_id=:wid, lease_expiry=:expiry, "
+                    "    last_heartbeat_at=:now, updated_at=:now "
+                    "WHERE id=:sid AND ("
+                    "  worker_id IS NULL OR "
+                    "  lease_expiry IS NULL OR "
+                    "  lease_expiry < :now"
+                    ")"
+                ).bindparams(
+                    wid=worker_id, expiry=expiry, now=now,
+                    sid=task_session_id,
+                )
+            )
+            db.commit()
+            acquired = result.rowcount > 0
+
+        if acquired:
+            logger.info(f"[TaskSessionStore] Lease acquired: {task_session_id} by {worker_id}")
+        else:
+            logger.warning(f"[TaskSessionStore] Lease acquire failed: {task_session_id}")
+        return acquired
+
+    @staticmethod
+    def renew_heartbeat(task_session_id: str, worker_id: str) -> bool:
+        """
+        更新心跳时间戳，仅当 worker_id 匹配时。
+
+        同时延长 lease_expiry。返回 True 表示续约成功。
+        """
+        now = datetime.now(timezone.utc)
+        with Session(engine) as db:
+            obj = db.get(TaskSession, task_session_id)
+            if not obj:
+                return False
+            from datetime import timedelta
+            expiry = now + timedelta(seconds=obj.lease_timeout_s)
+
+            result = db.exec(
+                text(
+                    "UPDATE task_sessions "
+                    "SET last_heartbeat_at=:now, lease_expiry=:expiry, updated_at=:now "
+                    "WHERE id=:sid AND worker_id=:wid"
+                ).bindparams(now=now, expiry=expiry, sid=task_session_id, wid=worker_id)
+            )
+            db.commit()
+            return result.rowcount > 0
+
+    @staticmethod
+    def release_lease(task_session_id: str, worker_id: str) -> bool:
+        """释放 Lease（任务完成或主动放弃时调用）。"""
+        now = datetime.now(timezone.utc)
+        with Session(engine) as db:
+            result = db.exec(
+                text(
+                    "UPDATE task_sessions "
+                    "SET worker_id=NULL, lease_expiry=NULL, "
+                    "    last_heartbeat_at=NULL, updated_at=:now "
+                    "WHERE id=:sid AND worker_id=:wid"
+                ).bindparams(now=now, sid=task_session_id, wid=worker_id)
+            )
+            db.commit()
+            return result.rowcount > 0
+
+    @staticmethod
+    def find_expired_leases() -> list[TaskSession]:
+        """
+        查找 Lease 过期的 running 状态任务。
+
+        条件：status 为 executing 且 lease_expiry < 当前时间。
+        """
+        now = datetime.now(timezone.utc)
+        with Session(engine) as db:
+            return list(
+                db.exec(
+                    select(TaskSession).where(
+                        TaskSession.status == "executing",
+                        TaskSession.lease_expiry.isnot(None),  # type: ignore[union-attr]
+                        TaskSession.lease_expiry < now,  # type: ignore[operator]
+                    )
+                ).all()
+            )
+
+    @staticmethod
+    def get_active_tasks() -> list[TaskSession]:
+        """获取所有活跃任务（executing/paused/waiting_approval）。"""
+        active_statuses = {"executing", "paused", "waiting_approval"}
+        with Session(engine) as db:
+            return list(
+                db.exec(
+                    select(TaskSession).where(
+                        TaskSession.status.in_(active_statuses)  # type: ignore[attr-defined]
+                    )
+                ).all()
+            )

@@ -97,6 +97,44 @@ class ParameterResolverMixin:
         # skill expects as list/dict (e.g. fs.write expects writes: List[...]).
         value = self._try_json_coerce(value)
 
+        # Auto-unwrap: if the coerced value is a dict that contains a key
+        # matching the target_param name, the upstream node likely returned
+        # a wrapper object (e.g. {"writes": [...], "folder": "..."}) and
+        # the edge should deliver the inner value, not the whole dict.
+        value = self._try_unwrap(value, edge.target_param)
+
+        # Defense: warn when upstream output is empty — this often means
+        # python.run forgot to call _output(). We still propagate the value
+        # (empty string is valid for some params) but log for debugging.
+        if not edge.optional and (value is None or value == ""):
+            logger.warning(
+                "[ParameterResolver] Edge %s.%s → %s resolved to empty value (%r). "
+                "If downstream validation fails, the upstream python.run node "
+                "likely did not call _output().",
+                edge.source_node, edge.source_field, edge.target_param, value,
+            )
+
+        return value
+
+    @staticmethod
+    def _try_unwrap(value: Any, target_param: str) -> Any:
+        """Unwrap a dict if it contains a key matching the target parameter.
+
+        When an upstream node (e.g. python.run) outputs a JSON object like
+        ``{"writes": [...], "folder": "..."}``, and a DataEdge maps it to
+        the ``writes`` parameter, the downstream skill receives the whole
+        dict instead of just the list.  This method extracts the matching
+        inner value.
+        """
+        if not isinstance(value, dict) or not target_param:
+            return value
+        if target_param in value:
+            inner = value[target_param]
+            logger.debug(
+                "[ParameterResolver] Auto-unwrapped '%s' from dict (%d keys) → %s",
+                target_param, len(value), type(inner).__name__,
+            )
+            return inner
         return value
 
     @staticmethod
@@ -104,6 +142,8 @@ class ParameterResolverMixin:
         """Attempt to deserialize a JSON string to a Python object.
 
         Only acts on str values that look like JSON arrays or objects.
+        Tries JSON first, then falls back to ``ast.literal_eval`` for
+        Python-repr strings (single-quoted dicts/lists from upstream stdout).
         Returns the original value unchanged on any failure or non-string input.
         """
         if not isinstance(value, str):
@@ -124,7 +164,20 @@ class ParameterResolverMixin:
                 return parsed
             return value
         except (_json.JSONDecodeError, ValueError):
-            return value
+            pass
+        # Fallback: Python repr strings (single-quoted dicts/lists)
+        import ast as _ast
+        try:
+            parsed = _ast.literal_eval(stripped)
+            if isinstance(parsed, (list, dict)):
+                logger.debug(
+                    "[ParameterResolver] Auto-coerced Python literal (%d chars) → %s",
+                    len(stripped), type(parsed).__name__,
+                )
+                return parsed
+        except (ValueError, SyntaxError):
+            pass
+        return value
 
     def _lookup_field(
         self,

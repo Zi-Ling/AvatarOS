@@ -37,6 +37,10 @@ class CheckpointStore:
         graph_version: int,
         budget_info_json: Optional[str] = None,
         environment_snapshot_json: Optional[str] = None,
+        execution_frontier_json: Optional[str] = None,
+        idempotency_metadata_json: Optional[str] = None,
+        effect_ledger_snapshot_json: Optional[str] = None,
+        pending_requests_json: Optional[str] = None,
     ) -> Checkpoint:
         obj = Checkpoint(
             task_session_id=task_session_id,
@@ -49,6 +53,10 @@ class CheckpointStore:
             graph_version=graph_version,
             budget_info_json=budget_info_json,
             environment_snapshot_json=environment_snapshot_json,
+            execution_frontier_json=execution_frontier_json,
+            idempotency_metadata_json=idempotency_metadata_json,
+            effect_ledger_snapshot_json=effect_ledger_snapshot_json,
+            pending_requests_json=pending_requests_json,
         )
         with Session(engine) as db:
             db.add(obj)
@@ -107,3 +115,62 @@ class CheckpointStore:
                 db.add(obj)
                 db.commit()
                 logger.info(f"[CheckpointStore] Soft-deleted checkpoint {checkpoint_id}")
+
+    # ------------------------------------------------------------------
+    # 清理策略
+    # ------------------------------------------------------------------
+
+    # 需要保留的重要级别（不参与 routine 清理）
+    _PRESERVE_IMPORTANCE = {
+        "milestone", "merge", "pre_risky",
+        "failure_snapshot", "state_transition",
+    }
+
+    @staticmethod
+    def cleanup_old_checkpoints(
+        task_session_id: str,
+        max_routine: int = 20,
+        preserve_importance: Optional[set] = None,
+    ) -> int:
+        """
+        清理超出上限的 routine 级别 checkpoint。
+
+        保留所有重要级别（milestone/failure_snapshot/state_transition 等），
+        仅对 routine/pre_effect/post_effect 级别执行 FIFO 清理。
+
+        Returns:
+            被软删除的 checkpoint 数量
+        """
+        if preserve_importance is None:
+            preserve_importance = CheckpointStore._PRESERVE_IMPORTANCE
+
+        cleanable_levels = {"routine", "pre_effect", "post_effect"}
+
+        with Session(engine) as db:
+            all_cleanable = list(
+                db.exec(
+                    select(Checkpoint)
+                    .where(Checkpoint.task_session_id == task_session_id)
+                    .where(Checkpoint.is_deleted == False)  # noqa: E712
+                    .where(Checkpoint.importance.in_(cleanable_levels))  # type: ignore[attr-defined]
+                    .order_by(Checkpoint.created_at.desc())  # type: ignore[attr-defined]
+                ).all()
+            )
+
+            if len(all_cleanable) <= max_routine:
+                return 0
+
+            to_delete = all_cleanable[max_routine:]
+            for cp in to_delete:
+                cp.is_deleted = True
+                db.add(cp)
+
+            db.commit()
+            deleted = len(to_delete)
+
+        if deleted > 0:
+            logger.info(
+                f"[CheckpointStore] Cleaned up {deleted} routine checkpoints "
+                f"for task_session {task_session_id}"
+            )
+        return deleted

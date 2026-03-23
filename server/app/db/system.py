@@ -130,6 +130,11 @@ class ApprovalRequest(SQLModel, table=True):
     user_comment: Optional[str] = Field(default=None)
     responded_at: Optional[datetime] = Field(default=None)
 
+    # 审批类型和超时策略（持久化状态机扩展）
+    approval_type: str = Field(default="quick", description="quick/standard/complex")
+    parent_request_id: Optional[str] = Field(default=None, index=True, description="关联原审批 ID")
+    timeout_action: str = Field(default="mark_timeout", description="mark_timeout/auto_fail/keep_waiting")
+
 
 class Grant(SQLModel, table=True):
     """路径访问授权记录"""

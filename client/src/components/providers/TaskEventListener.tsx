@@ -26,6 +26,23 @@ export function TaskEventListener() {
     const handleServerEvent = (event: any) => {
       const { type, payload } = event;
 
+      // ── Event Envelope: task_id 路由 + sequence 去重 ──────────────
+      const envelopeTaskId = event.task_id as string | undefined;
+      const envelopeSeq = event.sequence as number | undefined;
+      if (envelopeTaskId && envelopeSeq !== undefined) {
+        const { tasks, lastSequences, updateLastSequence } = useTaskStore.getState();
+        // 忽略 task_id 不在 Registry 中的事件（仅记录警告）
+        if (Object.keys(tasks).length > 0 && !tasks[envelopeTaskId]) {
+          console.warn(`[TaskEventListener] Event for unknown task_id: ${envelopeTaskId}, seq=${envelopeSeq}`);
+        }
+        // 丢弃重复 sequence 事件
+        const lastSeq = lastSequences[envelopeTaskId] ?? -1;
+        if (envelopeSeq <= lastSeq) {
+          return; // 重复事件，跳过
+        }
+        updateLastSequence(envelopeTaskId, envelopeSeq);
+      }
+
       if (type === "system.log") {
         const { timestamp, level, module, message } = payload;
         addLog(`[${timestamp}] [${level}] [${module}] ${message}`);

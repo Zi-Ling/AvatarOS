@@ -73,6 +73,16 @@ class AppBootstrap:
             except Exception as e:
                 logger.warning(f"  └─ 启动恢复失败: {e}")
 
+        # 持久化状态机恢复扫描（Durable Task State Machine）
+        try:
+            from app.services.recovery_engine import RecoveryEngine
+            recovery_engine = RecoveryEngine()
+            recovered = await recovery_engine.scan_and_recover()
+            if recovered:
+                logger.info(f"  └─ Durable 恢复扫描完成: {len(recovered)} 个任务已恢复")
+        except Exception as e:
+            logger.warning(f"  └─ Durable 恢复扫描失败 (non-fatal): {e}")
+
         logger.info("✅ 所有组件初始化完成")
 
     async def shutdown(self):
