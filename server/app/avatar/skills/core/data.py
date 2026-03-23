@@ -52,27 +52,146 @@ _ERROR_MESSAGES: dict[str, tuple[str, str]] = {
 }
 
 
+# ── 错误码 → 恢复动作映射 ──
+
+_RECOVERY_MAP: dict[str, list[dict]] = {
+    "VERSION_CONFLICT": [
+        {"action": "重新查询记录获取最新版本号", "category": "re-read-state", "skill_hint": "data_query"},
+        {"action": "用最新版本号重新创建提案", "category": "re-propose", "skill_hint": "data_propose"},
+    ],
+    "OBJECT_NOT_FOUND": [
+        {"action": "调用 data_describe 查看可用对象类型列表", "category": "re-read-metadata", "skill_hint": "data_describe"},
+    ],
+    "DUPLICATE_OBJECT": [
+        {"action": "查询已有对象定义，确认是否可为其追加字段", "category": "re-read-metadata", "skill_hint": "data_describe"},
+        {"action": "选择一个不同的对象名称重新创建", "category": "re-propose", "skill_hint": "data_propose"},
+    ],
+    "VALIDATION_ERROR": [
+        {"action": "调用 data_describe 查看字段定义和枚举值", "category": "re-read-metadata", "skill_hint": "data_describe"},
+        {"action": "修正字段值后重新提案", "category": "re-propose", "skill_hint": "data_propose"},
+    ],
+    "RECORD_NOT_FOUND": [
+        {"action": "确认记录 ID 是否正确", "category": "re-read-state", "skill_hint": "data_query"},
+    ],
+    "INVALID_FIELD": [
+        {"action": "调用 data_describe 查看可用字段列表", "category": "re-read-metadata", "skill_hint": "data_describe"},
+    ],
+    "READONLY_FIELD": [
+        {"action": "调用 data_describe 查看字段定义，避免修改只读字段", "category": "re-read-metadata", "skill_hint": "data_describe"},
+    ],
+    "WORKSPACE_MISMATCH": [],
+    "STORAGE_ERROR": [],
+    "PROPOSAL_EXPIRED": [
+        {"action": "重新创建提案", "category": "re-propose", "skill_hint": "data_propose"},
+    ],
+    "PROPOSAL_ALREADY_COMMITTED": [
+        {"action": "查询记录确认变更是否已生效", "category": "re-read-state", "skill_hint": "data_query"},
+    ],
+    "INVALID_PROPOSAL": [
+        {"action": "检查参数后重新创建提案", "category": "re-propose", "skill_hint": "data_propose"},
+    ],
+}
+
+
+# ── 异常类名 → 错误码映射 ──
+
+_EXCEPTION_CODE_MAP: dict[str, str] = {
+    "ObjectNotFoundError": "OBJECT_NOT_FOUND",
+    "RecordNotFoundError": "RECORD_NOT_FOUND",
+    "VersionConflictError": "VERSION_CONFLICT",
+    "InvalidProposalError": "INVALID_PROPOSAL",
+    "ValidationError": "VALIDATION_ERROR",
+    "InvalidFieldError": "INVALID_FIELD",
+    "ReadonlyFieldError": "READONLY_FIELD",
+    "StorageError": "STORAGE_ERROR",
+    "WorkspaceMismatchError": "WORKSPACE_MISMATCH",
+    "UnsafeSchemaChangeError": "UNSAFE_SCHEMA_CHANGE",
+    "DuplicateObjectError": "DUPLICATE_OBJECT",
+}
+
+
+def _classify_invalid_proposal(e: Exception) -> str:
+    """将 InvalidProposalError 细分为 PROPOSAL_EXPIRED / PROPOSAL_ALREADY_COMMITTED / INVALID_PROPOSAL。
+
+    独立封装以降低后续替换成本：如果未来将异常类补成显式状态码，只需修改此函数。
+    """
+    msg = str(e)
+    if "过期" in msg or "expired" in msg.lower():
+        return "PROPOSAL_EXPIRED"
+    if "已提交" in msg or "不可重复" in msg:
+        return "PROPOSAL_ALREADY_COMMITTED"
+    return "INVALID_PROPOSAL"
+
+
+def _build_unsafe_schema_actions(e: Exception) -> tuple[list[dict], dict]:
+    """为 UnsafeSchemaChangeError 构建恢复建议和上下文。
+
+    返回 (suggested_actions, context)。
+    从异常 message 中解析 from_type/to_type，查询 SAFE_TYPE_CONVERSIONS 生成安全替代方案。
+    """
+    import re
+    from app.services.data.models import SAFE_TYPE_CONVERSIONS
+
+    actions: list[dict] = []
+    context: dict = {}
+
+    match = re.search(r"(\w+)\s*→\s*(\w+)", str(e))
+    if match:
+        from_type, to_type = match.group(1), match.group(2)
+        context = {"from_type": from_type, "to_type": to_type}
+
+        # 首选兜底：保持原类型，新建字段
+        actions.append({
+            "action": f"保持原类型 {from_type}，新建一个 {to_type} 类型的字段",
+            "category": "re-propose",
+            "skill_hint": "data_propose",
+        })
+
+        # 列出所有安全目标类型
+        for (src, dst), safe in SAFE_TYPE_CONVERSIONS.items():
+            if safe and src == from_type:
+                actions.append({
+                    "action": f"将字段类型改为 {dst}（安全转换）",
+                    "category": "re-propose",
+                    "skill_hint": "data_propose",
+                })
+    else:
+        # 解析失败：通用恢复建议
+        actions.append({
+            "action": "检查字段类型变更是否安全后重新提案",
+            "category": "re-propose",
+            "skill_hint": "data_propose",
+        })
+
+    return actions, context
+
+
 def _error_output(cls, e: Exception, **extra) -> SkillOutput:
     """将 DataError/异常转换为 SkillOutput(success=False)"""
     err_name = type(e).__name__
-    # 从异常类名推断错误码
-    code_map = {
-        "ObjectNotFoundError": "OBJECT_NOT_FOUND",
-        "RecordNotFoundError": "RECORD_NOT_FOUND",
-        "VersionConflictError": "VERSION_CONFLICT",
-        "InvalidProposalError": "INVALID_PROPOSAL",
-        "ValidationError": "VALIDATION_ERROR",
-        "InvalidFieldError": "INVALID_FIELD",
-        "ReadonlyFieldError": "READONLY_FIELD",
-        "StorageError": "STORAGE_ERROR",
-        "WorkspaceMismatchError": "WORKSPACE_MISMATCH",
-        "UnsafeSchemaChangeError": "UNSAFE_SCHEMA_CHANGE",
-        "DuplicateObjectError": "DUPLICATE_OBJECT",
-    }
-    code = code_map.get(err_name, "STORAGE_ERROR")
+    code = _EXCEPTION_CODE_MAP.get(err_name, "STORAGE_ERROR")
+
+    # InvalidProposalError 细分子类型
+    if err_name == "InvalidProposalError":
+        code = _classify_invalid_proposal(e)
+
     zh, en = _ERROR_MESSAGES.get(code, ("操作失败", "Operation failed"))
     msg = f"{zh} / {en}: {e}"
-    return cls(success=False, message=msg, retryable=(code == "STORAGE_ERROR"), **extra)
+
+    # UnsafeSchemaChangeError 专项恢复
+    if err_name == "UnsafeSchemaChangeError":
+        suggested_actions, context = _build_unsafe_schema_actions(e)
+    else:
+        suggested_actions = list(_RECOVERY_MAP.get(code, []))
+        context = {}
+
+    data = {
+        "error_code": code,
+        "suggested_actions": suggested_actions,
+        "context": context,
+    }
+
+    return cls(success=False, message=msg, retryable=(code == "STORAGE_ERROR"), data=data, **extra)
 
 
 # ── data_describe ──
@@ -119,7 +238,7 @@ class DataQueryInput(SkillInput):
     object_type: str = Field(..., description="业务对象类型名（如 Contact、Task、Activity）")
     record_id: Optional[str] = Field(None, description="单条查询：记录 ID")
     keyword: Optional[str] = Field(None, description="关键词搜索")
-    search_mode: str = Field("keyword", description="搜索模式: keyword/semantic（MVP 仅支持 keyword）")
+    search_mode: str = Field("keyword", description="搜索模式: keyword / semantic / hybrid")
     filters: Optional[list[dict[str, Any]]] = Field(None, description="条件过滤列表 [{field, operator, value}]")
     sort_by: Optional[str] = Field(None, description="排序字段")
     sort_order: str = Field("asc", description="排序方向 asc/desc")
@@ -164,11 +283,40 @@ class DataQuerySkill(BaseSkill[DataQueryInput, DataQueryOutput]):
                 return DataQueryOutput(success=True, message="查询成功", output=record)
 
             if params.keyword:
+                # semantic / hybrid 模式走知识库搜索
+                if params.search_mode in ("semantic", "hybrid"):
+                    from app.services.knowledge import get_knowledge_search_service
+                    search_svc = get_knowledge_search_service()
+                    if params.search_mode == "semantic":
+                        results = await search_svc.semantic_search(
+                            query=params.keyword, top_k=params.limit,
+                        )
+                    else:
+                        results = await search_svc.hybrid_search(
+                            query=params.keyword, keyword=params.keyword,
+                            top_k=params.limit,
+                        )
+                    output = {
+                        "records": [
+                            {
+                                "document_id": r.document_id,
+                                "chunk_id": r.chunk_id,
+                                "text": r.text,
+                                "relevance_score": r.score,
+                                "source_title": r.source_title,
+                            }
+                            for r in results
+                        ],
+                        "total": len(results),
+                    }
+                    return DataQueryOutput(success=True, message="搜索成功", output=output)
+
+                # keyword 模式走结构化数据搜索
                 # search_mode 校验
-                if params.search_mode == "semantic":
+                if params.search_mode != "keyword":
                     return DataQueryOutput(
                         success=False,
-                        message="语义搜索功能尚未启用 / Semantic search not yet available",
+                        message=f"不支持的搜索模式: {params.search_mode}",
                         output=None,
                     )
                 result = await svc.search_records(
@@ -303,7 +451,33 @@ class DataProposeSkill(BaseSkill[DataProposeInput, DataProposeOutput]):
                 expected_version=params.expected_version,
                 trace_id=trace_id,
             )
-            return DataProposeOutput(success=True, message="提案创建成功", output=result)
+
+            # 低风险提案自动 commit（兑现 approval_mode=auto 语义）
+            risk_level = result.get("risk_level", "high")
+            if risk_level == "low":
+                try:
+                    commit_result = await svc.commit_proposal(
+                        proposal_id=result["proposal_id"],
+                        approved_by="auto",
+                        trace_id=trace_id,
+                    )
+                    commit_result["auto_committed"] = True
+                    return DataProposeOutput(
+                        success=True,
+                        message="低风险提案已自动提交 / Low-risk proposal auto-committed",
+                        output=commit_result,
+                    )
+                except Exception as commit_err:
+                    # 自动 commit 失败时降级为返回提案，让 Planner 手动 commit
+                    logger.warning("[DataPropose] auto-commit failed: %s", commit_err)
+                    result["auto_committed"] = False
+                    result["auto_commit_error"] = str(commit_err)
+                    return DataProposeOutput(success=True, message="提案创建成功（自动提交失败）", output=result)
+
+            # 高风险提案：返回 proposal_id，需要 Planner 调 data_commit 确认
+            result["auto_committed"] = False
+            result["needs_commit"] = True
+            return DataProposeOutput(success=True, message="提案创建成功，需确认后提交", output=result)
 
         except Exception as e:
             return _error_output(DataProposeOutput, e)

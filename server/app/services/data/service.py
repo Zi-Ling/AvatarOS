@@ -300,7 +300,45 @@ class DataService:
                     },
                 ],
             },
+            "recent_schema_changes": await self._get_recent_schema_changes(),
         }
+
+    async def _get_recent_schema_changes(self) -> list[dict[str, Any]]:
+        """从审计日志获取最近 schema 变更，静默降级为空列表。"""
+        if not self._workflow or not hasattr(self._workflow, "list_schema_audit_logs"):
+            return []
+        try:
+            logs = await self._workflow.list_schema_audit_logs(limit=20)
+            changes = []
+            for log in logs:
+                after = log.get("after_snapshot") or {}
+                if isinstance(after, str):
+                    try:
+                        import json
+                        after = json.loads(after)
+                    except (ValueError, TypeError):
+                        after = {}
+                operation = log.get("operation", "")
+                object_type = log.get("object_type", "")
+                changed_at = log.get("changed_at", "")
+                # summary: 优先 reason，其次 after_snapshot 中的 summary，最后拼接
+                summary = log.get("reason") or ""
+                if not summary and isinstance(after, dict):
+                    summary = after.get("summary", "")
+                if not summary:
+                    summary = f"{operation} {object_type}"
+                # 截断至 80 字符
+                if len(summary) > 80:
+                    summary = summary[:80]
+                changes.append({
+                    "operation": operation,
+                    "object_type": object_type,
+                    "changed_at": changed_at,
+                    "summary": summary,
+                })
+            return changes
+        except Exception:
+            return []
 
 
     # ── 提案操作委托 ──

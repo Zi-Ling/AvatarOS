@@ -100,8 +100,12 @@ class AgentLoop:
     async def _tick_inner(self) -> None:
         """Core tick logic without timeout wrapper.
 
-        In monitor_only mode, only sense + monitor phases run.
         Full mode: sense → schedule → execute → monitor → goal_review.
+        Monitor-only mode: sense + monitor phases only.
+
+        In full mode, the execute phase only runs when the kernel has an
+        active_task_id assigned by the scheduler (cooperative with
+        GraphController's user-initiated execution).
         """
         signals: list[RuntimeSignal] = []
 
@@ -112,9 +116,12 @@ class AgentLoop:
             # Phase 2: Schedule
             signals += await self._schedule_phase()
 
-            # Phase 3: Execute
-            slice_result = await self._execute_phase()
-            signals += slice_result.signals
+            # Phase 3: Execute (only if kernel has an active task)
+            if self._kernel.active_task_id is not None:
+                slice_result = await self._execute_phase()
+                signals += slice_result.signals
+            else:
+                slice_result = SliceResult(terminal=False)
         else:
             slice_result = SliceResult(terminal=False)
 

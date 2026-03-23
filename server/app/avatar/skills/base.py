@@ -24,6 +24,7 @@ class SideEffect(str, Enum):
     EXEC = "exec"
     HUMAN = "human"
     BROWSER = "browser"  # 浏览器自动化：需要联网沙箱（browser sandbox）
+    GUI_CONTROL = "gui_control"  # 桌面 GUI 操控：直接作用于宿主系统，无沙箱隔离
     DATA_READ = "data_read"  # 结构化数据层：读操作
     DATA_WRITE = "data_write"  # 结构化数据层：写操作
 
@@ -73,6 +74,7 @@ class SkillSpec:
     tags: List[str] = field(default_factory=list)
     dedup_mode: str = "fuzzy"  # "skip" | "exact" | "fuzzy"
     output_contract: Optional['SkillOutputContract'] = None  # 声明式输出契约，避免运行时推断
+    requires_host_desktop: bool = False  # 显式声明：必须在宿主机桌面环境执行（GUI 操控类技能）
 
 
 class BaseSkill(ABC, Generic[InT, OutT]):

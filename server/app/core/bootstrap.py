@@ -48,6 +48,7 @@ class AppBootstrap:
         self._init_learning()
         llm_logger = self._init_llm_logger()
         llm_client = self._init_llm_client(llm_logger)
+        self.app.state.llm_client = llm_client
         self._warmup_skills()
         await self._init_data_layer()
         self._warmup_executors()
@@ -57,6 +58,7 @@ class AppBootstrap:
         self._init_socket_bridge()
         self._init_scheduler()
         self._init_long_task_runtime()
+        self._init_workflow_orchestration()
         self._init_socket_log_handler()
         self._init_fs_watcher()
 
@@ -108,6 +110,16 @@ class AppBootstrap:
                 logger.info("  ├─ AvatarMain 已清理")
             except Exception as e:
                 logger.warning(f"  ├─ AvatarMain 清理失败: {e}")
+
+        # 清理浏览器会话
+        if hasattr(self.app.state, "browser_session_manager"):
+            try:
+                mgr = self.app.state.browser_session_manager
+                for sid in list(mgr._sessions.keys()):
+                    await mgr.destroy_session(sid)
+                logger.info("  ├─ BrowserSessionManager 已清理")
+            except Exception as e:
+                logger.warning(f"  ├─ BrowserSessionManager 清理失败: {e}")
 
         # 清理所有执行器（容器池 shutdown、移除容器）
         try:
@@ -205,6 +217,21 @@ class AppBootstrap:
 
     def _init_runtime(self, llm_client):
         logger.info("🚀 初始化 Avatar 运行时...")
+
+        # Initialize resilience primitives
+        try:
+            from app.core.resilience import ResilienceRegistry, CircuitBreakerConfig
+            resilience = ResilienceRegistry.get_instance()
+            resilience.get_or_create_breaker(
+                "llm", CircuitBreakerConfig(failure_threshold=5, recovery_timeout_s=60.0),
+            )
+            resilience.get_or_create_breaker(
+                "skill_execution", CircuitBreakerConfig(failure_threshold=10, recovery_timeout_s=30.0),
+            )
+            resilience.get_or_create_bulkhead("graph_execution", max_concurrent=10, max_queue=20)
+            logger.info("  ✅ Resilience primitives initialized")
+        except Exception as res_err:
+            logger.warning(f"  ⚠️ Resilience init failed: {res_err}")
 
         # Probe feature flags before AvatarMain init
         try:
@@ -336,6 +363,7 @@ class AppBootstrap:
         self.app.state.task_session_manager = task_session_mgr
         self.app.state.task_scheduler = task_scheduler
         self.app.state.artifact_dep_graph = artifact_dep_graph
+        self.app.state.interrupt_manager = interrupt_mgr
 
         # 启动恢复流程
         startup_recovery = StartupRecovery(
@@ -348,6 +376,195 @@ class AppBootstrap:
         logger.info("  ├─ TaskSessionManager 就绪")
         logger.info("  ├─ TaskScheduler 就绪 (long=1, simple=2)")
         logger.info("  └─ 长任务运行时初始化完成")
+
+    def _init_workflow_orchestration(self):
+        """初始化工作流编排层：组装所有 StepExecutor 并注入 InstanceManager。"""
+        logger.info("⚙️  初始化工作流编排层...")
+
+        from app.services.workflow.step_executor import (
+            OutputContractValidator,
+            SkillStepExecutor,
+            TaskSessionStepExecutor,
+            PollingCompletionWaiter,
+        )
+        from app.services.workflow.dag_scheduler import WorkflowDAGScheduler
+        from app.services.workflow.param_resolver import ParamResolver
+        from app.services.workflow.instance_manager import InstanceManager
+
+        # ── 基础组件 ──
+        output_validator = OutputContractValidator()
+        dag_scheduler = WorkflowDAGScheduler()
+        param_resolver = ParamResolver()
+
+        # ── Skill StepExecutor ──
+        from app.avatar.skills.registry import skill_registry
+        skill_executor = SkillStepExecutor(skill_registry, output_validator)
+
+        # ── TaskSession StepExecutor ──
+        from app.services.task_session_store import TaskSessionStore
+        task_session_executor = TaskSessionStepExecutor(
+            task_session_store=TaskSessionStore,
+            avatar_runtime=self.app.state.avatar_runtime,
+            completion_waiter=PollingCompletionWaiter(TaskSessionStore),
+            output_validator=output_validator,
+        )
+
+        # ── Browser Automation StepExecutor ──
+        browser_executor = None
+        try:
+            from app.services.browser.session_manager import SessionManager
+            from app.services.browser.executor import BrowserAutomationStepExecutor
+            session_manager = SessionManager()
+            browser_executor = BrowserAutomationStepExecutor(
+                session_manager=session_manager,
+                output_validator=output_validator,
+            )
+            self.app.state.browser_session_manager = session_manager
+            logger.info("  ├─ BrowserAutomationStepExecutor 就绪")
+        except Exception as e:
+            logger.warning(f"  ├─ BrowserAutomationStepExecutor 初始化跳过: {e}")
+
+        # ── L1 Native Adapter StepExecutor ──
+        native_adapter_executor = None
+        try:
+            from app.services.adapter.registry import AdapterRegistry
+            from app.services.adapter.security_policy import SecurityPolicy
+            from app.services.adapter.executor import NativeAdapterStepExecutor
+            from app.services.adapter.examples.file_system import FileSystemAdapter
+            from app.services.adapter.examples.http_api import HttpApiAdapter
+            from app.services.adapter.examples.shell_command import ShellCommandAdapter
+
+            adapter_registry = AdapterRegistry()
+            adapter_registry.register(FileSystemAdapter())
+            adapter_registry.register(HttpApiAdapter())
+            adapter_registry.register(ShellCommandAdapter())
+
+            security_policy = SecurityPolicy()
+            native_adapter_executor = NativeAdapterStepExecutor(
+                registry=adapter_registry,
+                security_policy=security_policy,
+                output_validator=output_validator,
+            )
+            self.app.state.adapter_registry = adapter_registry
+            logger.info(f"  ├─ NativeAdapterStepExecutor 就绪 ({len(adapter_registry.list_all())} adapters)")
+        except Exception as e:
+            logger.warning(f"  ├─ NativeAdapterStepExecutor 初始化跳过: {e}")
+
+        # ── Execution Routing (RoutingStepExecutor) ──
+        routed_executor = None
+        try:
+            from app.services.adapter.models import ExecutionLayer
+            from app.services.execution.strategy_router import StrategyRouter
+            from app.services.execution.executor import RoutingStepExecutor
+
+            strategy_router = StrategyRouter(
+                adapter_registry=adapter_registry if native_adapter_executor else AdapterRegistry(),
+            )
+
+            # 注册各层执行器到 StrategyRouter
+            if native_adapter_executor:
+                async def _l1_executor(req):
+                    """L1 层：委托 NativeAdapterStepExecutor。"""
+                    from app.services.execution.strategy_router import LayerResult
+                    from app.services.workflow.models import WorkflowStepDef
+                    step = WorkflowStepDef(
+                        step_id="routing_l1", name="L1 routed",
+                        executor_type="native_adapter",
+                        params={
+                            "adapter_name": req.params.get("adapter_name", ""),
+                            "operation_name": req.params.get("operation_name", ""),
+                            "operation_params": req.params.get("operation_params", {}),
+                        },
+                    )
+                    result = await native_adapter_executor.execute(step, {}, "routing")
+                    return LayerResult(
+                        success=result.success,
+                        outputs=result.outputs,
+                        error_code=result.error or "",
+                        degradable=result.success is False,
+                    )
+                strategy_router.register_layer_executor(ExecutionLayer.L1_NATIVE, _l1_executor)
+
+            if browser_executor:
+                async def _l2_executor(req):
+                    """L2 层：委托 BrowserAutomationStepExecutor。"""
+                    from app.services.execution.strategy_router import LayerResult
+                    from app.services.workflow.models import WorkflowStepDef
+                    step = WorkflowStepDef(
+                        step_id="routing_l2", name="L2 routed",
+                        executor_type="browser_automation",
+                        params={"actions": req.params.get("actions", [])},
+                    )
+                    result = await browser_executor.execute(step, {}, "routing")
+                    return LayerResult(
+                        success=result.success,
+                        outputs=result.outputs,
+                        error_code=result.error or "",
+                        degradable=result.success is False,
+                    )
+                strategy_router.register_layer_executor(ExecutionLayer.L2_BROWSER, _l2_executor)
+
+            # ── L4 Computer Use ──
+            computer_use_runtime = None
+            try:
+                from app.services.computer.runtime import ComputerUseRuntime
+                from app.services.artifact_store import ArtifactStore
+                from app.services.approval_service import get_approval_service
+
+                _event_bus = self.app.state.avatar_runtime.event_bus
+                _interrupt_mgr = getattr(self.app.state, "interrupt_manager", None)
+                _llm_client = self.app.state.llm_client
+
+                computer_use_runtime = ComputerUseRuntime(
+                    llm_client=_llm_client,
+                    event_bus=_event_bus,
+                    artifact_store=ArtifactStore,
+                    approval_service=get_approval_service(),
+                    interrupt_manager=_interrupt_mgr,
+                )
+
+                async def _l4_executor(req):
+                    """L4 层：委托 ComputerUseRuntime。"""
+                    from app.services.execution.strategy_router import LayerResult
+                    result = await computer_use_runtime.execute(
+                        goal=req.params.get("goal", ""),
+                        ctx=req.params.get("context"),
+                    )
+                    return LayerResult(
+                        success=result.success,
+                        outputs={"result_summary": result.result_summary, "steps_taken": result.steps_taken},
+                        error_code=result.failure_reason or "",
+                        degradable=False,  # L4 是最后一层，不可再降级
+                    )
+                strategy_router.register_layer_executor(ExecutionLayer.L4_COMPUTER_USE, _l4_executor)
+                self.app.state.computer_use_runtime = computer_use_runtime
+                logger.info("  ├─ L4 ComputerUseRuntime 已注册到 StrategyRouter")
+            except Exception as e:
+                logger.warning(f"  ├─ L4 ComputerUseRuntime 注册跳过: {e}")
+
+            routed_executor = RoutingStepExecutor(strategy_router, output_validator)
+            self.app.state.strategy_router = strategy_router
+            logger.info("  ├─ RoutingStepExecutor 就绪")
+        except Exception as e:
+            logger.warning(f"  ├─ RoutingStepExecutor 初始化跳过: {e}")
+
+        # ── 组装 InstanceManager ──
+        instance_manager = InstanceManager(
+            dag_scheduler=dag_scheduler,
+            param_resolver=param_resolver,
+            skill_executor=skill_executor,
+            task_session_executor=task_session_executor,
+            browser_automation_executor=browser_executor,
+            native_adapter_executor=native_adapter_executor,
+            routed_executor=routed_executor,
+        )
+
+        # 注入 API 层
+        from app.api.workflow.instances import set_instance_manager
+        set_instance_manager(instance_manager)
+        self.app.state.instance_manager = instance_manager
+
+        logger.info("  └─ 工作流编排层初始化完成")
 
     def _init_socket_log_handler(self):
         logger.info("📡 初始化 SocketLogHandler...")

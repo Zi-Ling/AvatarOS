@@ -15,6 +15,10 @@ from app.llm.types import LLMMessage, LLMResponse, LLMRole
 
 class OpenAIClient(BaseLLMClient):
 
+    @property
+    def supports_vision(self) -> bool:
+        return True
+
     def __init__(self, config, llm_logger=None):
         super().__init__(config, llm_logger)
         if OpenAI is None:

@@ -38,8 +38,8 @@ class ExecutionLifecycle:
         self._planner_invocation_index = 0
         self._execution_started = False  # 是否已 transition 到 running
 
-        from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
-        self._trace = StepTraceStore()
+        from app.avatar.runtime.graph.storage.step_trace_store import get_step_trace_store
+        self._trace = get_step_trace_store()
 
     # ------------------------------------------------------------------
     # Session 启动（created -> planned 在首个有效 plan 后触发）

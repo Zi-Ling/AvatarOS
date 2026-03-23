@@ -541,9 +541,8 @@ async def execute_task(
         if decision.top_skills:
             try:
                 skill_schemas = {}
-                from app.avatar.skills.registry import SkillRegistry
-                registry = SkillRegistry()
-                all_descs = registry.describe_skills()
+                from app.avatar.skills.registry import skill_registry
+                all_descs = skill_registry.describe_skills()
                 for sk in decision.top_skills:
                     if sk in all_descs:
                         skill_schemas[sk] = all_descs[sk]

@@ -25,6 +25,7 @@ export function CreateScheduleDialog({ open, onClose, onSuccess }: CreateSchedul
   const toast = useToast();
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
+  const [description, setDescription] = useState("");
   const [hour, setHour] = useState("9");
   const [minute, setMinute] = useState("0");
   const [frequency, setFrequency] = useState<Frequency>("daily");
@@ -59,6 +60,7 @@ export function CreateScheduleDialog({ open, onClose, onSuccess }: CreateSchedul
         name: name.trim(),
         cron: buildCron(),
         task_goal: goal.trim(),
+        description: description.trim() || undefined,
       });
       toast.success("创建成功", "定时任务已添加");
       onSuccess();
@@ -66,6 +68,7 @@ export function CreateScheduleDialog({ open, onClose, onSuccess }: CreateSchedul
       // 重置表单
       setName("");
       setGoal("");
+      setDescription("");
       setHour("9");
       setMinute("0");
       setFrequency("daily");
@@ -124,6 +127,20 @@ export function CreateScheduleDialog({ open, onClose, onSuccess }: CreateSchedul
               placeholder="例：检查并汇总今日邮件，生成摘要报告"
               rows={3}
               className={cn(inputCls, "resize-none")}
+            />
+          </div>
+
+          {/* 任务描述（可选） */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+              描述 <span className="text-slate-400 font-normal">(可选)</span>
+            </label>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="例：用于每日工作汇报"
+              className={inputCls}
             />
           </div>
 

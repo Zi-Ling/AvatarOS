@@ -41,7 +41,7 @@ interface TraceData {
 }
 
 interface TraceViewerProps {
-  sessionId: string;
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------

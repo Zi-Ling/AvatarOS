@@ -19,8 +19,8 @@ router = APIRouter(prefix="/api/trace", tags=["trace"])
 
 
 def _get_trace_store():
-    from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
-    return StepTraceStore()
+    from app.avatar.runtime.graph.storage.step_trace_store import get_step_trace_store
+    return get_step_trace_store()
 
 
 def _resolve_exec_session_id(session_id: str) -> str:

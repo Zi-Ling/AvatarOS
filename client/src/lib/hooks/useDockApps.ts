@@ -4,20 +4,23 @@ import { useState, useEffect } from 'react';
 import { AppId } from '@/lib/apps';
 
 const STORAGE_KEY = 'ia-dock-pinned-apps';
-const DEFAULT_PINNED: AppId[] = ['workspace', 'schedule', 'knowledge'];
+const DEFAULT_PINNED: AppId[] = ['workspace', 'schedule', 'knowledge', 'workflow'];
 
 export function useDockApps() {
   const [pinnedAppIds, setPinnedAppIds] = useState<AppId[]>(DEFAULT_PINNED);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  // Load from localStorage on mount
+  // Load from localStorage on mount, auto-merge new default apps
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
       try {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed)) {
-          setPinnedAppIds(parsed);
+          // 自动补充 DEFAULT_PINNED 中新增但 localStorage 里缺失的 app
+          const missing = DEFAULT_PINNED.filter(id => !parsed.includes(id));
+          const merged = missing.length > 0 ? [...parsed, ...missing] : parsed;
+          setPinnedAppIds(merged);
         }
       } catch (e) {
         console.error("Failed to parse pinned apps", e);

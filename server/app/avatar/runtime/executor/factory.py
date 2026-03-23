@@ -31,6 +31,7 @@ from .firecracker import FirecrackerExecutor
 from .sandbox import SandboxExecutor
 from .browser_sandbox import BrowserSandboxExecutor
 from .wasm_plugin import WasmPluginExecutor
+from .desktop import DesktopExecutor
 from app.avatar.skills.base import SkillRiskLevel, SideEffect
 
 logger = logging.getLogger(__name__)
@@ -54,12 +55,13 @@ class ExecutorFactory:
     _local_executor: Optional[LocalExecutor] = None
     _process_executor: Optional[ProcessExecutor] = None
     _wasm_executor: Optional[WASMExecutor] = None
-    _wasm_plugin_executor: Optional[WasmPluginExecutor] = None  # 新增
+    _wasm_plugin_executor: Optional[WasmPluginExecutor] = None
     _kata_executor: Optional[KataExecutor] = None
     _docker_executor: Optional[DockerExecutor] = None
     _firecracker_executor: Optional[FirecrackerExecutor] = None
     _sandbox_executor: Optional[SandboxExecutor] = None
     _browser_sandbox_executor: Optional[BrowserSandboxExecutor] = None
+    _desktop_executor: Optional[DesktopExecutor] = None
     
     # 执行器优先级映射（用于 AUTO 模式）
     _executor_priority = {
@@ -90,7 +92,22 @@ class ExecutorFactory:
         skill_name = skill.spec.name
         logger.debug(f"[ExecutorFactory] Selecting executor for {skill_name} (risk={risk_level}, side_effects={side_effects})")
 
-        # Guardrail: BROWSER side_effect → 强制 Browser Sandbox（联网隔离容器）
+        # Guardrail 0: requires_host_desktop → 强制 DesktopExecutor（capability-based routing）
+        if getattr(skill.spec, 'requires_host_desktop', False):
+            desktop = cls._get_desktop_executor()
+            if desktop.supports(skill):
+                logger.debug(f"[ExecutorFactory] {skill_name} requires_host_desktop=True, routing to DesktopExecutor")
+                return desktop
+            else:
+                # 声明了 requires_host_desktop 但不在白名单 → 安全拒绝
+                logger.error(
+                    f"[ExecutorFactory] {skill_name} requires_host_desktop=True but "
+                    f"DesktopExecutor does not support it (not in whitelist). "
+                    f"Falling back to LocalExecutor as last resort."
+                )
+                return cls._get_local_executor()
+
+        # Guardrail 1: BROWSER side_effect → 强制 Browser Sandbox（联网隔离容器）
         if SideEffect.BROWSER in side_effects:
             logger.debug(f"[ExecutorFactory] {skill_name} has BROWSER side_effect, routing to BrowserSandboxExecutor")
             return cls._get_browser_sandbox_executor()
@@ -150,6 +167,24 @@ class ExecutorFactory:
             cls._browser_sandbox_executor = BrowserSandboxExecutor()
             logger.info("[ExecutorFactory] Created BrowserSandboxExecutor instance")
         return cls._browser_sandbox_executor
+
+    @classmethod
+    def _get_desktop_executor(cls) -> DesktopExecutor:
+        """
+        获取 DesktopExecutor 实例（宿主机 GUI 执行通道）
+
+        自动注入 ApprovalService（如果可用）。
+        """
+        if cls._desktop_executor is None:
+            approval_service = None
+            try:
+                from app.services.approval_service import get_approval_service
+                approval_service = get_approval_service()
+            except Exception as e:
+                logger.warning(f"[ExecutorFactory] Failed to get ApprovalService: {e}")
+            cls._desktop_executor = DesktopExecutor(approval_service=approval_service)
+            logger.info("[ExecutorFactory] Created DesktopExecutor instance")
+        return cls._desktop_executor
     
     @classmethod
     def _get_executor_instance(cls, executor_type: str) -> Optional[SkillExecutor]:
@@ -316,6 +351,10 @@ class ExecutorFactory:
         if cls._browser_sandbox_executor:
             cls._browser_sandbox_executor.cleanup()
             cls._browser_sandbox_executor = None
+
+        if cls._desktop_executor:
+            cls._desktop_executor.cleanup()
+            cls._desktop_executor = None
         
         if cls._firecracker_executor:
             cls._firecracker_executor.cleanup()

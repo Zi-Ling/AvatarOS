@@ -51,6 +51,7 @@ class ScreenCaptureSkill(BaseSkill):
         risk_level=SkillRiskLevel.READ,
         aliases=["screen.capture", "screenshot", "take_screenshot"],
         tags=["screenshot", "capture", "screen", "截图", "屏幕", "截屏"],
+        requires_host_desktop=True,
         output_contract=SkillOutputContract(value_kind=ValueKind.BINARY, transport_mode=TransportMode.ARTIFACT),
     )
 
@@ -74,6 +75,7 @@ class ScreenInfoSkill(BaseSkill):
         risk_level=SkillRiskLevel.READ,
         aliases=["screen.info", "get_screen_size"],
         tags=["screen", "resolution", "cursor", "屏幕", "分辨率", "鼠标位置"],
+        requires_host_desktop=True,
         output_contract=SkillOutputContract(value_kind=ValueKind.JSON, transport_mode=TransportMode.INLINE),
     )
 

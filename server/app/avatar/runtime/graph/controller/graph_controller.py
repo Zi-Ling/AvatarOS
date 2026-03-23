@@ -90,6 +90,7 @@ class GraphController(
         max_planner_cost: Optional[float] = None,
         max_execution_cost: Optional[float] = None,
         evolution_pipeline: Optional['EvolutionPipeline'] = None,
+        budget_account: Optional[Any] = None,
         task_def_engine: Optional[Any] = None,
         clarification_engine: Optional[Any] = None,
         complexity_analyzer: Optional[Any] = None,
@@ -107,6 +108,7 @@ class GraphController(
         self.max_planner_cost = max_planner_cost
         self.max_execution_cost = max_execution_cost
         self._evolution_pipeline = evolution_pipeline
+        self._budget_account = budget_account
 
         self._task_def_engine = task_def_engine
         self._clarification_engine = clarification_engine
@@ -511,6 +513,11 @@ class GraphController(
                 # Execution cost budget
                 _cost_action = self._check_execution_cost(s)
                 if _cost_action == "abort":
+                    return s.final_result
+
+                # BudgetAccount enforcement (session/task level)
+                _ba_action = self._check_budget_account(s)
+                if _ba_action == "abort":
                     return s.final_result
 
                 # Circuit breaker
@@ -1004,7 +1011,6 @@ class GraphController(
         from app.avatar.runtime.graph.models.execution_graph import ExecutionGraph, GraphStatus
         from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
 
-        _start = _time.time()
         _start_mono = _time.monotonic()
 
         try:
@@ -1019,10 +1025,14 @@ class GraphController(
                 SubtaskGraph, SubtaskNode, SubtaskEdge,
             )
 
-            # ── 1. 组装依赖 ──
-            role_registry = RoleSpecRegistry()
-            spawn_policy = SpawnPolicy()
-            artifact_store = ArtifactStore()
+            # ── 1. 组装依赖（优先使用 Kernel 注册的实例，fallback 到新建） ──
+            _kernel_registry = getattr(self, '_multi_agent_registry', None)
+            _kernel_spawn_policy = getattr(self, '_multi_agent_spawn_policy', None)
+            _kernel_artifact_store = getattr(self, '_multi_agent_artifact_store', None)
+
+            role_registry = _kernel_registry if _kernel_registry is not None else RoleSpecRegistry()
+            spawn_policy = _kernel_spawn_policy if _kernel_spawn_policy is not None else SpawnPolicy()
+            artifact_store = _kernel_artifact_store if _kernel_artifact_store is not None else ArtifactStore()
             trace = TraceIntegration()
 
             supervisor = Supervisor(
@@ -1066,8 +1076,10 @@ class GraphController(
                 return await self._execute_react_mode(intent, env_context, config)
 
             rules_ok, rules_errors = graph_validator.validate_rules(subtask_graph)
-            if not rules_errors:
+            if rules_ok:
                 logger.info("[MultiAgent] 子任务图校验通过, %d 个节点", len(subtask_graph.nodes))
+            else:
+                logger.warning("[MultiAgent] 子任务图校验有问题: %s", rules_errors)
 
             # ── 5. 按拓扑层级并行执行 ──
             parallel_groups = subtask_graph.get_parallel_groups()
@@ -1078,7 +1090,7 @@ class GraphController(
             for layer_idx, layer_node_ids in enumerate(parallel_groups):
                 # 终止检查
                 _round += 1
-                should_stop = termination_eval.check(_round, _start, subtask_graph)
+                should_stop = termination_eval.check(_round, _start_mono, subtask_graph)
                 if should_stop:
                     logger.info("[MultiAgent] TerminationEvaluator 触发终止, round=%d", _round)
                     break
@@ -1197,7 +1209,25 @@ class GraphController(
             graph.status = GraphStatus.SUCCESS if all_success else GraphStatus.FAILED
 
             # Emit task.completed via EventBus (unified event source)
-            self._emit_task_completed(graph, env_context)
+            # 传入子任务数量，避免空 graph 导致 step_count=0
+            try:
+                from app.avatar.runtime.events.types import Event, EventType
+                if self.runtime.event_bus:
+                    event = Event(
+                        type=EventType.TASK_COMPLETED,
+                        source="graph_controller",
+                        payload={
+                            "session_id": env_context.get("session_id", ""),
+                            "task": {
+                                "id": str(graph.id),
+                                "status": "FAILED" if not all_success else "SUCCESS",
+                            },
+                            "step_count": len(subtask_graph.nodes),
+                        },
+                    )
+                    self.runtime.event_bus.publish(event)
+            except Exception as _evt_err:
+                logger.debug("[EventEmitter] multi-agent task.completed failed: %s", _evt_err)
 
             return ExecutionResult(
                 graph=graph,

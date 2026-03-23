@@ -9,6 +9,7 @@ export const routes = {
   chat: "/chat",
   schedule: "/schedule",
   knowledge: "/knowledge",
+  workflow: "/workflow",
   avatar: "/avatar",
 } as const;
 

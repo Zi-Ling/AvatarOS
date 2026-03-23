@@ -17,6 +17,7 @@ export interface CreateScheduleDto {
   name: string;
   cron: string;
   task_goal: string;
+  description?: string;
 }
 
 export interface ScheduleStats {

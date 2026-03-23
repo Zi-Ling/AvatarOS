@@ -139,8 +139,8 @@ async def get_health():
 
     # StepTraceStore
     try:
-        from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
-        StepTraceStore()
+        from app.avatar.runtime.graph.storage.step_trace_store import get_step_trace_store
+        get_step_trace_store()
         modules["step_trace_store"] = {"status": "ok"}
     except Exception as e:
         modules["step_trace_store"] = {"status": "error", "detail": str(e)}

@@ -85,6 +85,14 @@ class WorkflowStorage(Protocol):
 
     async def get_relations(self, object_type: str, record_id: str) -> list[dict[str, Any]]: ...
 
+    async def list_schema_audit_logs(self, limit: int = 20) -> list[dict[str, Any]]:
+        """查询 schema 变更审计日志（record_id='__schema__' 的条目）。
+
+        这是 schema 变更历史的专用窄接口，仅用于 describe_objects 的 recent_schema_changes。
+        未来可能被通用审计查询接口替代。
+        """
+        ...
+
 
 @runtime_checkable
 class SchemaStorage(Protocol):
@@ -504,6 +512,28 @@ class SQLiteBackend:
                     d["metadata"] = json.loads(d["metadata"])
                 except (json.JSONDecodeError, TypeError):
                     pass
+            results.append(d)
+        return results
+
+    # ── Schema 审计日志查询 ──
+
+    async def list_schema_audit_logs(self, limit: int = 20) -> list[dict[str, Any]]:
+        """查询 schema 变更审计日志（record_id='__schema__'），按 changed_at 降序。"""
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM audit_log WHERE record_id = '__schema__' ORDER BY changed_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            d = dict(row)
+            for key in ("before_snapshot", "after_snapshot"):
+                if d.get(key) and isinstance(d[key], str):
+                    try:
+                        d[key] = json.loads(d[key])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
             results.append(d)
         return results
 

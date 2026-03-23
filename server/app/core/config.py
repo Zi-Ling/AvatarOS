@@ -51,6 +51,13 @@ class Config(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com"
     llm_api_key: str = ""
 
+    # Vision LLM 配置（可选，用于 computer.use 等需要多模态的场景）
+    # 不配则 fallback 到主 LLM（如果主 LLM 不支持 vision 会报错）
+    vision_llm_provider: str = ""
+    vision_llm_model: str = ""
+    vision_llm_base_url: str = ""
+    vision_llm_api_key: str = ""
+
     # Web 搜索 API（多 provider 支持，按优先级自动选择）
     # 商业 API（配了哪个用哪个，优先级：Brave > Google > Tavily）
     brave_api_key: str = ""

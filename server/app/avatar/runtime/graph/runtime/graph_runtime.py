@@ -18,6 +18,8 @@ import asyncio
 from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
+from collections import defaultdict
+from threading import Lock
 
 if TYPE_CHECKING:
     from app.avatar.runtime.graph.models.execution_graph import ExecutionGraph
@@ -28,6 +30,83 @@ if TYPE_CHECKING:
     from app.avatar.runtime.events.bus import EventBus
 
 logger = logging.getLogger(__name__)
+
+
+class GraphRuntimeMetrics:
+    """Graph 执行指标收集器，Prometheus 文本格式导出。"""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._execution_count: int = 0
+        self._success_count: int = 0
+        self._failure_count: int = 0
+        self._cost_total: float = 0.0
+        self._duration_seconds: list[float] = []
+        self._node_status_count: Dict[str, int] = defaultdict(int)  # {status: count}
+
+    def record_graph_completed(self, duration: float, success: bool, cost: float = 0.0) -> None:
+        with self._lock:
+            self._execution_count += 1
+            self._duration_seconds.append(duration)
+            self._cost_total += cost
+            if success:
+                self._success_count += 1
+            else:
+                self._failure_count += 1
+
+    def record_node_status(self, status: str) -> None:
+        with self._lock:
+            self._node_status_count[status] += 1
+
+    def get_prometheus_metrics(self) -> str:
+        with self._lock:
+            lines = []
+            lines.append("# HELP graph_execution_total Total graph executions")
+            lines.append("# TYPE graph_execution_total counter")
+            lines.append(f"graph_execution_total {self._execution_count}")
+
+            lines.append("# HELP graph_execution_success_total Successful graph executions")
+            lines.append("# TYPE graph_execution_success_total counter")
+            lines.append(f"graph_execution_success_total {self._success_count}")
+
+            lines.append("# HELP graph_execution_failure_total Failed graph executions")
+            lines.append("# TYPE graph_execution_failure_total counter")
+            lines.append(f"graph_execution_failure_total {self._failure_count}")
+
+            lines.append("# HELP graph_execution_cost_total Accumulated execution cost (USD)")
+            lines.append("# TYPE graph_execution_cost_total counter")
+            lines.append(f"graph_execution_cost_total {self._cost_total:.6f}")
+
+            if self._duration_seconds:
+                avg = sum(self._duration_seconds) / len(self._duration_seconds)
+                lines.append("# HELP graph_execution_duration_seconds Average execution duration")
+                lines.append("# TYPE graph_execution_duration_seconds gauge")
+                lines.append(f"graph_execution_duration_seconds {avg:.6f}")
+
+            lines.append("# HELP graph_node_status_total Node completions by status")
+            lines.append("# TYPE graph_node_status_total counter")
+            for status, count in self._node_status_count.items():
+                lines.append(f'graph_node_status_total{{status="{status}"}} {count}')
+
+            return "\n".join(lines) + "\n"
+
+    def reset(self) -> None:
+        with self._lock:
+            self._execution_count = 0
+            self._success_count = 0
+            self._failure_count = 0
+            self._cost_total = 0.0
+            self._duration_seconds.clear()
+            self._node_status_count.clear()
+
+
+# 全局 graph runtime 指标收集器
+_graph_runtime_metrics = GraphRuntimeMetrics()
+
+
+def get_graph_runtime_metrics() -> GraphRuntimeMetrics:
+    """获取全局 graph runtime 指标收集器。"""
+    return _graph_runtime_metrics
 
 
 class ExecutionMode(str, Enum):
@@ -117,6 +196,7 @@ class GraphRuntime:
             self.default_context = context
             self.event_bus = event_bus
             self.config = config or {}
+            self.metrics = _graph_runtime_metrics
 
             logger.info("GraphRuntime initialized")
 
@@ -298,6 +378,9 @@ class GraphRuntime:
                     "failed_nodes": result.failed_nodes
                 }
             )
+
+            # 记录 Prometheus 指标
+            self.metrics.record_graph_completed(execution_time, result.success)
             
             logger.info(
                 f"[GraphRuntime] Graph execution completed: {graph.id} "
@@ -394,6 +477,7 @@ class GraphRuntime:
         # Emit node completed/failed events
         for node, result in zip(nodes, results):
             if result.success:
+                self.metrics.record_node_status("success")
                 self._emit_event(
                     "node_completed",
                     {
@@ -404,6 +488,7 @@ class GraphRuntime:
                     }
                 )
             else:
+                self.metrics.record_node_status("failed")
                 self._emit_event(
                     "node_failed",
                     {
@@ -721,8 +806,9 @@ class GraphRuntime:
             }
         )
         
-        # TODO: Emit Prometheus metric when observability layer is implemented
-        # graph_execution_cost_total.labels(graph_id=graph_id).set(cost)
+        # 记录到 Prometheus 指标（累加 cost）
+        with self.metrics._lock:
+            self.metrics._cost_total += cost
     
     def _check_resource_limits(
         self,

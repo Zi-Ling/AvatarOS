@@ -306,3 +306,17 @@ class StepTraceStore:
             "final_status": final_status,
         }
 
+
+# ---------------------------------------------------------------------------
+# 模块级单例
+# ---------------------------------------------------------------------------
+_step_trace_store: Optional[StepTraceStore] = None
+
+
+def get_step_trace_store() -> StepTraceStore:
+    """返回全局 StepTraceStore 单例，避免重复实例化。"""
+    global _step_trace_store
+    if _step_trace_store is None:
+        _step_trace_store = StepTraceStore()
+    return _step_trace_store
+

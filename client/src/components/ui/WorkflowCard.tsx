@@ -8,24 +8,24 @@
 
 import React from 'react';
 
-interface StageRun {
-  stage_id: string;
-  stage_name: string;
-  status: 'pending' | 'running' | 'success' | 'failed' | 'skipped';
+interface StepRun {
+  step_id: string;
+  step_name: string;
+  status: string;
   duration?: number;
   error?: string;
 }
 
 interface WorkflowRun {
   id: string;
-  workflow_id: string;
+  template_id: string;
   workflow_name: string;
-  status: 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
+  status: string;
   start_time?: number;
   end_time?: number;
   duration?: number;
   error?: string;
-  stage_runs?: StageRun[];
+  step_runs?: StepRun[];
 }
 
 interface WorkflowCardProps {
@@ -37,29 +37,26 @@ interface WorkflowCardProps {
 export function WorkflowCard({ workflow, onCancel, onViewDetail }: WorkflowCardProps) {
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'running':
-        return 'bg-blue-500';
-      case 'success':
-        return 'bg-green-500';
-      case 'failed':
-        return 'bg-red-500';
-      case 'pending':
-        return 'bg-gray-400';
-      case 'cancelled':
-        return 'bg-gray-500';
-      default:
-        return 'bg-gray-300';
+      case 'running': return 'bg-blue-500';
+      case 'completed': case 'success': return 'bg-green-500';
+      case 'failed': return 'bg-red-500';
+      case 'created': case 'pending': return 'bg-gray-400';
+      case 'cancelled': case 'paused': return 'bg-gray-500';
+      default: return 'bg-gray-300';
     }
   };
 
   const getStatusText = (status: string) => {
     const statusMap: Record<string, string> = {
+      created: '已创建',
       pending: '等待中',
       running: '执行中',
+      completed: '成功',
       success: '成功',
       failed: '失败',
       cancelled: '已取消',
-      skipped: '已跳过'
+      paused: '已暂停',
+      skipped: '已跳过',
     };
     return statusMap[status] || status;
   };
@@ -71,9 +68,10 @@ export function WorkflowCard({ workflow, onCancel, onViewDetail }: WorkflowCardP
     return `${(seconds / 3600).toFixed(1)}小时`;
   };
 
-  const completedStages = workflow.stage_runs?.filter(s => s.status === 'success').length || 0;
-  const totalStages = workflow.stage_runs?.length || 0;
-  const progress = totalStages > 0 ? (completedStages / totalStages) * 100 : 0;
+  const steps = workflow.step_runs || [];
+  const completedSteps = steps.filter(s => s.status === 'completed' || s.status === 'success').length;
+  const totalSteps = steps.length;
+  const progress = totalSteps > 0 ? (completedSteps / totalSteps) * 100 : 0;
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 hover:shadow-md transition-shadow">
@@ -93,9 +91,8 @@ export function WorkflowCard({ workflow, onCancel, onViewDetail }: WorkflowCardP
           </p>
         </div>
 
-        {/* Actions */}
         <div className="flex gap-2">
-          {workflow.status === 'running' && onCancel && (
+          {(workflow.status === 'running' || workflow.status === 'created') && onCancel && (
             <button
               onClick={() => onCancel(workflow.id)}
               className="text-sm text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
@@ -117,10 +114,10 @@ export function WorkflowCard({ workflow, onCancel, onViewDetail }: WorkflowCardP
       </div>
 
       {/* Progress Bar */}
-      {workflow.status === 'running' && totalStages > 0 && (
+      {workflow.status === 'running' && totalSteps > 0 && (
         <div className="mb-3">
           <div className="flex justify-between text-xs text-gray-600 dark:text-gray-400 mb-1">
-            <span>进度: {completedStages}/{totalStages} 阶段</span>
+            <span>进度: {completedSteps}/{totalSteps} 步骤</span>
             <span>{progress.toFixed(0)}%</span>
           </div>
           <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
@@ -132,23 +129,23 @@ export function WorkflowCard({ workflow, onCancel, onViewDetail }: WorkflowCardP
         </div>
       )}
 
-      {/* Stages List */}
-      {workflow.stage_runs && workflow.stage_runs.length > 0 && (
+      {/* Steps List */}
+      {steps.length > 0 && (
         <div className="space-y-2 mb-3">
-          {workflow.stage_runs.slice(0, 3).map((stage) => (
-            <div key={stage.stage_id} className="flex items-center gap-2 text-sm">
-              <div className={`w-2 h-2 rounded-full ${getStatusColor(stage.status)}`} />
+          {steps.slice(0, 3).map((step) => (
+            <div key={step.step_id} className="flex items-center gap-2 text-sm">
+              <div className={`w-2 h-2 rounded-full ${getStatusColor(step.status)}`} />
               <span className="flex-1 text-gray-700 dark:text-gray-300">
-                {stage.stage_name}
+                {step.step_name}
               </span>
               <span className="text-xs text-gray-500 dark:text-gray-400">
-                {stage.duration ? formatDuration(stage.duration) : '-'}
+                {step.duration ? formatDuration(step.duration) : '-'}
               </span>
             </div>
           ))}
-          {workflow.stage_runs.length > 3 && (
+          {steps.length > 3 && (
             <div className="text-xs text-gray-500 dark:text-gray-400 pl-4">
-              还有 {workflow.stage_runs.length - 3} 个阶段...
+              还有 {steps.length - 3} 个步骤...
             </div>
           )}
         </div>
@@ -179,26 +176,3 @@ export function WorkflowCard({ workflow, onCancel, onViewDetail }: WorkflowCardP
 }
 
 export default WorkflowCard;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

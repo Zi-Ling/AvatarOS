@@ -45,8 +45,8 @@ async def get_cost_summary():
 @router.get("/sessions")
 async def list_session_costs(
     limit: int = Query(50, ge=1, le=200),
-    sort_by: str = Query("cost", regex="^(cost|tokens|created_at)$"),
-    order: str = Query("desc", regex="^(asc|desc)$"),
+    sort_by: str = Query("cost", pattern="^(cost|tokens|created_at)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
 ):
     """按 session 列出成本，支持按 cost/tokens/created_at 排序。"""
     with Session(engine) as db:

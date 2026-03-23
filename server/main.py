@@ -34,12 +34,14 @@ from app.api import (
     skill_router,
     trace_router, cost_router, approval_router, history_router, policy_router,
     workspace_router, filesystem_router, artifacts_router,
-    memory_router, state_router, knowledge_router, learning_router,
-    settings_router, maintenance_router, schedule_router, workflow_router,
+    memory_router, state_router, knowledge_router, learning_router, semantic_router,
+    settings_router, maintenance_router, schedule_router,
 )
 from app.api.log import logging_router
 from app.api.task_session import router as task_session_router
 from app.api.task_scheduler_api import router as task_scheduler_router
+from app.api.workflow import orchestration_router
+from app.api.health import router as health_router
 from app.core.config import config
 from app.io.manager import SocketManager
 
@@ -99,13 +101,17 @@ for router in [
     # workspace
     workspace_router, filesystem_router, artifacts_router,
     # knowledge
-    memory_router, state_router, knowledge_router, learning_router,
+    memory_router, state_router, knowledge_router, learning_router, semantic_router,
     # setting
-    settings_router, maintenance_router, schedule_router, workflow_router,
+    settings_router, maintenance_router, schedule_router,
     # log
     logging_router,
     # long-task runtime
     task_session_router, task_scheduler_router,
+    # workflow orchestration (DAG-based)
+    orchestration_router,
+    # health & resilience
+    health_router,
 ]:
     fastapi_app.include_router(router)
 

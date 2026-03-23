@@ -42,7 +42,7 @@ class VerificationGateMixin:
             from app.avatar.runtime.verification.repair_loop import RepairLoop
             from app.avatar.runtime.verification.verifier_registry import VerifierRegistry
             from app.avatar.runtime.verification.models import GateVerdict, RiskLevel
-            from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
+            from app.avatar.runtime.graph.storage.step_trace_store import get_step_trace_store
         except ImportError as e:
             logger.warning(f"[VerificationGate] Import failed, skipping: {e}")
             return "break_pass"
@@ -80,7 +80,7 @@ class VerificationGateMixin:
             env_context["goal_coverage_summary"] = coverage_summary
             env_context["goal_coverage_hint"] = coverage_summary.to_planner_hint()
 
-            _trace_store = StepTraceStore()
+            _trace_store = get_step_trace_store()
             _registry = VerifierRegistry()
             _gate = CompletionGate(_registry, _trace_store)
 

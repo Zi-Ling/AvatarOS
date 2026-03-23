@@ -44,27 +44,104 @@ class ComplexityAssessment:
 class ComplexityEvaluator:
     """复杂度评估器.
 
-    Phase 1 为纯规则引擎（不使用 LLM），基于可配置阈值判定模式。
-    阈值参数可通过构造函数注入，支持运行时调整。
+    支持两种模式：
+    - LLM 模式（llm_client 不为 None）：使用 LLM 判定任务复杂度
+    - 规则模式（fallback）：基于关键词匹配的启发式判定
+
+    LLM 调用失败时自动降级到规则模式。
     """
+
+    # LLM 评估提示词
+    _LLM_PROMPT = (
+        "You are a task complexity analyzer. Given a user intent, determine if it "
+        "requires single-agent or multi-agent execution.\n\n"
+        "Criteria for multi_agent:\n"
+        "- Task involves 3+ independent subtasks that can run in parallel\n"
+        "- Task spans multiple domains (e.g., research + implement + test)\n"
+        "- Task requires independent verification of results\n"
+        "- Task is complex enough that decomposition improves quality\n\n"
+        "Respond in JSON format ONLY:\n"
+        '{"mode": "single_agent" or "multi_agent", '
+        '"estimated_subtask_count": <int>, '
+        '"needs_verification": <bool>, '
+        '"involves_multi_domain": <bool>, '
+        '"reasoning": "<brief explanation>", '
+        '"confidence": <float 0-1>}\n\n'
+        "User intent: {intent}"
+    )
 
     def __init__(
         self,
         subtask_threshold: int = 3,
         multi_domain_keywords: Optional[List[str]] = None,
+        llm_client: Optional[Any] = None,
     ) -> None:
         self.subtask_threshold = subtask_threshold
         self.multi_domain_keywords = multi_domain_keywords or [
             "research", "verify", "test", "deploy", "analyze",
             "design", "implement", "review", "integrate",
         ]
+        self._llm_client = llm_client
 
     def evaluate(self, intent: str, env_context: Dict[str, Any]) -> ComplexityAssessment:
-        """基于规则评估任务复杂度."""
+        """评估任务复杂度。优先使用 LLM，失败时降级到规则引擎。"""
+        # Force flags 优先
+        if env_context.get("force_multi_agent"):
+            return ComplexityAssessment(
+                mode="multi_agent", confidence=0.9,
+                reasoning="force_multi_agent flag set",
+            )
+        if env_context.get("force_single_agent"):
+            return ComplexityAssessment(
+                mode="single_agent", confidence=0.9,
+                reasoning="force_single_agent flag set",
+            )
+
+        # LLM 模式
+        if self._llm_client is not None:
+            try:
+                return self._evaluate_with_llm(intent)
+            except Exception as e:
+                logger.warning(f"[ComplexityEvaluator] LLM evaluation failed, falling back to rules: {e}")
+
+        # 规则模式（fallback）
+        return self._evaluate_with_rules(intent, env_context)
+
+    def _evaluate_with_llm(self, intent: str) -> ComplexityAssessment:
+        """使用 LLM 评估复杂度。"""
+        import json as _json
+
+        prompt = self._LLM_PROMPT.format(intent=intent[:500])
+        # 同步调用 LLM（ComplexityEvaluator 在同步上下文中使用）
+        response = self._llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=200,
+        )
+
+        # 解析 LLM 响应
+        content = response.get("content", "") if isinstance(response, dict) else str(response)
+        # 提取 JSON（可能被 markdown 包裹）
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        data = _json.loads(content.strip())
+
+        return ComplexityAssessment(
+            mode=data.get("mode", "single_agent"),
+            estimated_subtask_count=data.get("estimated_subtask_count", 1),
+            needs_independent_verification=data.get("needs_verification", False),
+            involves_multi_domain=data.get("involves_multi_domain", False),
+            reasoning=f"[LLM] {data.get('reasoning', '')}",
+            confidence=data.get("confidence", 0.7),
+        )
+
+    def _evaluate_with_rules(self, intent: str, env_context: Dict[str, Any]) -> ComplexityAssessment:
+        """基于规则评估任务复杂度（原始实现）。"""
         intent_lower = intent.lower()
         words = intent_lower.split()
 
-        # 估算子任务数量
         domain_hits = sum(
             1 for kw in self.multi_domain_keywords if kw in intent_lower
         )
@@ -75,18 +152,10 @@ class ComplexityEvaluator:
             kw in intent_lower for kw in ("verify", "test", "validate", "check")
         )
 
-        # 长度启发
         if len(words) > 50:
             estimated_count = max(estimated_count, 3)
 
-        # 环境上下文提示
-        if env_context.get("force_multi_agent"):
-            mode = "multi_agent"
-            confidence = 0.9
-        elif env_context.get("force_single_agent"):
-            mode = "single_agent"
-            confidence = 0.9
-        elif estimated_count >= self.subtask_threshold:
+        if estimated_count >= self.subtask_threshold:
             mode = "multi_agent"
             confidence = min(0.5 + domain_hits * 0.1, 0.9)
         else:
@@ -94,7 +163,7 @@ class ComplexityEvaluator:
             confidence = 0.7
 
         reasoning = (
-            f"estimated_subtasks={estimated_count}, "
+            f"[rules] estimated_subtasks={estimated_count}, "
             f"multi_domain={involves_multi_domain}, "
             f"needs_verification={needs_verification}, "
             f"word_count={len(words)}"
@@ -281,7 +350,7 @@ class TerminationEvaluator:
         if current_round >= self.max_rounds:
             logger.warning("[TerminationEvaluator] max rounds reached: %d", current_round)
             return True
-        elapsed = time.time() - start_time
+        elapsed = time.monotonic() - start_time
         if elapsed >= self.timeout_seconds:
             logger.warning("[TerminationEvaluator] timeout: %.1fs", elapsed)
             return True

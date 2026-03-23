@@ -27,6 +27,7 @@ from .wasm_plugin import WasmPluginExecutor
 from .kata import KataExecutor
 from .firecracker import FirecrackerExecutor
 from .sandbox import SandboxExecutor
+from .desktop import DesktopExecutor
 from .factory import ExecutorFactory
 from .metrics import ExecutorMetrics, get_metrics
 
@@ -41,6 +42,7 @@ __all__ = [
     "KataExecutor",
     "FirecrackerExecutor",
     "SandboxExecutor",
+    "DesktopExecutor",
     "ExecutorFactory",
     "ExecutorMetrics",
     "get_metrics",

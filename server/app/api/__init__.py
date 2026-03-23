@@ -32,12 +32,12 @@ from .knowledge import (
     state_router,
     knowledge_router,
     learning_router,
+    semantic_router,
 )
 from .setting import (
     settings_router,
     maintenance_router,
     schedule_router,
-    workflow_router,
 )
 
 __all__ = [
@@ -63,9 +63,9 @@ __all__ = [
     "state_router",
     "knowledge_router",
     "learning_router",
+    "semantic_router",
     # setting
     "settings_router",
     "maintenance_router",
     "schedule_router",
-    "workflow_router",
 ]

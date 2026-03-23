@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import platform
 import pyautogui
 import base64
 import io
@@ -48,4 +50,47 @@ class ScreenDriver:
             "cursor_x": x,
             "cursor_y": y
         }
+
+    # ── async wrappers for ScreenAnalyzer compatibility ───────────
+    # Use asyncio.to_thread to avoid blocking the event loop
+    # since pyautogui.screenshot() and ctypes calls are synchronous.
+
+    async def capture_full(self) -> str:
+        """Async: full-screen capture as base64 PNG (non-blocking)."""
+        return await asyncio.to_thread(self.capture_base64)
+
+    async def capture_region(
+        self, left: int, top: int, width: int, height: int
+    ) -> str:
+        """Async: region capture as base64 PNG (non-blocking)."""
+        return await asyncio.to_thread(
+            self.capture_base64, (left, top, width, height)
+        )
+
+    def get_foreground_title(self) -> str:
+        """Return the title of the current foreground window."""
+        if platform.system() != "Windows":
+            return ""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return ""
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            return buf.value
+        except Exception:
+            return ""
+
+    def get_foreground_hwnd(self) -> Optional[int]:
+        """Return the HWND of the current foreground window."""
+        if platform.system() != "Windows":
+            return None
+        try:
+            import ctypes
+            return ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            return None
 

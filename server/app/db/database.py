@@ -35,6 +35,7 @@ def init_db():
     from app.db.cost_record import CostRecordDB                           # noqa: F401
     from app.db.long_task_models import TaskSession, PlanGraphSnapshot, PatchLogEntry, StepState, ArtifactVersionRecord, ArtifactDependency, Checkpoint, ChangeRequestRecord, TaskQueueEntry  # noqa: F401
     from app.avatar.evolution.models import ExecutionTraceDB, StepRecordDB, ArtifactSnapshotDB, OutcomeRecordDB, CostTelemetryDB, LearningCandidateDB, StatusChangeDB, CostBaselineDB, EvolutionVersionDB  # noqa: F401
+    from app.db.knowledge_models import KnowledgeDocumentRecord           # noqa: F401
 
     SQLModel.metadata.create_all(engine)
     logging.getLogger(__name__).info(f"数据库初始化完成: {AVATAR_DB_PATH}")

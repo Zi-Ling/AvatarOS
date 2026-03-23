@@ -79,6 +79,25 @@ class EventType(str, Enum):
     MULTI_AGENT_COMPLETED = "multi_agent.completed"
     MULTI_AGENT_MODE_DECISION = "multi_agent.mode_decision"
 
+    # Workflow orchestration events
+    WORKFLOW_INSTANCE_COMPLETED = "workflow.instance.completed"
+
+    # Computer Use events
+    COMPUTER_OBSERVE_STARTED = "computer.observe.started"
+    COMPUTER_OBSERVE_COMPLETED = "computer.observe.completed"
+    COMPUTER_ANALYZE_COMPLETED = "computer.analyze.completed"
+    COMPUTER_LOCATE_COMPLETED = "computer.locate.completed"
+    COMPUTER_THINK_COMPLETED = "computer.think.completed"
+    COMPUTER_ACT_STARTED = "computer.act.started"
+    COMPUTER_ACT_COMPLETED = "computer.act.completed"
+    COMPUTER_VERIFY_COMPLETED = "computer.verify.completed"
+    COMPUTER_RETRY_SCHEDULED = "computer.retry.scheduled"
+    COMPUTER_STUCK_DETECTED = "computer.stuck.detected"
+    COMPUTER_APPROVAL_REQUESTED = "computer.approval.requested"
+    COMPUTER_INTERRUPTED = "computer.interrupted"
+    COMPUTER_FINISHED = "computer.finished"
+    COMPUTER_PROGRESS = "computer.progress"
+
 
 @dataclass
 class Event:

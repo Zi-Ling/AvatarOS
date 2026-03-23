@@ -24,6 +24,7 @@ export function MainShell({ children }: MainShellProps) {
   const tabFromPath = (path: string): DockTab => {
     if (path === '/schedule') return 'schedule';
     if (path === '/knowledge') return 'knowledge';
+    if (path === '/workflow') return 'workflow';
     if (path === '/avatar') return 'avatar';
     return 'workspace';
   };
@@ -55,6 +56,9 @@ export function MainShell({ children }: MainShellProps) {
         setIsLeftPanelOpen(false);
     } else if (tab === 'knowledge') {
         router.push('/knowledge');
+        setIsLeftPanelOpen(false);
+    } else if (tab === 'workflow') {
+        router.push('/workflow');
         setIsLeftPanelOpen(false);
     } else if (tab === 'avatar') {
         router.push('/avatar');

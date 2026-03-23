@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # 合法状态转换表
 _VALID_TRANSITIONS: Dict[str, list] = {
-    "created":   ["planned", "running", "failed", "cancelled"],
+    "created":   ["planned", "running", "completed", "failed", "cancelled"],
     "planned":   ["running", "failed", "cancelled"],
     "running":   ["waiting", "completed", "failed", "cancelled"],
     "waiting":   ["running", "failed", "cancelled"],
@@ -124,8 +124,8 @@ class ExecutionSessionStore:
             if new_status not in allowed:
                 # 写 invalid_transition trace event
                 try:
-                    from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
-                    StepTraceStore().record_session_event(
+                    from app.avatar.runtime.graph.storage.step_trace_store import get_step_trace_store
+                    get_step_trace_store().record_session_event(
                         session_id=session_id,
                         event_type="invalid_transition",
                         payload={"from": current, "to": new_status, "reason": "not in allowed transitions"},

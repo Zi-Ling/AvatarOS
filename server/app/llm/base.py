@@ -35,9 +35,25 @@ class BaseLLMClient(ABC):
     # ── Shared helpers ──
 
     @staticmethod
-    def _convert_messages(messages: List[LLMMessage]) -> List[Dict[str, str]]:
-        """Convert LLMMessage list to OpenAI-style dicts."""
-        return [{"role": msg.role.value, "content": msg.content} for msg in messages]
+    def _convert_messages(messages: List[LLMMessage]) -> List[Dict[str, Any]]:
+        """Convert LLMMessage list to OpenAI-style dicts.
+        
+        支持 multimodal content：如果 msg.content 是合法 JSON 数组，
+        则作为 content parts 传递（OpenAI vision 格式）。
+        """
+        result = []
+        for msg in messages:
+            content = msg.content
+            # 检测 multimodal content（JSON 数组格式）
+            if content.startswith("["):
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, list):
+                        content = parsed  # 保持为 list，OpenAI API 接受
+                except (json.JSONDecodeError, ValueError):
+                    pass  # 保持原始字符串
+            result.append({"role": msg.role.value, "content": content})
+        return result
 
     @staticmethod
     def _build_tools_payload(tools: Optional[List]) -> Optional[List[Dict]]:
@@ -110,6 +126,13 @@ class BaseLLMClient(ABC):
             usage=usage,
         )
 
+    # ── Capability declaration ──
+
+    @property
+    def supports_vision(self) -> bool:
+        """该 provider 是否支持多模态 vision（image_url）。子类可覆盖。"""
+        return False
+
     # ── Abstract interface ──
 
     @abstractmethod
@@ -136,6 +159,43 @@ class BaseLLMClient(ABC):
         """Streaming chat. Default falls back to sync. Override for true streaming."""
         response = self.chat(messages)
         yield response.content
+
+    async def chat_with_vision(self, prompt: str, image_b64: str) -> LLMResponse:
+        """
+        多模态视觉对话：发送文本 + 图片给 LLM。
+        使用 OpenAI 兼容的 multimodal content 格式。
+        如果 image_b64 为空，退化为纯文本调用。
+        不支持 vision 的 provider 会抛出 NotImplementedError。
+        """
+        import asyncio
+
+        if not self.supports_vision and image_b64:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} 不支持 vision（多模态图片）。"
+                f"请配置 VISION_LLM_* 环境变量指向支持 vision 的 provider（如 OpenAI）。"
+            )
+
+        if not image_b64:
+            # 纯文本退化
+            msg = LLMMessage(role=LLMRole.USER, content=prompt)
+            return await asyncio.get_event_loop().run_in_executor(
+                None, self.chat, [msg]
+            )
+
+        # 构建 multimodal 消息（OpenAI vision 格式）
+        vision_message = LLMMessage(
+            role=LLMRole.USER,
+            content=json.dumps([
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                },
+            ]),
+        )
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self.chat, [vision_message]
+        )
 
     def call(self, prompt: str, json_schema: Optional[dict] = None) -> str:
         """Simplified interface: string in, string out."""

@@ -19,6 +19,7 @@ class ExecutionStrategy(Enum):
     LOCAL = "local"              # 本地执行（无隔离）
     PROCESS = "process"          # 进程隔离
     DOCKER = "docker"            # Docker 容器
+    DESKTOP = "desktop"          # 宿主机 GUI 执行通道（受控桌面驱动）
     WASM = "wasm"                # WASM 沙箱（未来）
     KATA = "kata"                # Kata Containers（未来）
     FIRECRACKER = "firecracker"  # Firecracker MicroVM（接口预留）

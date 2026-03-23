@@ -2,10 +2,11 @@ import {
   FolderOpen, 
   CalendarClock, 
   BookOpen, 
-  Ghost
+  Ghost,
+  Workflow
 } from "lucide-react";
 
-export type AppId = 'workspace' | 'schedule' | 'knowledge' | 'avatar';
+export type AppId = 'workspace' | 'schedule' | 'knowledge' | 'workflow' | 'avatar';
 
 export interface AppDefinition {
   id: AppId;
@@ -49,6 +50,14 @@ export const APP_REGISTRY: AppDefinition[] = [
     color: 'text-emerald-500', 
     path: '/knowledge',
     description: 'Long-term memory and RAG documents.'
+  },
+  { 
+    id: 'workflow', 
+    label: 'Workflow', 
+    icon: Workflow, 
+    color: 'text-orange-500', 
+    path: '/workflow',
+    description: 'Task-level orchestration and automation pipelines.'
   },
 ];
 

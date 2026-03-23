@@ -3,7 +3,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlmodel import Session, select
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 
 from app.db.database import engine
@@ -11,10 +11,22 @@ from app.db.task.schedule import Schedule
 from app.core.config import config
 from app.io.manager import SocketManager
 
-# 避免循环引用，这里只做类型提示
-# from app.avatar.runtime.loop import AgentLoop 
-
 logger = logging.getLogger(__name__)
+
+
+def _validate_cron(expression: str) -> bool:
+    """校验 cron 表达式合法性（5 段标准格式）。"""
+    parts = expression.strip().split()
+    if len(parts) != 5:
+        return False
+    try:
+        CronTrigger(
+            minute=parts[0], hour=parts[1],
+            day=parts[2], month=parts[3], day_of_week=parts[4],
+        )
+        return True
+    except Exception:
+        return False
 
 class SchedulerService:
     def __init__(self):
@@ -40,14 +52,20 @@ class SchedulerService:
         self._load_jobs_from_db()
     
     def _load_jobs_from_db(self):
-        """
-        Sync in-memory scheduler with DB
-        """
+        """Sync in-memory scheduler with DB."""
         with Session(engine) as session:
             schedules = session.exec(select(Schedule).where(Schedule.is_active == True)).all()
+            loaded, skipped = 0, 0
             for s in schedules:
+                if not _validate_cron(s.cron_expression):
+                    logger.warning(
+                        f"📅 Schedule {s.id} ({s.name}) has invalid cron '{s.cron_expression}', skipping"
+                    )
+                    skipped += 1
+                    continue
                 self._add_job_to_scheduler(s)
-            logger.info(f"📅 Loaded {len(schedules)} active schedules from DB")
+                loaded += 1
+            logger.info(f"📅 Loaded {loaded} active schedules from DB (skipped {skipped} invalid)")
 
     def _add_job_to_scheduler(self, schedule: Schedule):
         """
@@ -145,8 +163,9 @@ class SchedulerService:
             logger.error("AvatarRuntime not initialized in Scheduler")
 
     def _check_dependencies(self, schedule_id: str) -> bool:
-        """
-        检查任务依赖是否满足：所有依赖 schedule 的最近一次 Run 必须是 completed
+        """检查任务依赖是否满足：所有依赖 schedule 的最近一次 Run 必须是 completed。
+
+        优化：使用 JSON 字段索引查询代替全表扫描 + Python 过滤。
         """
         with Session(engine) as session:
             schedule = session.get(Schedule, schedule_id)
@@ -154,6 +173,7 @@ class SchedulerService:
                 return True
 
             from app.db.task.task import Task, Run
+            from sqlalchemy import func, cast, String, text
 
             for dep_schedule_id in schedule.depends_on:
                 dep_schedule = session.get(Schedule, dep_schedule_id)
@@ -161,19 +181,22 @@ class SchedulerService:
                     logger.warning(f"Dependency {dep_schedule_id} not found, blocking execution")
                     return False
 
-                # 找到该 schedule 触发的最近一次 Task（task_mode=scheduled，
-                # intent_spec 里 metadata.schedule_id 匹配）
+                # SQLite JSON 提取：json_extract(intent_spec, '$.metadata.schedule_id')
+                # 直接在 SQL 层过滤，避免全表扫描
                 dep_tasks = session.exec(
-                    select(Task).where(Task.task_mode == "scheduled")
+                    select(Task.id).where(
+                        Task.task_mode == "scheduled",
+                        text(
+                            "json_extract(intent_spec, '$.metadata.schedule_id') = :sid"
+                        ).bindparams(sid=dep_schedule_id),
+                    )
                 ).all()
-                dep_task_ids = [
-                    t.id for t in dep_tasks
-                    if t.intent_spec.get("metadata", {}).get("schedule_id") == dep_schedule_id
-                ]
 
-                if not dep_task_ids:
+                if not dep_tasks:
                     logger.info(f"Dependency {dep_schedule_id} has never run")
                     return False
+
+                dep_task_ids = list(dep_tasks)
 
                 # 取最近一次 Run
                 latest_run = session.exec(
@@ -195,11 +218,13 @@ class SchedulerService:
         with Session(engine) as session:
             s = session.get(Schedule, schedule_id)
             if s:
-                s.last_run_at = datetime.utcnow()
+                s.last_run_at = datetime.now(timezone.utc)
                 session.add(s)
                 session.commit()
 
     def create_schedule(self, name: str, cron: str, intent: dict):
+        if not _validate_cron(cron):
+            raise ValueError(f"Invalid cron expression: {cron}")
         with Session(engine) as session:
             s = Schedule(
                 name=name,

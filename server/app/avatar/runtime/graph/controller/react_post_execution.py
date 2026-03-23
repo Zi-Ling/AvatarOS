@@ -186,6 +186,42 @@ class ReactPostExecutionMixin:
             return "abort"
         return None
 
+    def _check_budget_account(self, s: 'ReactLoopState') -> Optional[str]:
+        """
+        Check BudgetAccount session/task limits.
+
+        Returns:
+            "abort" — budget exceeded, s.final_result set
+            None    — within budget or no BudgetAccount configured
+        """
+        if not getattr(self, '_budget_account', None):
+            return None
+        try:
+            _session_id = s.session_id or s.exec_session_id
+            _task_id = str(s.graph.id) if s.graph else ""
+            decision = self._budget_account.check_budget(_session_id, _task_id)
+            from app.avatar.runtime.policy.policy_engine import PolicyDecision
+            if decision == PolicyDecision.DENY:
+                s.error_message = (
+                    f"Session budget exceeded — execution halted. "
+                    f"session={_session_id}"
+                )
+                logger.error(f"[BudgetAccount] {s.error_message}")
+                from app.avatar.runtime.graph.models.execution_graph import GraphStatus
+                s.graph.status = GraphStatus.FAILED
+                s.final_result = self._make_error_result(
+                    s.graph, error_message=s.error_message,
+                )
+                return "abort"
+            elif decision == PolicyDecision.REQUIRE_APPROVAL:
+                logger.warning(
+                    "[BudgetAccount] Task budget exceeded — approval required. "
+                    "Continuing (soft enforcement)."
+                )
+        except Exception as _ba_err:
+            logger.debug(f"[BudgetAccount] check_budget failed: {_ba_err}")
+        return None
+
     def _update_task_runtime_state(self, s: 'ReactLoopState') -> None:
         """Update TaskRuntimeState with completed nodes."""
         if s.task_runtime_state is None:

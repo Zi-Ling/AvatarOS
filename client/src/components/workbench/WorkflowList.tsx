@@ -9,16 +9,24 @@
 import React, { useEffect, useState } from 'react';
 import { WorkflowCard } from '../ui/WorkflowCard';
 
+interface StepRun {
+  step_id: string;
+  step_name: string;
+  status: string;
+  duration?: number;
+  error?: string;
+}
+
 interface WorkflowRun {
   id: string;
-  workflow_id: string;
+  template_id: string;
   workflow_name: string;
-  status: 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
+  status: string;
   start_time?: number;
   end_time?: number;
   duration?: number;
   error?: string;
-  stage_runs?: any[];
+  step_runs?: StepRun[];
 }
 
 export function WorkflowList() {
@@ -28,15 +36,13 @@ export function WorkflowList() {
 
   useEffect(() => {
     fetchWorkflows();
-    
-    // 定期刷新（每5秒）
     const interval = setInterval(fetchWorkflows, 5000);
     return () => clearInterval(interval);
   }, []);
 
   const fetchWorkflows = async () => {
     try {
-      const response = await fetch('/api/workflow/runs?limit=10');
+      const response = await fetch('/workflows/instances?limit=10');
       if (!response.ok) throw new Error('Failed to fetch workflows');
       
       const data = await response.json();
@@ -51,8 +57,12 @@ export function WorkflowList() {
   };
 
   const handleCancel = async (id: string) => {
-    // TODO: 实现取消工作流的API
-    console.log('Cancel workflow:', id);
+    try {
+      await fetch(`/workflows/instances/${id}/cancel`, { method: 'POST' });
+      fetchWorkflows();
+    } catch (err) {
+      console.error('Cancel workflow failed:', err);
+    }
   };
 
   const handleViewDetail = (id: string) => {
@@ -92,14 +102,12 @@ export function WorkflowList() {
     );
   }
 
-  // 按状态分组
-  const runningWorkflows = workflows.filter(w => w.status === 'running');
-  const completedWorkflows = workflows.filter(w => w.status === 'success');
+  const runningWorkflows = workflows.filter(w => w.status === 'running' || w.status === 'created');
+  const completedWorkflows = workflows.filter(w => w.status === 'completed');
   const failedWorkflows = workflows.filter(w => w.status === 'failed');
 
   return (
     <div className="space-y-6">
-      {/* Running Workflows */}
       {runningWorkflows.length > 0 && (
         <div>
           <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-3 flex items-center gap-2">
@@ -119,7 +127,6 @@ export function WorkflowList() {
         </div>
       )}
 
-      {/* Recently Completed */}
       {completedWorkflows.length > 0 && (
         <div>
           <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-3">
@@ -137,7 +144,6 @@ export function WorkflowList() {
         </div>
       )}
 
-      {/* Failed Workflows */}
       {failedWorkflows.length > 0 && (
         <div>
           <h3 className="text-lg font-medium text-red-600 dark:text-red-400 mb-3">
@@ -159,26 +165,3 @@ export function WorkflowList() {
 }
 
 export default WorkflowList;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

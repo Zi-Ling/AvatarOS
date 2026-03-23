@@ -139,7 +139,7 @@ async def get_session_timeline(session_id: str):
     不触发 replay 执行，只读 trace 数据。
     用于前端 Inspector 页面，无需 POST /replay。
     """
-    from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
+    from app.avatar.runtime.graph.storage.step_trace_store import get_step_trace_store
     from datetime import timezone
 
     with Session(engine) as db:
@@ -147,7 +147,7 @@ async def get_session_timeline(session_id: str):
         if not session_obj:
             raise HTTPException(status_code=404, detail="Session not found")
 
-    store = StepTraceStore()
+    store = get_step_trace_store()
 
     timeline = []
 
@@ -217,13 +217,13 @@ async def get_session_events(
     细粒度 Event Trace 查询（第三层）。
     可按 step_id / event_type 过滤，用于 Inspector / 审计 / 问题定位。
     """
-    from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
+    from app.avatar.runtime.graph.storage.step_trace_store import get_step_trace_store
     with Session(engine) as db:
         session_obj = db.get(ExecutionSession, session_id)
         if not session_obj:
             raise HTTPException(status_code=404, detail="Session not found")
 
-    store = StepTraceStore()
+    store = get_step_trace_store()
     return store.get_event_traces(session_id, step_id=step_id, event_type=event_type)
 
 

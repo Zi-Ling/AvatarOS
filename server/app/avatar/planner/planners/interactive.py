@@ -420,6 +420,21 @@ Call a tool to execute the next step, or reply with text if the goal is achieved
             )
 
         # No tool calls → LLM chose to reply with text → FINISH
+        # But first check if this was caused by output truncation
+        if response.finish_reason == "length" or (
+            response.usage
+            and response.usage.get("completion_tokens", 0) > 4000
+            and not response.content
+        ):
+            raise PlannerTruncationError(
+                skill_name="unknown",
+                message=(
+                    "LLM output was truncated (finish_reason=length), "
+                    "tool_calls could not be parsed. "
+                    f"completion_tokens={response.usage.get('completion_tokens', '?')}"
+                ),
+            )
+
         self._reset_loop_detection()
         self._last_final_message = response.content or ""
         return None

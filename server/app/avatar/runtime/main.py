@@ -227,137 +227,126 @@ class AvatarMain:
 
         if self.task_planner:
             # Use GraphController (new architecture) instead of AgentLoop
+            from app.avatar.runtime.graph.controller.graph_controller import GraphController
+            from app.avatar.runtime.graph.scheduler.scheduler import Scheduler
+            from app.avatar.runtime.graph.executor.graph_executor import GraphExecutor
+            from app.avatar.runtime.graph.executor.node_runner import NodeRunner
+            from app.avatar.runtime.graph.runtime.graph_runtime import GraphRuntime
+            from app.avatar.runtime.graph.planner.graph_planner import GraphPlanner
+
+            scheduler = Scheduler()
+
+            # SessionWorkspace + ArtifactCollector + StepTraceStore（可选）
+            _workspace = None
+            _artifact_collector = None
+            _trace_store = None
             try:
-                from app.avatar.runtime.graph.controller.graph_controller import GraphController
-                from app.avatar.runtime.graph.scheduler.scheduler import Scheduler
-                from app.avatar.runtime.graph.executor.graph_executor import GraphExecutor
-                from app.avatar.runtime.graph.executor.node_runner import NodeRunner
-                from app.avatar.runtime.graph.runtime.graph_runtime import GraphRuntime
-                from app.avatar.runtime.graph.planner.graph_planner import GraphPlanner
+                from app.avatar.runtime.workspace import get_session_workspace_manager
+                from app.avatar.runtime.workspace.artifact_collector import ArtifactCollector
+                from app.avatar.runtime.graph.storage.artifact_store import ArtifactStore
+                from app.avatar.runtime.graph.storage.step_trace_store import get_step_trace_store
+                from app.avatar.runtime.graph.storage.artifact_store import LocalStorageBackend
+                from app.core.config import AVATAR_ARTIFACTS_DIR
 
-                scheduler = Scheduler()
-
-                # SessionWorkspace + ArtifactCollector + StepTraceStore
-                _workspace = None
-                _artifact_collector = None
-                _trace_store = None
-                try:
-                    from app.avatar.runtime.workspace import get_session_workspace_manager
-                    from app.avatar.runtime.workspace.artifact_collector import ArtifactCollector
-                    from app.avatar.runtime.graph.storage.artifact_store import ArtifactStore
-                    from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
-                    from app.avatar.runtime.graph.storage.artifact_store import LocalStorageBackend
-                    from app.core.config import AVATAR_ARTIFACTS_DIR
-
-                    # workspace 不在 init 时绑定具体 session。
-                    # GraphController._execute_react_mode 会从 env_context["session_id"]
-                    # 动态创建正确的 SessionWorkspace，并注入到 ExecutionContext。
-                    # 这里只初始化无状态的 ArtifactCollector 和 TraceStore（可复用）。
-                    _artifact_backend = LocalStorageBackend(
-                        base_path=str(AVATAR_ARTIFACTS_DIR)
-                    )
-                    _artifact_store = ArtifactStore(backend=_artifact_backend)
-                    _artifact_collector = ArtifactCollector(artifact_store=_artifact_store)
-                    _trace_store = StepTraceStore()
-                    logger.info("[AvatarMain] ArtifactCollector + StepTraceStore ready")
-                except Exception as ws_err:
-                    logger.warning(f"[AvatarMain] Artifact/Trace init failed: {ws_err}")
-                    _artifact_collector = None
-                    _trace_store = None
-
-                # P0/P2: 初始化 ArtifactRegistry、PolicyEngine、BudgetAccount
-                _artifact_registry = None
-                _policy_engine = None
-                _budget_account = None
-                try:
-                    from app.avatar.runtime.artifact.registry import PersistentArtifactRegistry
-                    from app.avatar.runtime.policy.policy_engine import PolicyEngine
-                    from app.avatar.runtime.policy.budget_account import BudgetAccount
-                    # ArtifactRegistry 用 "global" session 作为共享注册表
-                    _artifact_registry = PersistentArtifactRegistry(session_id="global")
-                    # PolicyEngine 默认无规则（ALLOW all），规则可通过 /api/policy 热加载
-                    _policy_engine = PolicyEngine()
-                    _budget_account = BudgetAccount(trace_store=_trace_store)
-                    logger.info("[AvatarMain] PolicyEngine + BudgetAccount + ArtifactRegistry ready")
-                except Exception as pe_err:
-                    logger.warning(f"[AvatarMain] PolicyEngine/BudgetAccount init failed: {pe_err}")
-
-                self._graph_executor = GraphExecutor(
-                    base_path=self.base_path,  # fallback（WorkspaceManager 未初始化时）
-                    memory_manager=self.memory_manager,
-                    learning_manager=self.learning_manager,
-                    workspace=None,  # workspace 由 GraphController 按 session_id 动态注入
-                    artifact_registry=_artifact_registry,
-                    trace_store=_trace_store,
-                    policy_engine=_policy_engine,
-                    budget_account=_budget_account,
+                _artifact_backend = LocalStorageBackend(
+                    base_path=str(AVATAR_ARTIFACTS_DIR)
                 )
-                graph_executor = self._graph_executor
-                node_runner = NodeRunner(
-                    executor=graph_executor,
-                    workspace=None,  # workspace 由 ExecutionContext 携带，NodeRunner 从 context 取
-                    artifact_collector=_artifact_collector,
-                    trace_store=_trace_store,
-                )
-                graph_runtime = GraphRuntime(
-                    scheduler=scheduler,
-                    node_runner=node_runner,
-                    event_bus=self.event_bus,
-                )
-                graph_planner = GraphPlanner(llm_client=self.llm_client)
+                _artifact_store = ArtifactStore(backend=_artifact_backend)
+                _artifact_collector = ArtifactCollector(artifact_store=_artifact_store)
+                _trace_store = get_step_trace_store()
+                logger.info("[AvatarMain] ArtifactCollector + StepTraceStore ready")
+            except Exception as ws_err:
+                logger.warning(f"[AvatarMain] Artifact/Trace init failed (non-critical): {ws_err}")
 
-                # PlannerGuard with ApprovalService
-                from app.avatar.runtime.graph.guard.planner_guard import PlannerGuard, GuardConfig
-                from app.services.approval_service import get_approval_service
-                _guard = PlannerGuard(
-                    config=GuardConfig(
-                        workspace_root=str(self.base_path),
-                        enforce_workspace_isolation=True,
-                    ),
-                    approval_manager=get_approval_service(),
-                )
+            # P0/P2: ArtifactRegistry、PolicyEngine、BudgetAccount（可选）
+            _artifact_registry = None
+            _policy_engine = None
+            _budget_account = None
+            try:
+                from app.avatar.runtime.artifact.registry import PersistentArtifactRegistry
+                from app.avatar.runtime.policy.policy_engine import PolicyEngine
+                from app.avatar.runtime.policy.budget_account import BudgetAccount
+                _artifact_registry = PersistentArtifactRegistry(session_id="global")
+                _policy_engine = PolicyEngine()
+                _budget_account = BudgetAccount(trace_store=_trace_store)
+                logger.info("[AvatarMain] PolicyEngine + BudgetAccount + ArtifactRegistry ready")
+            except Exception as pe_err:
+                logger.warning(f"[AvatarMain] PolicyEngine/BudgetAccount init failed (non-critical): {pe_err}")
 
-                # ── complex-task-execution-quality 组件初始化 ──
-                _task_def_engine = None
-                _clarification_engine = None
-                _complexity_analyzer = None
-                _batch_plan_builder = None
-                _phased_planner = None
-                _collaboration_gate = None
-                try:
-                    from app.avatar.runtime.task.task_definition import TaskDefinitionEngine
-                    from app.avatar.runtime.task.clarification import ClarificationEngine
-                    from app.avatar.planner.composite.analyzer.complexity import ComplexityAnalyzer
-                    from app.avatar.runtime.graph.planner.batch_plan_builder import BatchPlanBuilder
-                    from app.avatar.runtime.task.phased_planner import PhasedPlanner
-                    from app.avatar.runtime.task.collaboration_gate import CollaborationGate
+            # 核心组件：GraphExecutor / NodeRunner / GraphRuntime（失败则 re-raise）
+            self._graph_executor = GraphExecutor(
+                base_path=self.base_path,
+                memory_manager=self.memory_manager,
+                learning_manager=self.learning_manager,
+                workspace=None,
+                artifact_registry=_artifact_registry,
+                trace_store=_trace_store,
+                policy_engine=_policy_engine,
+                budget_account=_budget_account,
+            )
+            graph_executor = self._graph_executor
+            node_runner = NodeRunner(
+                executor=graph_executor,
+                workspace=None,
+                artifact_collector=_artifact_collector,
+                trace_store=_trace_store,
+            )
+            graph_runtime = GraphRuntime(
+                scheduler=scheduler,
+                node_runner=node_runner,
+                event_bus=self.event_bus,
+            )
+            graph_planner = GraphPlanner(llm_client=self.llm_client)
 
-                    _task_def_engine = TaskDefinitionEngine()
-                    _clarification_engine = ClarificationEngine()
-                    _complexity_analyzer = ComplexityAnalyzer(llm_client=self.llm_client)
-                    _batch_plan_builder = BatchPlanBuilder()
-                    _phased_planner = PhasedPlanner()
-                    _collaboration_gate = CollaborationGate()
-                    logger.info("[AvatarMain] Task understanding components ready "
-                                "(TaskDef/Clarification/Complexity/Batch/Phased/Collaboration)")
-                except Exception as tu_err:
-                    logger.warning(f"[AvatarMain] Task understanding components init failed: {tu_err}")
+            # PlannerGuard（失败则 re-raise，安全组件不可缺）
+            from app.avatar.runtime.graph.guard.planner_guard import PlannerGuard, GuardConfig
+            from app.services.approval_service import get_approval_service
+            _guard = PlannerGuard(
+                config=GuardConfig(
+                    workspace_root=str(self.base_path),
+                    enforce_workspace_isolation=True,
+                ),
+                approval_manager=get_approval_service(),
+            )
 
-                self._graph_controller = GraphController(
-                    planner=graph_planner,
-                    runtime=graph_runtime,
-                    guard=_guard,
-                    evolution_pipeline=self._init_evolution_pipeline(),
-                    task_def_engine=_task_def_engine,
-                    clarification_engine=_clarification_engine,
-                    complexity_analyzer=_complexity_analyzer,
-                    batch_plan_builder=_batch_plan_builder,
-                    phased_planner=_phased_planner,
-                    collaboration_gate=_collaboration_gate,
-                )
-            except Exception as gc_err:
-                logger.warning(f"[AvatarMain] GraphController init failed: {gc_err}")
-                self._graph_controller = None
+            # complex-task-execution-quality 组件（可选）
+            _task_def_engine = None
+            _clarification_engine = None
+            _complexity_analyzer = None
+            _batch_plan_builder = None
+            _phased_planner = None
+            _collaboration_gate = None
+            try:
+                from app.avatar.runtime.task.task_definition import TaskDefinitionEngine
+                from app.avatar.runtime.task.clarification import ClarificationEngine
+                from app.avatar.planner.composite.analyzer.complexity import ComplexityAnalyzer
+                from app.avatar.runtime.graph.planner.batch_plan_builder import BatchPlanBuilder
+                from app.avatar.runtime.task.phased_planner import PhasedPlanner
+                from app.avatar.runtime.task.collaboration_gate import CollaborationGate
+
+                _task_def_engine = TaskDefinitionEngine()
+                _clarification_engine = ClarificationEngine()
+                _complexity_analyzer = ComplexityAnalyzer(llm_client=self.llm_client)
+                _batch_plan_builder = BatchPlanBuilder()
+                _phased_planner = PhasedPlanner()
+                _collaboration_gate = CollaborationGate()
+                logger.info("[AvatarMain] Task understanding components ready")
+            except Exception as tu_err:
+                logger.warning(f"[AvatarMain] Task understanding components init failed (non-critical): {tu_err}")
+
+            self._graph_controller = GraphController(
+                planner=graph_planner,
+                runtime=graph_runtime,
+                guard=_guard,
+                evolution_pipeline=self._init_evolution_pipeline(),
+                budget_account=_budget_account,
+                task_def_engine=_task_def_engine,
+                clarification_engine=_clarification_engine,
+                complexity_analyzer=_complexity_analyzer,
+                batch_plan_builder=_batch_plan_builder,
+                phased_planner=_phased_planner,
+                collaboration_gate=_collaboration_gate,
+            )
             # AgentLoop removed - _agent_loop kept as None for backward compat
             self._agent_loop = None
         else:
@@ -377,15 +366,11 @@ class AvatarMain:
             logger.debug(f"[AvatarMain] RuntimeKernel init skipped: {rk_err}")
             self._runtime_kernel_enabled = False
 
-    def handle_request(self, user_request: str) -> Any:
+    async def handle_request(self, user_request: str) -> Any:
+        """同步入口已废弃，改为 async。实际调用路径走 run_intent。"""
         if not self._graph_controller:
             raise RuntimeError("GraphController not initialized (missing LLM/TaskPlanner)")
-        env_context = self._build_env_context(user_request=user_request)
-        # Delegate to GraphController for new architecture
-        import asyncio
-        return asyncio.get_event_loop().run_until_complete(
-            self._graph_controller.execute(user_request, mode="react")
-        )
+        return await self._graph_controller.execute(user_request, mode="react")
 
     def _init_runtime_kernel(self) -> None:
         """Initialize RuntimeKernel and register all subsystems.
@@ -516,19 +501,26 @@ class AvatarMain:
                 self._runtime_kernel.register_subsystem("spawn_policy", self._multi_agent_spawn_policy)
                 self._runtime_kernel.register_subsystem("multi_agent_artifact_store", self._multi_agent_artifact_store)
                 logger.info("[AvatarMain] Multi-Agent Runtime subsystems registered")
+                # 将 Kernel 实例传递给 GraphController，避免 _execute_multi_agent_mode 重复创建
+                if self._graph_controller is not None:
+                    self._graph_controller._multi_agent_registry = self._multi_agent_registry
+                    self._graph_controller._multi_agent_spawn_policy = self._multi_agent_spawn_policy
+                    self._graph_controller._multi_agent_artifact_store = self._multi_agent_artifact_store
             except Exception as e:
                 logger.debug("[AvatarMain] Multi-Agent Runtime init skipped: %s", e)
 
-            # ── AgentLoop (heartbeat driver, monitor-only mode) ──
-            # Only sense + monitor phases run. Schedule + execute are disabled
-            # to avoid conflicting with GraphController's execution loop.
+            # ── AgentLoop (heartbeat driver, full mode) ──
+            # All phases run: sense → schedule → execute → monitor.
+            # Execute phase is cooperative — only runs when kernel has an
+            # active_task_id assigned by the scheduler, avoiding conflict
+            # with GraphController's user-initiated execution.
             self._runtime_agent_loop = AgentLoop(
                 kernel=self._runtime_kernel,
                 scheduler=task_scheduler,
                 monitor=self_monitor,
                 graph_adapter=adapter,
                 environment_model=env_model,
-                monitor_only=True,
+                monitor_only=False,
             )
 
             self._runtime_kernel.start()
@@ -541,7 +533,7 @@ class AvatarMain:
                 self._agent_loop_task = loop.create_task(
                     self._runtime_agent_loop.run(interval_s=10.0),
                 )
-                logger.info("[AvatarMain] AgentLoop started (monitor-only, 10s interval)")
+                logger.info("[AvatarMain] AgentLoop started (full mode, 10s interval)")
             except RuntimeError:
                 logger.info("[AvatarMain] AgentLoop deferred (no running event loop)")
 
@@ -712,7 +704,7 @@ class AvatarMain:
                 else:
                     try:
                         from app.avatar.runtime.multiagent.supervisor import ComplexityEvaluator
-                        _evaluator = ComplexityEvaluator()
+                        _evaluator = ComplexityEvaluator(llm_client=self.llm_client)
                         _assessment = _evaluator.evaluate(intent.goal, env_context)
                         if _assessment.mode == "multi_agent":
                             _exec_mode = "multi_agent"
