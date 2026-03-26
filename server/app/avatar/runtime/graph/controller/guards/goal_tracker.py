@@ -499,6 +499,19 @@ class GoalTracker:
                 )
                 return None
 
+            # Key guard: if more than one node succeeded the task clearly
+            # required multiple steps — do not short-circuit regardless of
+            # what the goal text says. This handles cases like
+            # "open notepad write date save" (no punctuation, no connectors)
+            # where the user intended sequential actions.
+            if len(successful_nodes) > 1:
+                logger.debug(
+                    "[TerminalEvidence] %d productive nodes succeeded — "
+                    "treating as multi-step, not short-circuiting",
+                    len(successful_nodes),
+                )
+                return None
+
             logger.info(
                 "[TerminalEvidence] Single-goal no-deliverable short-circuit: "
                 f"{len(successful_nodes)} node(s) all succeeded"

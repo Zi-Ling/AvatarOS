@@ -93,6 +93,7 @@ class NarrativeManager:
         goal: str,
         mapper: NarrativeMapper,
         socket_manager: Optional[Any] = None,
+        event_bus: Optional[Any] = None,
         sub_goals: Optional[List[str]] = None,
     ) -> None:
         self._session_id = session_id
@@ -100,6 +101,7 @@ class NarrativeManager:
         self._goal = goal
         self._mapper = mapper
         self._socket_manager = socket_manager
+        self._event_bus = event_bus
         self._sequence: int = 0
         self._buffer: list[NarrativeEvent] = []
         self._long_running_timers: dict[str, asyncio.TimerHandle] = {}
@@ -261,13 +263,38 @@ class NarrativeManager:
     # ── WebSocket push ────────────────────────────────────────────────
 
     async def _push(self, event: NarrativeEvent) -> None:
-        """Push a narrative event via WebSocket using ``server_event``
-        channel with ``narrative.update`` type.
+        """Push a narrative event via EventBus or WebSocket.
 
+        Priority: EventBus > SocketManager
         Retries up to MAX_PUSH_RETRIES times with exponential backoff
         (100ms / 200ms / 300ms).  On failure the event stays in the
         buffer for later replay.
         """
+        # First try EventBus
+        if self._event_bus is not None:
+            try:
+                from app.avatar.runtime.events.types import Event, EventType
+                event_obj = Event(
+                    type=EventType.TASK_UPDATED,  # Use TASK_UPDATED for narrative events
+                    source="narrative_manager",
+                    payload={
+                        "type": "narrative.update",
+                        "payload": event.to_dict(),
+                        "session_id": self._session_id,
+                    },
+                    run_id=self._task_id,
+                    step_id=event.step_id,
+                )
+                logger.debug(f"[NarrativeManager] Sending event {event.event_type} via EventBus")
+                self._event_bus.publish(event_obj)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "[NarrativeManager] EventBus push failed: %s, falling back to SocketManager",
+                    exc,
+                )
+
+        # Fallback to SocketManager
         if self._socket_manager is None:
             return
 
@@ -278,6 +305,7 @@ class NarrativeManager:
 
         for attempt in range(self.MAX_PUSH_RETRIES):
             try:
+                logger.debug(f"[NarrativeManager] Sending event {event.event_type} via SocketManager (attempt {attempt+1})")
                 await self._socket_manager.emit(
                     "server_event",
                     payload,
@@ -401,10 +429,12 @@ class FallbackNarrativeManager:
         session_id: str,
         task_id: str,
         socket_manager: Optional[Any] = None,
+        event_bus: Optional[Any] = None,
     ) -> None:
         self._session_id = session_id
         self._task_id = task_id
         self._socket_manager = socket_manager
+        self._event_bus = event_bus
 
     async def on_event(
         self,
@@ -429,6 +459,43 @@ class FallbackNarrativeManager:
             event_type = "task_failed"
             phase = "completed"
 
+        # First try EventBus
+        if self._event_bus is not None:
+            try:
+                from app.avatar.runtime.events.types import Event, EventType
+                event_obj = Event(
+                    type=EventType.TASK_UPDATED,
+                    source="fallback_narrative_manager",
+                    payload={
+                        "type": "narrative.update",
+                        "payload": {
+                            "event_id": str(uuid.uuid4()),
+                            "run_id": self._task_id,
+                            "step_id": "__run__",
+                            "event_type": event_type,
+                            "source_event_type": internal_event_type,
+                            "level": "major",
+                            "phase": phase,
+                            "status": status,
+                            "description": description,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "sequence": 1,
+                            "metadata": {},
+                        },
+                        "session_id": self._session_id,
+                    },
+                    run_id=self._task_id,
+                    step_id="__run__",
+                )
+                self._event_bus.publish(event_obj)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "[FallbackNarrativeManager] EventBus push failed: %s, falling back to SocketManager",
+                    exc,
+                )
+
+        # Fallback to SocketManager
         payload = {
             "type": "narrative.update",
             "payload": {

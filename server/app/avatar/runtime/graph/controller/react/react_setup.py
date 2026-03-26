@@ -486,12 +486,14 @@ class ReactSetupMixin:
             from app.avatar.runtime.narrative.narrative_mapper import NarrativeMapper as _NMapper
             from app.io.manager import SocketManager
             _socket_mgr = SocketManager.get_instance()
+            _event_bus = self.runtime.event_bus
             return _NM(
                 session_id=session_id or exec_session_id,
                 task_id=graph_id,
                 goal=intent,
                 mapper=_NMapper(),
                 socket_manager=_socket_mgr,
+                event_bus=_event_bus,
                 sub_goals=sub_goals,
             )
         except Exception as _nm_err:
@@ -500,15 +502,19 @@ class ReactSetupMixin:
                 from app.avatar.runtime.narrative.execution_narrative import FallbackNarrativeManager as _FNM
                 from app.io.manager import SocketManager
                 _socket_mgr = SocketManager.get_instance()
+                _event_bus = self.runtime.event_bus
                 return _FNM(
                     session_id=session_id or exec_session_id,
                     task_id=graph_id,
                     socket_manager=_socket_mgr,
+                    event_bus=_event_bus,
                 )
             except Exception as _fb_err:
                 logger.warning(f"[GraphController] FallbackNarrativeManager also failed: {_fb_err}")
                 from app.avatar.runtime.narrative.execution_narrative import FallbackNarrativeManager as _FNM
+                _event_bus = getattr(self.runtime, 'event_bus', None)
                 return _FNM(
                     session_id=session_id or exec_session_id,
                     task_id=graph_id,
+                    event_bus=_event_bus,
                 )

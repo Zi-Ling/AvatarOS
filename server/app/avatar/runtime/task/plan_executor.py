@@ -214,11 +214,14 @@ class TaskPlanExecutor:
                         break
 
                     elif hasattr(result, "success") and result.success and not all_required_satisfied:
-                        # Execution succeeded but outputs not fully produced
-                        # Mark as completed anyway — plan.mark_unit_completed handles degradation
+                        # Execution succeeded but outputs not fully produced.
+                        # mark_unit_completed will apply degradation policy and
+                        # set unit.status to COMPLETED, DEGRADED, or FAILED.
                         plan.mark_unit_completed(unit.unit_id, output_results)
-                        if unit.status == UnitStatus.DEGRADED:
-                            completed_count += 1  # degraded counts as partial success
+                        if unit.status in (UnitStatus.COMPLETED, UnitStatus.DEGRADED):
+                            completed_count += 1
+                        elif unit.status == UnitStatus.FAILED:
+                            failed_count += 1
                         success = True
                         break
 
@@ -317,7 +320,7 @@ class TaskPlanExecutor:
             f"Original user goal: {plan.original_goal}",
         ]
 
-        # Required outputs
+        # Required outputs — with explicit skill guidance
         pending = [o for o in unit.required_outputs if o.status == OutputStatus.PENDING]
         if pending:
             lines.append("")
@@ -325,14 +328,30 @@ class TaskPlanExecutor:
             for o in pending:
                 fmt = f", format: {o.format_hint}" if o.format_hint else ""
                 lines.append(f"  - {o.description} ({o.output_type}{fmt})")
+            lines.append("")
+            lines.append(
+                "To satisfy the required outputs above, you MUST use a skill that "
+                "WRITES or GENERATES content (e.g. llm.generate, llm.fallback, "
+                "fs.write, python.run). Read-only skills such as fs.list, "
+                "fs.read, state.get do NOT count as output evidence and will "
+                "NOT satisfy the output contract."
+            )
 
-        # Available inputs from upstream
+        # Available inputs from upstream — show content preview when available
         resolved = context.get("_resolved_inputs", {})
+        previews = context.get("_resolved_input_previews", {})
         if resolved:
             lines.append("")
             lines.append("Available inputs from previous sub-goals:")
             for ref_name, ref_path in resolved.items():
-                lines.append(f"  - {ref_name}: {ref_path}")
+                preview = previews.get(ref_name, "")
+                if preview:
+                    lines.append(f"  - {ref_name} (file: {ref_path}):")
+                    # Indent preview for readability
+                    for pline in preview.splitlines()[:40]:
+                        lines.append(f"    {pline}")
+                else:
+                    lines.append(f"  - {ref_name}: {ref_path}")
 
         # Previous error (if retrying)
         if unit.error_summary:
@@ -480,14 +499,18 @@ class TaskPlanExecutor:
                 # reading an old file is not evidence of goal completion.
                 for node in productive_nodes:
                     outputs = getattr(node, "outputs", None) or {}
-                    has_text = any(
-                        isinstance(v, str) and len(v) > cfg.min_text_evidence_len
-                        for v in outputs.values()
-                    )
-                    if has_text:
+                    text_values = [
+                        v for v in outputs.values()
+                        if isinstance(v, str) and len(v) > cfg.min_text_evidence_len
+                    ]
+                    if text_values:
+                        # Concatenate all text outputs and store as inline_value
+                        # so downstream units can consume the actual content.
+                        combined = "\n\n".join(text_values)
                         output_results[out.output_id] = {
                             "path": None,
                             "node_id": str(node.id),
+                            "inline_value": combined[:4000],
                         }
                         break
 
@@ -509,7 +532,29 @@ class TaskPlanExecutor:
         when the unit has required outputs. A unit that only ran fs.read
         cannot be considered "satisfied" even if output_results has entries.
         """
-        for out in unit.required_outputs:
-            if out.required and out.output_id not in output_results:
+        required = [o for o in unit.required_outputs if o.required]
+        if not required:
+            return True
+
+        for out in required:
+            if out.output_id not in output_results:
                 return False
+
+        # Verify at least one result came from a productive node (not read-only).
+        # output_results entries without a node_id are answer-type direct replies
+        # which are always considered productive.
+        has_productive_evidence = any(
+            r.get("node_id") is None  # direct reply
+            or r.get("inline_value")   # data output with actual content
+            or r.get("path") is not None  # file produced
+            for r in output_results.values()
+        )
+        if not has_productive_evidence:
+            logger.debug(
+                "[TaskPlanExecutor] Unit %s: output_results present but no "
+                "productive evidence — not satisfied",
+                unit.unit_id,
+            )
+            return False
+
         return True

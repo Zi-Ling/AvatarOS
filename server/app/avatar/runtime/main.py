@@ -705,8 +705,10 @@ class AvatarMain:
                 # 参考：OpenAI Assistants / Claude / Cursor 的设计理念
                 # 内部调试开关：env_context["force_multi_agent"] = True（绕过判定）
                 _exec_mode = "react"
+                _is_complex_task = False
                 if env_context.get("force_multi_agent"):
                     _exec_mode = "multi_agent"
+                    _is_complex_task = True
                 else:
                     try:
                         from app.avatar.runtime.multiagent.core.supervisor import ComplexityEvaluator
@@ -714,12 +716,61 @@ class AvatarMain:
                         _assessment = _evaluator.evaluate(intent.goal, env_context)
                         if _assessment.mode == "multi_agent":
                             _exec_mode = "multi_agent"
+                            _is_complex_task = True
                         logger.info(
                             "[AvatarMain] Auto-route: mode=%s, reason=%s",
                             _exec_mode, _assessment.reasoning,
                         )
                     except Exception as _route_err:
-                        logger.debug("[AvatarMain] Auto-route fallback to react: %s", _route_err)
+                        logger.warning("[AvatarMain] Auto-route fallback to react: %s", _route_err)
+
+                # ── 长任务激活链路 ──
+                # 为复杂任务自动创建 TaskSession 并启用长任务模式
+                task_session_id = env_context.get("task_session_id")
+                if not task_session_id and _is_complex_task:
+                    try:
+                        # 尝试获取 TaskSessionManager 实例
+                        import sys
+                        from app.core.application import get_app
+                        app = get_app()
+                        task_session_mgr = getattr(app.state, 'task_session_manager', None)
+                        if task_session_mgr:
+                            # 创建新的 TaskSession
+                            task_session = await task_session_mgr.create_task_session(
+                                goal=intent.goal,
+                                config={
+                                    "env_context": env_context,
+                                    "task_mode": task_mode,
+                                    "run_id": run_record.id,
+                                }
+                            )
+                            task_session_id = task_session.id
+                            env_context["task_session_id"] = task_session_id
+                            env_context["_long_task_enabled"] = True
+                            logger.info(
+                                "[AvatarMain] Created TaskSession for complex task",
+                                extra={"task_session_id": task_session_id, "run_id": run_record.id, "exec_mode": _exec_mode},
+                            )
+                            # 启动执行
+                            await task_session_mgr.start_execution(task_session_id)
+                        else:
+                            logger.error(
+                                "[AvatarMain] LONG_TASK_DISABLED: TaskSessionManager not available on app.state. "
+                                "Check startup order — task_session_manager must be initialized before first request. "
+                                "run_id=%s, exec_mode=%s",
+                                run_record.id, _exec_mode,
+                            )
+                    except Exception as _ts_err:
+                        logger.error(
+                            "[AvatarMain] LONG_TASK_DISABLED: TaskSession creation failed — long task mode will not activate. "
+                            "run_id=%s, exec_mode=%s, error=%s",
+                            run_record.id, _exec_mode, _ts_err,
+                            exc_info=True,
+                        )
+                elif task_session_id:
+                    # 已有 TaskSession（如从 gate resume 恢复），启用长任务模式
+                    env_context["_long_task_enabled"] = True
+                    logger.info(f"[AvatarMain] Using existing TaskSession {task_session_id}")
 
                 graph_result = await self._graph_controller.execute(
                     intent.goal, mode=_exec_mode, env_context=env_context,

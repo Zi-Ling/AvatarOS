@@ -127,6 +127,21 @@ class GraphController(
     Supports ReAct (iterative) and DAG (one-shot) execution modes.
     """
 
+    # 节点类型 → 角色分派表 (属性 22)
+    _ROLE_DISPATCH_TABLE: Dict[str, str] = {
+        "planner_node": "planner",
+        "research_node": "researcher",
+        "verification_node": "verifier",
+        "recovery_node": "recovery",
+        "synthesis_node": "supervisor",
+        "standard": "executor",
+    }
+
+    @classmethod
+    def register_role_dispatch(cls, node_type: str, role: str) -> None:
+        """运行时注册新的节点类型到角色映射."""
+        cls._ROLE_DISPATCH_TABLE[node_type] = role
+
     def __init__(
         self,
         planner: 'GraphPlanner',

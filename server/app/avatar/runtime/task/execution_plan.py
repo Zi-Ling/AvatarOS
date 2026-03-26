@@ -81,6 +81,7 @@ class RequiredOutput:
     actual_path: Optional[str] = None       # filled when produced
     artifact_id: Optional[str] = None       # filled when registered in ArtifactRegistry
     producing_node_id: Optional[str] = None # which graph node produced this
+    inline_value: Optional[str] = None      # inlined text content for output_type="data"
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +153,37 @@ class SubGoalUnit:
 # ---------------------------------------------------------------------------
 # TaskExecutionPlan — the state layer
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Helpers for upstream content injection
+# ---------------------------------------------------------------------------
+
+# Max chars to inline from an upstream output file into the downstream prompt.
+# Large enough to be useful, small enough to stay within context budgets.
+_RESOLVED_INPUT_PREVIEW_CHARS: int = 4000
+
+
+def _read_file_preview(path: str, max_chars: int = _RESOLVED_INPUT_PREVIEW_CHARS) -> str:
+    """Read a text file and return a truncated preview string.
+
+    Returns empty string on any error (binary file, missing file, etc.).
+    Binary files are skipped silently — only text content is inlined.
+    """
+    import os
+    try:
+        size = os.path.getsize(path)
+        if size == 0:
+            return ""
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            content = fh.read(max_chars)
+        if not content.strip():
+            return ""
+        if len(content) == max_chars:
+            content += "\n...[truncated]"
+        return content
+    except Exception:
+        return ""
+
 
 @dataclass
 class TaskExecutionPlan:
@@ -255,6 +287,10 @@ class TaskExecutionPlan:
                     out.actual_path = info.get("path")
                     out.artifact_id = info.get("artifact_id")
                     out.producing_node_id = info.get("node_id")
+                    # Store inlined text content for data-type outputs
+                    # so downstream units can access it via build_unit_context.
+                    if info.get("inline_value"):
+                        out.inline_value = info["inline_value"]
 
         # Check if all required outputs are produced
         required_pending = [
@@ -332,8 +368,9 @@ class TaskExecutionPlan:
         if unit is None:
             return {}
 
-        # Resolve input references to actual paths
+        # Resolve input references to actual paths + inline content preview
         resolved_inputs: Dict[str, str] = {}
+        resolved_input_previews: Dict[str, str] = {}
         for ref_name, ref_spec in unit.input_refs.items():
             # ref_spec format: "sg_0.output_search_data"
             parts = ref_spec.split(".", 1)
@@ -342,8 +379,24 @@ class TaskExecutionPlan:
                 src_unit = self._get_unit(src_unit_id)
                 if src_unit:
                     for out in src_unit.required_outputs:
-                        if out.output_id == src_output_id and out.actual_path:
+                        if out.output_id != src_output_id:
+                            continue
+                        if out.actual_path:
                             resolved_inputs[ref_name] = out.actual_path
+                            # Try file preview first
+                            preview = _read_file_preview(
+                                out.actual_path,
+                                max_chars=_RESOLVED_INPUT_PREVIEW_CHARS,
+                            )
+                            if preview:
+                                resolved_input_previews[ref_name] = preview
+                            elif out.inline_value:
+                                # File unreadable but inline value available
+                                resolved_input_previews[ref_name] = out.inline_value[:_RESOLVED_INPUT_PREVIEW_CHARS]
+                        elif out.inline_value:
+                            # output_type="data" — no file, use inlined text
+                            resolved_inputs[ref_name] = "(inline)"
+                            resolved_input_previews[ref_name] = out.inline_value[:_RESOLVED_INPUT_PREVIEW_CHARS]
 
         # Pending required outputs
         pending_outputs = [
@@ -363,6 +416,7 @@ class TaskExecutionPlan:
             "_unit_type": unit.unit_type.value,
             "_required_outputs": pending_outputs,
             "_resolved_inputs": resolved_inputs,
+            "_resolved_input_previews": resolved_input_previews,
         }
 
         # Merge skill constraints: SkillHint + allowed/forbidden lists

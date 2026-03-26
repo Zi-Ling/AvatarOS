@@ -376,10 +376,21 @@ class ReactGuardsMixin:
         }
         final_status = _outcome_to_status.get(_outcome, "failed")
 
-        # DedupGuard forced termination — always wins over other overrides
-        if s.result_status == "dedup_forced_finish":
+        # DedupGuard / planner-stuck forced termination
+        if s.result_status == "planner_stuck_no_output_progress":
+            # Honour the lifecycle_status set by recovery_handler:
+            # partial_success when prior nodes succeeded, failed otherwise.
+            # Do NOT blindly override to 'failed' — that discards real work.
+            _stuck_status = getattr(s, "lifecycle_status", "failed")
+            if _stuck_status in ("partial_success", "failed"):
+                final_status = _stuck_status
             logger.info(
-                "[GraphController] DedupGuard forced FINISH → overriding "
+                "[GraphController] Planner stuck (no output progress) → "
+                f"final_status={final_status}"
+            )
+        elif s.result_status == "dedup_forced_finish":  # legacy compat
+            logger.info(
+                "[GraphController] DedupGuard forced FINISH (legacy) → overriding "
                 f"final_status from '{final_status}' to 'failed'"
             )
             final_status = "failed"

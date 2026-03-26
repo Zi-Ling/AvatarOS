@@ -115,7 +115,11 @@ class ReactFinalizerMixin:
                 _evo_skip_reason = "all nodes still pending — no execution evidence"
 
             # (c) Force-stopped sessions should not feed evolution
-            if s.result_status in ("cancelled", "dedup_forced_finish"):
+            if s.result_status in (
+                "cancelled",
+                "dedup_forced_finish",          # legacy
+                "planner_stuck_no_output_progress",  # current
+            ):
                 _evo_eligible = False
                 _evo_skip_reason = f"non-natural termination: {s.result_status}"
 

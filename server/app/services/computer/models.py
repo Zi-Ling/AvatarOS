@@ -10,7 +10,10 @@ from typing import Any, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from app.avatar.skills.schema import SkillInput, SkillOutput
+# SkillInput/SkillOutput are thin BaseModel wrappers — inline here to avoid circular import
+# (models.py → skills.schema → skills/__init__ → builtin/computer/use.py → models.py)
+SkillInput = BaseModel
+SkillOutput = BaseModel
 
 
 # ── Enums ─────────────────────────────────────────────────────────────

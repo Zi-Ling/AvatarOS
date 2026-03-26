@@ -10,34 +10,53 @@
 
 ---
 
-**AvatarOS is not a chatbot.**
+AvatarOS is a **local-first autonomous agent runtime**. You describe a goal in natural language; the system plans an execution path, dispatches 30+ built-in skills (code execution, browser automation, desktop GUI control, web search, and more), and ensures results are auditable and recoverable.
 
-It is an autonomous Agent Runtime system. You describe a goal in natural language, and it automatically plans execution steps, invokes various Skills (file operations, code execution, web search, browser automation, desktop GUI control, etc.), and ensures output quality through a verification system.
+It is not a chat assistant or a thin wrapper around tool calls — it is an agent execution runtime with a state machine, an execution graph, and a policy engine.
 
-> Give AI the ability to *do things*, not just talk.
-
-⚠️ **Early stage / WIP** — core loop works, rough edges everywhere. PRs and issues welcome.
+⚠️ **Early stage / WIP** — core execution pipeline works, rough edges remain. PRs and issues welcome.
 
 ---
 
-## ✨ What it can do
+## ✨ Core Properties
 
-- **Natural language → task execution** — describe what you want, it plans and runs it step by step
-- **Graph-based execution engine** — tasks run as a dynamic DAG, nodes added incrementally by the planner
-- **ReAct loop** — plan → execute → observe → replan, fully automatic
-- **30+ built-in Skills** — `python.run`, `browser.run` (Playwright), `web.search`, `computer.use`, `net.*`, `fs.*`, `memory.*`, `state.*`, `llm.fallback`, and more
-- **Sandboxed execution** — Python runs in Docker/Podman containers, browser runs in isolated Playwright contexts
-- **Desktop GUI automation** — `computer.*` skill namespace for screen capture, mouse/keyboard control, OCR, and autonomous OTAV loop
-- **Multi-provider web search** — Brave → Google CSE → Tavily → SearXNG → DuckDuckGo, automatic fallback
-- **Durable task state machine** — checkpoint/restore, heartbeat lease, effect ledger, and crash recovery for long-running tasks
-- **Multi-agent runtime** — Supervisor + ComplexityEvaluator + role-based agent spawning for complex task decomposition
-- **Policy Engine** — permission checks, path protection, budget control, and human approval flow for high-risk operations
-- **Verification system** — LLMJudge evaluates output quality, RepairLoop auto-fixes on failure
-- **Self-monitoring** — stuck detection, loop detection, budget guard to prevent runaway execution
-- **Web UI** — chat interface, real-time execution graph visualization, workspace file explorer
-- **Scheduler** — recurring and scheduled task automation
-- **Knowledge base** — store and retrieve domain knowledge via vector search
-- **Session workspace** — per-task isolated file system, artifacts tracked and accessible
+**Controlled execution** — the Policy Engine checks permissions, path rules, and budget at every node; high-risk operations require explicit human approval; all side effects are written to an effect ledger for audit and rollback.
+
+**Recoverable** — a durable state machine with Checkpoint support means a crashed or restarted task resumes from its last snapshot, not from scratch.
+
+**Auditable** — every execution step, skill call, and side effect is recorded in the effect ledger; the real-time execution graph makes every input and output traceable and replayable.
+
+**Self-correcting** — the ReAct loop includes stuck detection and loop detection; after completion, LLMJudge evaluates output quality and triggers RepairLoop if the result falls short.
+
+**Local-first** — model, data, and execution all run on your machine. Python runs in an isolated Docker sandbox; browser and desktop GUI use controlled host channels with no cloud dependency.
+
+<details>
+<summary>Full capability list (30+ skills)</summary>
+
+### Execution Engine
+- Natural language → auto-plan → step-by-step execution (ReAct loop)
+- Multi-phase task decomposition, structured data passing between phases
+- Incremental DAG execution graph, Planner expands dynamically each step
+
+### Built-in Skills
+- **File operations** `fs.*` — read, write, create, manage workspace
+- **Code execution** `python.run` — Docker/Podman sandbox isolation
+- **Browser automation** `browser.run` — Playwright-driven real browser
+- **Web search** `web.search` — Brave / Google / Tavily / DuckDuckGo with auto-fallback
+- **Desktop control** `computer.*` — mouse/keyboard, screen capture, OCR, OTAV loop
+- **HTTP requests** `net.*` — any REST API
+- **Memory & state** `memory.*` `state.*` — cross-task persistence
+- **LLM calls** `llm.*` — generate, summarize, translate
+
+### Safety & Scheduling
+- Policy Engine: permission checks, path protection, budget limits, approval flow
+- Durable state machine: checkpoint, heartbeat lease, crash recovery
+- Web UI: chat + real-time execution graph + workspace file explorer
+- Scheduler: cron-style and interval triggers
+- Knowledge base: ChromaDB vector search
+- Multi-agent: Supervisor + role-based agent collaboration framework
+
+</details>
 
 ---
 
@@ -142,71 +161,143 @@ DURABLE_LEASE_TIMEOUT_S=90
 
 ## 🏗️ Architecture
 
+### Module Overview
+
+| Module | What it does (plain English) | Technical role |
+|---|---|---|
+| **Session Manager** | Task "file clerk" | Manages task lifecycle, state machine, checkpoint save/restore |
+| **ComplexityEvaluator** | Task "difficulty rater" | Decides: simple execution / multi-phase / multi-agent split |
+| **GraphController** | Execution "commander" | Drives the ReAct loop, coordinates Planner and all guard modules |
+| **Planner** | AI "strategist" | Each step decides which skill to call next and with what params |
+| **PlannerGuard** | Planner "auditor" | Validates Planner output format, prevents runaway calls |
+| **GoalTracker** | "Progress tracker" | Checks goal completion based on execution graph state (not text matching) |
+| **DedupGuard** | "Duplicate blocker" | Prevents Planner from re-running identical actions in a loop |
+| **PolicyEngine** | "Security gatekeeper" | Checks permissions, protects paths, enforces budget, gates high-risk ops |
+| **TaskExecutionPlan** | "Task storyboard" | Splits complex goals into ordered sub-goals, routes data between phases |
+| **OutcomeReducer** | "Final arbiter" | Aggregates all execution signals into a single authoritative final status |
+| **Executor Factory** | "Skill dispatcher" | Routes each skill call to the right executor based on risk level |
+| **SandboxExecutor** | "Code isolation room" | Runs Python safely inside Docker/Podman containers |
+| **BrowserSandboxExecutor** | "Browser remote control" | Drives a real browser via Playwright for web interactions |
+| **DesktopExecutor** | "Desktop robot" | Controls mouse/keyboard, screen capture, OCR for any GUI app |
+| **VerificationGate + LLMJudge** | "Quality inspector" | Uses LLM to check output quality after task completion |
+| **RepairLoop** | "Auto repair crew" | Retries and attempts alternative approaches when verification fails |
+
+### Data Flow
+
 ```
-User Input
+User Input (natural language goal)
     ↓
-Intent Router  (classify → task / chat / question)
+Session Manager          ← Create task record, allocate workspace, start state machine
     ↓
-Complexity Evaluator  (LLM/rules → single-agent or multi-agent)
+Intent Router            ← Classify: task execution vs. casual Q&A
     ↓
-Planner  (LLM → ReAct: plan one step at a time)
+ComplexityEvaluator      ← Decide: simple / multi-phase / multi-agent
     ↓
-PolicyEngine  (permission check / budget control / approval flow)
+┌──────────────────────────────────────────────────────────┐
+│  GraphController (ReAct main loop)                        │
+│                                                          │
+│  Planner ──→ PlannerGuard (format validation + rate limit)│
+│     ↓  new node added to execution graph (DAG)           │
+│  GoalTracker    → Is the goal achieved? Can we finish?   │
+│  DedupGuard     → Has this action been done before?      │
+│  PolicyEngine   → Any violations? Human approval needed? │
+└──────────────────────┬───────────────────────────────────┘
+                       ↓
+              Executor Factory
+              ├── LocalExecutor          → low-risk skills, direct run
+              ├── ProcessExecutor        → process-isolated execution
+              ├── SandboxExecutor        → python.run (Docker container)
+              ├── BrowserSandboxExecutor → browser.run (Playwright)
+              └── DesktopExecutor        → computer.* (desktop GUI)
+                       ↓
+              30+ built-in skills execute, return structured results
+                       ↓
+              VerificationGate           ← LLMJudge checks output quality
+                       ↓ on failure
+              RepairLoop                 ← auto-retry with different approach
+                       ↓
+              Self Monitor               ← stuck / loop / budget detection
+                       ↓
+              OutcomeReducer             ← aggregate signals → final status
+                       ↓
+              Durable State Machine      ← checkpoint save, heartbeat report
+                       ↓
+           Planner receives observation → next step or FINISH
+```
+
+### Multi-Phase Execution (TaskExecutionPlan)
+
+For complex goals (e.g. "research competitors then write an analysis report"):
+
+```
+Original goal
     ↓
-Graph Runtime  (incremental DAG execution)
+TaskPlanBuilder (LLM decomposes into sub-goals)
     ↓
-Node Runner  (parallel execution + retry + DAG action ordering)
+┌──────────────────────────────────────────────┐
+│  TaskExecutionPlan                            │
+│  ├── SubGoal 1: research competitor info      │
+│  │     output: search results (inline data)  │
+│  ├── SubGoal 2: analyze data  ← SG1 output   │
+│  │     output: analysis conclusions          │
+│  └── SubGoal 3: write report  ← SG2 output   │
+│        output: report.md (workspace file)    │
+└──────────────────────────────────────────────┘
     ↓
-Executor Factory
-    ├── LocalExecutor       → direct execution  (SAFE skills)
-    ├── ProcessExecutor     → process isolation  (READ/WRITE skills)
-    ├── SandboxExecutor     → Docker/Podman      (python.run)
-    ├── BrowserSandboxExecutor → Playwright      (browser.run)
-    └── DesktopExecutor     → Host GUI channel   (computer.*)
+Each SubGoal enters GraphController independently
+Inter-phase data passed via structured context (inline_value / actual_path)
     ↓
-Skill Engine  (30+ skills, typed I/O, side-effect declarations)
-    ↓
-Verification Gate  (LLMJudge → RepairLoop if needed)
-    ↓
-Self Monitor  (stuck / loop / budget detection)
-    ↓
-Durable State Machine  (checkpoint / heartbeat / recovery)
-    ↓
-Planner observes result → decides next step or FINISH
+OutcomeReducer aggregates all phase results → final status
 ```
 
 ---
 
 ## 📌 Current Status
 
-- [x] End-to-end ReAct task execution pipeline
-- [x] Incremental graph-based planner (one step at a time)
-- [x] PlannerGuard — validates and rate-limits planner output
-- [x] Docker/Podman sandbox for Python execution
+### ✅ Completed
+
+**Core Execution**
+- [x] End-to-end ReAct task execution pipeline (natural language in → task done)
+- [x] Incremental graph-based planner — one step at a time, replans after each observation
+- [x] Multi-phase task execution — complex goals split into sub-goals, results passed between phases
+- [x] PlannerGuard — prevents invalid output formats and runaway planner loops
+- [x] GoalTracker — completion detection based on execution graph state, not text matching; multi-step tasks no longer short-circuit early
+- [x] OutcomeReducer — single authoritative final status arbiter, closes the "steps succeed but session fails" gap
+
+**Skills & Execution**
+- [x] Docker/Podman sandbox for isolated Python execution
 - [x] Playwright browser automation with helper API
-- [x] 30+ built-in Skills (file, HTTP, search, code, memory, state)
-- [x] Multi-provider web search with automatic fallback
-- [x] Policy Engine — permission checks, path protection, approval flow
-- [x] Verification system — LLMJudge + RepairLoop
+- [x] Desktop GUI automation — DesktopExecutor, risk-tiered approval, OTAV loop, screen analysis
+- [x] 30+ built-in skills (file, HTTP, search, code, memory, state, LLM)
+- [x] Multi-provider web search — Brave → Google → Tavily → DuckDuckGo automatic fallback
+
+**Safety & Quality**
+- [x] Policy Engine — permission checks, path protection, budget limits, high-risk approval flow
+- [x] Verification system — LLMJudge output quality check + RepairLoop auto-fix
 - [x] Self-monitoring — stuck detection, loop detection, budget guard
-- [x] Session workspace with per-task isolation
-- [x] Artifact tracking and file registry
-- [x] Web UI — chat, execution graph, workspace explorer
-- [x] Scheduler with cron-style triggers
-- [x] Knowledge base with vector search (ChromaDB)
-- [x] OS environment injection (platform-aware paths)
 - [x] 4xx error non-retry + semantic failure signals
-- [x] Task control — pause / resume / cancel
-- [x] Approval flow UI for high-risk skill execution
-- [x] DAG action ordering — two-phase ADD_NODE/ADD_EDGE processing
-- [x] Template variable resolution — `{{workspace_path}}` safety net in executor + path sanitizer
-- [x] Desktop GUI automation — DesktopExecutor with risk-tiered approval, OTAV loop, screen analysis
+- [x] Risk-tiered approval UI
+
+**Durability & Recovery**
 - [x] Durable task state machine — checkpoint/restore, heartbeat lease, effect ledger, crash recovery
-- [x] Multi-agent runtime — Supervisor, ComplexityEvaluator (LLM + rules), role-based spawning
 - [x] Recovery engine — startup scan for orphaned/crashed tasks, automatic state restoration
 - [x] Durable interrupt system — approval flow integrated with checkpoint persistence
-- [ ] Vision LLM integration for `computer.use` — architecture ready, needs provider config
-- [ ] Multi-agent orchestration loop — Supervisor components built, end-to-end loop pending
+
+**Workspace & UI**
+- [x] Session workspace with per-task isolation and artifact tracking
+- [x] Web UI — chat interface, real-time execution graph, workspace file explorer
+- [x] Task control — pause / resume / cancel
+- [x] Scheduler with cron-style triggers
+- [x] Knowledge base with vector search (ChromaDB)
+
+**Multi-Agent**
+- [x] Supervisor + ComplexityEvaluator + role-based agent spawning framework
+- [x] Agent lifecycle tracing, task ownership management, structured handoff protocol
+
+### 🔜 In Progress / Pending
+
+- [x] Vision LLM integration — architecture complete; degrades gracefully without a vision provider, fully enabled when configured
+- [x] Multi-agent end-to-end orchestration loop — components built and integrated
 
 ---
 

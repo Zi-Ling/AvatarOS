@@ -96,6 +96,9 @@ class EventBus:
                 EventType.NODE_STARTED,
                 EventType.NODE_COMPLETED,
                 EventType.NODE_FAILED,
+                EventType.STEP_START,
+                EventType.STEP_END,
+                EventType.STEP_FAILED,
                 EventType.GATE_TRIGGERED,
                 EventType.GATE_ANSWERED,
                 EventType.GATE_EXPIRED,
@@ -103,9 +106,10 @@ class EventBus:
             }
             if event.type in broadcast_events:
                 try:
+                    logger.debug(f"[EventBus] Broadcasting event {event.type} to WebSocket clients")
                     self._websocket_broadcaster(event)
                 except Exception as e:
-                    logger.error(f"Error in WebSocket broadcaster: {e}", exc_info=True)
+                    logger.error(f"[EventBus] WebSocket broadcast failed: {e}", exc_info=True)
 
         # 4. Buffer for AgentLoop sense phase
         if isinstance(event, AgentEvent):

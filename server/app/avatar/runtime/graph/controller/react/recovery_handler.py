@@ -176,16 +176,24 @@ class RecoveryHandlerMixin:
         _dedup_replan_key = "_dedup_replan_used"
         if s.env_context.get(_dedup_replan_key):
             logger.info(
-                "[DedupGuard] Replan already used — all nodes "
-                "still duplicates → forced FINISH (marking as failed)"
+                "[DedupGuard] Replan already used — all nodes still duplicates "
+                "→ forced FINISH (planner_stuck_no_output_progress)"
             )
             s.error_message = (
                 "Task force-terminated: Planner repeatedly proposed duplicate "
                 "actions after replan hint. The task may be stuck or the goal "
                 "cannot be achieved with available skills."
             )
-            s.lifecycle_status = "failed"
-            s.result_status = "dedup_forced_finish"
+            # Use partial_success when some nodes already succeeded,
+            # so the outer plan executor can assess true outcome rather
+            # than treating all prior work as failed.
+            _has_successes = any(
+                getattr(n, "status", None) and
+                getattr(n.status, "value", str(n.status)) == "success"
+                for n in (s.graph.nodes.values() if s.graph else [])
+            )
+            s.lifecycle_status = "partial_success" if _has_successes else "failed"
+            s.result_status = "planner_stuck_no_output_progress"
             return None, "break"
 
         logger.info(
