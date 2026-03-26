@@ -18,6 +18,7 @@ class ApprovalRespondRequest(BaseModel):
     request_id: str
     approved: bool
     user_comment: Optional[str] = None
+    modifications: Optional[dict] = None  # 编辑后批准时附带的修改内容
 
 
 class ApprovalStatusResponse(BaseModel):
@@ -69,6 +70,7 @@ async def get_approval_history(
                     "step_id": r.step_id,
                     "details": r.details,
                     "user_comment": r.user_comment,
+                    "interrupt_type": r.interrupt_type,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                     "expires_at": r.expires_at.isoformat() if r.expires_at else None,
                     "responded_at": r.responded_at.isoformat() if r.responded_at else None,
@@ -98,7 +100,8 @@ async def respond_to_approval(request: ApprovalRespondRequest):
         success = service.respond(
             request_id=request.request_id,
             approved=request.approved,
-            user_comment=request.user_comment
+            user_comment=request.user_comment,
+            modifications=request.modifications,
         )
         
         if not success:
@@ -189,6 +192,7 @@ async def get_pending_approvals():
                     "task_id": r.task_id,
                     "step_id": r.step_id,
                     "details": r.details,
+                    "interrupt_type": r.interrupt_type,
                 }
                 for r in reqs
             ]

@@ -49,6 +49,8 @@ export interface ArtifactRecord {
   mime_type: string | null;
   artifact_type: string;
   created_at: string;
+  preview_url?: string | null;
+  preview_state?: "none" | "static" | "live" | "expired";
 }
 
 export interface TimelineEvent {
@@ -182,11 +184,16 @@ export const approvalApi = {
     return res.json();
   },
 
-  respond: async (requestId: string, approved: boolean, comment?: string): Promise<void> => {
+  respond: async (requestId: string, approved: boolean, comment?: string, modifications?: Record<string, any>): Promise<void> => {
     const res = await fetch(`${API_BASE}/api/approval/respond`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ request_id: requestId, approved, user_comment: comment }),
+      body: JSON.stringify({
+        request_id: requestId,
+        approved,
+        user_comment: comment,
+        ...(modifications ? { modifications } : {}),
+      }),
     });
     if (!res.ok) throw new Error('Failed to respond to approval');
   },

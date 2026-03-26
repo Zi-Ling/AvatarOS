@@ -82,6 +82,12 @@ class EventType(str, Enum):
     # Workflow orchestration events
     WORKFLOW_INSTANCE_COMPLETED = "workflow.instance.completed"
 
+    # Gate (human-in-the-loop) events
+    GATE_TRIGGERED = "gate.triggered"
+    GATE_ANSWERED = "gate.answered"
+    GATE_EXPIRED = "gate.expired"
+    GATE_RESUMED = "gate.resumed"
+
     # Computer Use events
     COMPUTER_OBSERVE_STARTED = "computer.observe.started"
     COMPUTER_OBSERVE_COMPLETED = "computer.observe.completed"

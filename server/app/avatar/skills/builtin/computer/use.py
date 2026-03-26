@@ -128,6 +128,18 @@ class ReadScreenSkill(BaseSkill[ReadScreenInput, ReadScreenOutput]):
     async def run(self, ctx: SkillContext, params: ReadScreenInput) -> ReadScreenOutput:
         runtime = _get_computer_use_runtime(ctx)
         gui_state = await runtime.read_screen(ctx)
+        if gui_state.vision_unavailable:
+            return ReadScreenOutput(
+                success=False,
+                retryable=False,
+                message=(
+                    "Vision LLM unavailable — screen analysis failed. "
+                    "Do NOT retry this skill. "
+                    "Use keyboard.type, keyboard.hotkey, "
+                    "mouse.click and other non-visual skills instead."
+                ),
+                gui_state=gui_state,
+            )
         return ReadScreenOutput(
             success=True,
             message=f"Screen analyzed: {gui_state.app_name} - {gui_state.window_title}",

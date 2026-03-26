@@ -7,8 +7,9 @@ import { ModelSettings } from "./_components/ModelSettings";
 import { AdvancedSettings } from "./_components/AdvancedSettings";
 import { MaintenanceView } from "./_components/MaintenanceView";
 import { PolicyView } from "./_components/PolicyView";
+import { RoleSettings } from "./_components/RoleSettings";
 
-type SettingsTab = "model" | "general" | "advanced" | "policy" | "maintenance";
+type SettingsTab = "model" | "general" | "advanced" | "roles" | "policy" | "maintenance";
 
 interface SettingsDialogProps {
   isOpen: boolean;
@@ -24,6 +25,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     { id: "model",       label: "模型设置", icon: "🤖" },
     { id: "general",     label: "通用设置", icon: "⚙️" },
     { id: "advanced",    label: "高级选项", icon: "🛠️" },
+    { id: "roles",       label: "角色管理", icon: "🤝" },
     { id: "policy",      label: "访问策略", icon: "🛡️" },
     { id: "maintenance", label: "系统维护", icon: "🔧" },
   ];
@@ -79,6 +81,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
               {activeTab === "model"       && <ModelSettings />}
               {activeTab === "general"     && <GeneralSettings />}
               {activeTab === "advanced"    && <AdvancedSettings />}
+              {activeTab === "roles"       && <RoleSettings />}
               {activeTab === "policy"      && <PolicyView />}
               {activeTab === "maintenance" && <MaintenanceView />}
             </div>

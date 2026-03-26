@@ -44,6 +44,16 @@ class AppBootstrap:
         """按依赖顺序初始化所有组件"""
         self._init_workspace()
         self._init_database()
+
+        # 清理孤立的 zombie session（进程崩溃/重启导致的残留 running 状态）
+        try:
+            from app.services.session_store import ExecutionSessionStore
+            cleaned = ExecutionSessionStore.cleanup_zombie_sessions(max_age_hours=2)
+            if cleaned > 0:
+                logger.info(f"  └─ 清理了 {cleaned} 个 zombie session")
+        except Exception as e:
+            logger.warning(f"  └─ Zombie session 清理失败 (non-fatal): {e}")
+
         self._init_memory()
         self._init_learning()
         llm_logger = self._init_llm_logger()
@@ -375,6 +385,31 @@ class AppBootstrap:
         self.app.state.artifact_dep_graph = artifact_dep_graph
         self.app.state.interrupt_manager = interrupt_mgr
 
+        # 注册 gate resume executor — 闭环 gate → re-enter execution loop
+        avatar_main = getattr(self.app.state, 'avatar_runtime', None)
+        if avatar_main is not None:
+            async def _gate_resume_executor(
+                task_session_id: str,
+                env_context_patch: dict,
+            ) -> None:
+                """Re-enter AvatarMain execution loop after gate resolution."""
+                session = TaskSessionStore.get(task_session_id)
+                if session is None:
+                    raise ValueError(f"TaskSession {task_session_id} not found for resume")
+                from app.avatar.intent import IntentSpec
+                intent = IntentSpec(
+                    goal=session.goal,
+                    metadata={
+                        "session_id": task_session_id,
+                        "gate_resume": True,
+                        "gate_env_patch": env_context_patch,
+                    },
+                )
+                await avatar_main.run_intent(intent, task_mode="one_shot")
+
+            task_session_mgr.set_resume_executor(_gate_resume_executor)
+            logger.info("  ├─ Gate resume executor 已注册")
+
         # 启动恢复流程
         startup_recovery = StartupRecovery(
             task_session_store=TaskSessionStore,
@@ -385,6 +420,16 @@ class AppBootstrap:
 
         logger.info("  ├─ TaskSessionManager 就绪")
         logger.info("  ├─ TaskScheduler 就绪 (long=1, simple=2)")
+
+        # Restore custom roles from DB
+        try:
+            from app.api.role_management import load_custom_roles_from_db
+            _role_count = load_custom_roles_from_db()
+            if _role_count > 0:
+                logger.info("  ├─ 自定义角色已恢复: %d 个", _role_count)
+        except Exception as _role_err:
+            logger.debug("  ├─ 自定义角色恢复跳过: %s", _role_err)
+
         logger.info("  └─ 长任务运行时初始化完成")
 
     def _init_workflow_orchestration(self):

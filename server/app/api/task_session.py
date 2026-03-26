@@ -56,6 +56,13 @@ class ChangeRequest(BaseModel):
     raw_input: str
 
 
+class GateResponseRequest(BaseModel):
+    gate_id: str
+    version: int
+    answers: dict | None = None
+    approved: bool | None = None
+
+
 def _require_manager():
     if _task_session_manager is None:
         raise HTTPException(
@@ -148,9 +155,70 @@ async def submit_change_request(task_session_id: str, req: ChangeRequest):
     }
 
 
-# ------------------------------------------------------------------
-# GET endpoints
-# ------------------------------------------------------------------
+@router.post("/{task_session_id}/gate-response")
+async def submit_gate_response(task_session_id: str, req: GateResponseRequest):
+    """POST /task-sessions/{id}/gate-response — 提交 gate 回答
+
+    Accepts user answers for an active gate (clarification, approval, etc.).
+    Triggers answer merge and execution resume if no longer blocked.
+    """
+    mgr = _require_manager()
+    session = TaskSessionStore.get(task_session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="TaskSession not found")
+
+    if session.status != "waiting_input":
+        raise HTTPException(
+            status_code=409,
+            detail=f"TaskSession status is '{session.status}', expected 'waiting_input'",
+        )
+
+    try:
+        result = await mgr.handle_gate_response(
+            task_session_id=task_session_id,
+            gate_id=req.gate_id,
+            version=req.version,
+            answers=req.answers or {},
+            approved=req.approved,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    return {
+        "task_session_id": task_session_id,
+        "action": "gate_response",
+        **result,
+    }
+
+
+@router.get("/{task_session_id}/active-gate")
+async def get_active_gate(task_session_id: str):
+    """GET /task-sessions/{id}/active-gate — 查询当前活跃的 gate"""
+    session = TaskSessionStore.get(task_session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="TaskSession not found")
+
+    try:
+        from app.avatar.runtime.task.gate_runtime import GateRuntime
+        gate_runtime = GateRuntime()
+        gate_ctx = gate_runtime.get_active_gate(task_session_id)
+        if gate_ctx is None:
+            return {"task_session_id": task_session_id, "active_gate": None}
+        return {
+            "task_session_id": task_session_id,
+            "active_gate": {
+                "gate_id": gate_ctx.gate_id,
+                "gate_type": gate_ctx.gate_type,
+                "trigger_reason": gate_ctx.trigger_reason,
+                "blocking_questions": gate_ctx.blocking_questions,
+                "required_info": gate_ctx.required_info,
+                "pending_assumptions": gate_ctx.pending_assumptions,
+                "version": gate_ctx.version,
+            },
+        }
+    except Exception as e:
+        logger.warning(f"[TaskSessionAPI] get_active_gate failed: {e}")
+        return {"task_session_id": task_session_id, "active_gate": None}
 
 @router.get("/{task_session_id}")
 async def get_task_session(task_session_id: str):

@@ -1,6 +1,13 @@
 """
 PhasedPlanner — goal-oriented phased execution planning.
 
+.. deprecated::
+    PhasedPlanner is superseded by TaskExecutionPlan (execution_plan.py +
+    plan_builder.py + plan_executor.py) which provides structured state
+    management, RequiredOutput verification, SkillHint constraints, and
+    dependency-based failure propagation. PhasedPlanner is kept as a
+    fallback path and will be removed in a future version.
+
 Data models (PhasePlan, GoalPlan) + PhasedPlanner logic:
 - should_activate: trigger condition check
 - plan: generate GoalPlan from TaskDefinition
@@ -10,20 +17,41 @@ Data models (PhasePlan, GoalPlan) + PhasedPlanner logic:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
-# Performance guard: max phases
-MAX_PHASES = 10
-# Max retries per phase
-MAX_PHASE_RETRIES = 2
-# Max recursion depth for phased planning (prevent infinite decomposition)
-MAX_PHASED_DEPTH = 1
-# Max recent phase summaries to carry forward (prevent context bloat)
-MAX_CONTEXT_SUMMARIES = 3
+
+@dataclass(frozen=True)
+class PhasedPlannerConfig:
+    """All tunable parameters for PhasedPlanner in one place."""
+
+    # Performance guard: max phases per GoalPlan
+    max_phases: int = 10
+    # Max retries per phase before marking failed
+    max_phase_retries: int = 2
+    # Max recursion depth for phased planning (prevent infinite decomposition)
+    max_phased_depth: int = 1
+    # Max recent phase summaries to carry forward (prevent context bloat)
+    max_context_summaries: int = 3
+    # Minimum estimated_phases to activate phased planning
+    min_estimated_phases: int = 3
+    # Minimum deliverables count to activate (secondary signal)
+    min_deliverables_for_activation: int = 3
+
+
+# URL detection pattern for artifact path classification.
+# Matches paths starting with protocol (http://, https://, ftp://) or
+# protocol-relative (//domain.com/...) which are NOT local file paths.
+_URL_LIKE_RE = re.compile(r'^(?:https?://|ftp://|//)')
+
+
+def _is_url_like(path: str) -> bool:
+    """Return True if *path* looks like a URL rather than a local file path."""
+    return bool(_URL_LIKE_RE.match(path))
 
 
 @dataclass
@@ -136,6 +164,9 @@ class PhasedPlanner:
     NOT from TaskDefinition.deliverables (which may be empty if extractor is absent).
     """
 
+    def __init__(self, config: Optional[PhasedPlannerConfig] = None) -> None:
+        self._cfg = config or PhasedPlannerConfig()
+
     def should_activate(
         self,
         complexity: Any,
@@ -145,9 +176,9 @@ class PhasedPlanner:
     ) -> bool:
         """Check if phased planning should activate.
 
-        Primary signal: ComplexityResult.estimated_phases >= 3
-        Secondary signal (if TaskDefinition available): deliverables > 3
-        Guard: recursion depth must be < MAX_PHASED_DEPTH
+        Primary signal: ComplexityResult.estimated_phases >= min_estimated_phases
+        Secondary signal (if TaskDefinition available): deliverables > min_deliverables_for_activation
+        Guard: recursion depth must be < max_phased_depth
 
         Returns activation decision and logs the reason for observability.
         """
@@ -158,10 +189,10 @@ class PhasedPlanner:
         # Recursion depth guard — prevent infinite decomposition
         ctx = env_context or {}
         current_depth = ctx.get("_phased_depth", 0)
-        if current_depth >= MAX_PHASED_DEPTH:
+        if current_depth >= self._cfg.max_phased_depth:
             logger.info(
                 "[PhasedPlanner] reject: recursion depth %d >= limit %d, falling back to ReAct",
-                current_depth, MAX_PHASED_DEPTH,
+                current_depth, self._cfg.max_phased_depth,
             )
             return False
 
@@ -169,7 +200,7 @@ class PhasedPlanner:
         phase_hints = getattr(complexity, "phase_hints", [])
 
         # Primary: LLM estimated phases
-        if estimated_phases >= 3:
+        if estimated_phases >= self._cfg.min_estimated_phases:
             logger.info(
                 "[PhasedPlanner] activated: estimated_phases=%d, hints=%s, depth=%d",
                 estimated_phases, phase_hints[:5], current_depth,
@@ -179,7 +210,7 @@ class PhasedPlanner:
         # Secondary: structured deliverables (if TaskDefinition available)
         if task_def is not None:
             deliverables = getattr(task_def, "deliverables", [])
-            if len(deliverables) > 3:
+            if len(deliverables) > self._cfg.min_deliverables_for_activation:
                 logger.info("[PhasedPlanner] activated: %d deliverables from TaskDefinition, depth=%d", len(deliverables), current_depth)
                 return True
 
@@ -245,19 +276,19 @@ class PhasedPlanner:
                 phase_acceptance_criteria=[f"{intent} — completed"],
             ))
 
-        # Cap at MAX_PHASES
-        if len(phases) > MAX_PHASES:
+        # Cap at max_phases
+        if len(phases) > self._cfg.max_phases:
             logger.warning(
                 "Phase count %d exceeds limit %d, merging tail phases",
-                len(phases), MAX_PHASES,
+                len(phases), self._cfg.max_phases,
             )
-            tail = phases[MAX_PHASES - 1:]
+            tail = phases[self._cfg.max_phases - 1:]
             merged_deliverables = []
             for p in tail:
                 merged_deliverables.extend(p.phase_deliverables)
-            phases = phases[:MAX_PHASES - 1]
+            phases = phases[:self._cfg.max_phases - 1]
             phases.append(PhasePlan(
-                phase_id=f"phase_{MAX_PHASES - 1}",
+                phase_id=f"phase_{self._cfg.max_phases - 1}",
                 phase_objective="Complete remaining work",
                 phase_deliverables=merged_deliverables,
                 phase_acceptance_criteria=["All remaining deliverables complete"],
@@ -284,7 +315,7 @@ class PhasedPlanner:
         1. Mark in_progress
         2. Execute via GraphController
         3. Evaluate acceptance via PhaseAcceptancePolicy
-        4. Retry up to MAX_PHASE_RETRIES if not accepted
+        4. Retry up to max_phase_retries if not accepted
         5. Relay context (summary + artifact refs) to next phase
         """
         from app.avatar.runtime.graph.runtime.graph_runtime import ExecutionResult
@@ -327,34 +358,47 @@ class PhasedPlanner:
 
             # ── Item 7: inject previous phase context ───────────────
             if phase_context_chain:
-                phase_ctx["_previous_phases"] = phase_context_chain[-MAX_CONTEXT_SUMMARIES:]
+                phase_ctx["_previous_phases"] = phase_context_chain[-self._cfg.max_context_summaries:]
 
             # Build scoped intent with context relay
-            parent_intent = ctx.get("_phased_parent_intent", "")
+            # _phased_original_goal carries the user's FULL original goal text
+            # (set by the caller, e.g. supervisor). This is critical because
+            # phase_objective from ComplexityAnalyzer is an abstract summary
+            # (e.g. "打开指定网站") that loses specifics (e.g. "google").
+            original_goal = ctx.get("_phased_original_goal") or ctx.get("_phased_parent_intent", "")
             scoped_intent = (
                 f"[Phase {phase_idx + 1}/{total}] {phase.phase_objective}"
-                f"\n\nThis is one phase of a larger task"
-                + (f": '{parent_intent}'" if parent_intent else "")
-                + ". Execute this phase directly — do NOT decompose into sub-phases."
+                f"\n\nOriginal user goal: {original_goal}"
+                f"\n\nThis is one phase of a larger task. "
+                "Execute this phase directly — do NOT decompose into sub-phases."
             )
             # Append previous phase summaries + artifact refs to scoped intent
             if phase_context_chain:
-                recent = phase_context_chain[-MAX_CONTEXT_SUMMARIES:]
+                recent = phase_context_chain[-self._cfg.max_context_summaries:]
                 context_lines = []
                 for pc in recent:
                     line = f"- Phase {pc['phase_index']}: {pc['summary']}"
-                    if pc.get("artifact_paths"):
-                        line += f" [files: {', '.join(pc['artifact_paths'][:5])}]"
+                    # Separate local file paths from URLs so downstream
+                    # Planner uses fs.read for files and net.get for URLs.
+                    raw_paths = pc.get("artifact_paths") or []
+                    local_files = [p for p in raw_paths if not _is_url_like(p)]
+                    url_refs = [p for p in raw_paths if _is_url_like(p)]
+                    if local_files:
+                        line += f" [files: {', '.join(local_files[:5])}]"
+                    if url_refs:
+                        line += f" [urls: {', '.join(url_refs[:5])}]"
                     if pc.get("pending_items"):
                         line += f" [pending: {', '.join(pc['pending_items'][:3])}]"
                     context_lines.append(line)
                 scoped_intent += "\n\nCompleted phases:\n" + "\n".join(context_lines)
 
             phase_ctx["_phased_parent_intent"] = phase.phase_objective
+            # Preserve original goal through nested phases
+            phase_ctx["_phased_original_goal"] = original_goal
 
             # ── Execute with acceptance evaluation ──────────────────
             acceptance: Optional[PhaseAcceptanceResult] = None
-            for attempt in range(1 + MAX_PHASE_RETRIES):
+            for attempt in range(1 + self._cfg.max_phase_retries):
                 try:
                     result = await graph_controller.execute(
                         intent=scoped_intent,
@@ -403,7 +447,7 @@ class PhasedPlanner:
                             phase.phase_id, attempt + 1,
                             acceptance.failure_type, acceptance.reason,
                         )
-                        if attempt >= MAX_PHASE_RETRIES:
+                        if attempt >= self._cfg.max_phase_retries:
                             phase.status = "failed"
                             phase.phase_summary = (
                                 f"Phase {phase.phase_id} not accepted after "
@@ -422,7 +466,7 @@ class PhasedPlanner:
                         "Phase %s attempt %d exception: %s",
                         phase.phase_id, attempt + 1, exc,
                     )
-                    if attempt >= MAX_PHASE_RETRIES:
+                    if attempt >= self._cfg.max_phase_retries:
                         phase.status = "failed"
                         phase.phase_summary = (
                             f"Phase {phase.phase_id} failed after {attempt + 1} attempts: {exc}"

@@ -24,6 +24,7 @@ class DeliveryGate:
     async def evaluate(self, task_session_id: str) -> dict:
         """
         综合检查：goal coverage + artifact completeness + blocker count。
+        Supports both step-level (ReAct) and subtask-level (multi-agent) evaluation.
 
         Returns:
             {"passed": bool, "reasons": list[str]}
@@ -31,7 +32,47 @@ class DeliveryGate:
         reasons = []
         step_states = self._step_state_store.get_by_task_session(task_session_id)
 
+        # ── Multi-agent subtask evaluation ──────────────────────────────
+        # If a SubtaskGraph snapshot exists, also verify subtask-level outputs.
+        try:
+            from app.avatar.runtime.multiagent.persistence.graph_persistence import load_subtask_graph
+            snapshot = load_subtask_graph(task_session_id)
+            if snapshot and snapshot["graph"].nodes:
+                graph = snapshot["graph"]
+                subtask_total = len(graph.nodes)
+                subtask_completed = sum(
+                    1 for n in graph.nodes.values() if n.status == "completed"
+                )
+                subtask_failed = sum(
+                    1 for n in graph.nodes.values() if n.status == "failed"
+                )
+                if subtask_failed > 0:
+                    reasons.append(
+                        f"Multi-agent: {subtask_failed}/{subtask_total} subtask(s) failed"
+                    )
+                if subtask_completed < subtask_total and subtask_failed == 0:
+                    pending = subtask_total - subtask_completed
+                    reasons.append(
+                        f"Multi-agent: {pending}/{subtask_total} subtask(s) not completed"
+                    )
+                # Verify subtask results have expected outputs
+                results = snapshot.get("results", {})
+                for nid, node in graph.nodes.items():
+                    if node.status == "completed" and node.output_contract:
+                        expected_type = node.output_contract.get("type")
+                        if expected_type == "artifact":
+                            node_result = results.get(nid, {})
+                            if not node_result.get("artifact_paths"):
+                                reasons.append(
+                                    f"Subtask {nid}: expected artifact output but none produced"
+                                )
+        except Exception as _ma_err:
+            logger.debug("[DeliveryGate] Multi-agent evaluation skipped: %s", _ma_err)
+
         if not step_states:
+            # If no step states but multi-agent reasons exist, use those
+            if reasons:
+                return {"passed": False, "reasons": reasons}
             reasons.append("No steps found for task session")
             return {"passed": False, "reasons": reasons}
 

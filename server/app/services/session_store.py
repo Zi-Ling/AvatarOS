@@ -254,3 +254,43 @@ class ExecutionSessionStore:
             obj.failed_nodes = failed_nodes
             db.add(obj)
             db.commit()
+
+    # ------------------------------------------------------------------
+    # 启动清理：标记孤立的 running/waiting/created/planned session 为 failed
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def cleanup_zombie_sessions(max_age_hours: int = 2) -> int:
+        """
+        服务启动时调用。将超过 max_age_hours 仍处于非终态的 session
+        标记为 failed（进程崩溃/重启导致的孤立 session）。
+
+        Returns: 清理的 session 数量。
+        """
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        non_terminal = ("created", "planned", "running", "waiting")
+        cleaned = 0
+
+        with Session(engine) as db:
+            stale = db.exec(
+                select(ExecutionSession).where(
+                    ExecutionSession.status.in_(non_terminal),
+                    ExecutionSession.created_at < cutoff,
+                )
+            ).all()
+
+            now = datetime.now(timezone.utc)
+            for obj in stale:
+                obj.status = "failed"
+                obj.result_status = "interrupted"
+                obj.error_message = "Session interrupted: process restarted or crashed"
+                obj.completed_at = now
+                db.add(obj)
+                cleaned += 1
+
+            if cleaned > 0:
+                db.commit()
+                logger.info(f"[SessionStore] Cleaned up {cleaned} zombie session(s) older than {max_age_hours}h")
+
+        return cleaned

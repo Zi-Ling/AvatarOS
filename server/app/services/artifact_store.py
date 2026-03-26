@@ -33,9 +33,11 @@ class ArtifactStore:
         content_hash: str,
         size: int,
         mtime: float,
+        version_source: str = "initial",
     ) -> ArtifactVersionRecord:
         """
         注册产物版本。同一 task_session + artifact_path 下自动递增版本号。
+        自动链接 parent_version_id 到上一版本。
         """
         with Session(engine) as db:
             # 查找同路径最新版本以确定新版本号
@@ -47,6 +49,11 @@ class ArtifactStore:
             ).first()
 
             new_version = (latest.version + 1) if latest else 1
+            parent_id = latest.id if latest else None
+
+            # v2+ 默认 version_source 为 iteration（除非调用方显式指定）
+            if new_version > 1 and version_source == "initial":
+                version_source = "iteration"
 
             obj = ArtifactVersionRecord(
                 task_session_id=task_session_id,
@@ -57,6 +64,8 @@ class ArtifactStore:
                 content_hash=content_hash,
                 size=size,
                 mtime=mtime,
+                parent_version_id=parent_id,
+                version_source=version_source,
             )
             db.add(obj)
             db.commit()
@@ -64,7 +73,8 @@ class ArtifactStore:
 
         logger.info(
             f"[ArtifactStore] Registered artifact {artifact_path} "
-            f"v{new_version} for task_session {task_session_id}"
+            f"v{new_version} (parent={parent_id}, source={version_source}) "
+            f"for task_session {task_session_id}"
         )
         return obj
 

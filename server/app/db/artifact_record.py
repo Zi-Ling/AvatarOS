@@ -52,3 +52,10 @@ class ArtifactRecord(SQLModel, table=True):
     # 哪些 step 消费了这个 artifact（JSON array of step_id strings）
     # 由 NodeRunner 在参数解析时写入，支持 artifact dependency graph
     consumed_by_step_ids_json: Optional[str] = Field(default=None)
+
+    # ── Preview 薄抽象 ────────────────────────────────────────────────
+    # preview_url: 预览地址。静态 artifact 默认为 /artifacts/{id}/download，
+    #              活 preview（浏览器现场、文档草稿）可写 ws:// 或其他地址。
+    # preview_state: static / live / expired / none
+    preview_url: Optional[str] = Field(default=None, description="预览地址")
+    preview_state: str = Field(default="none", description="none / static / live / expired")

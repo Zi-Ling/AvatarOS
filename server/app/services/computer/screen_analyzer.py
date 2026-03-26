@@ -194,8 +194,8 @@ class ScreenAnalyzer:
             )
             data = self._parse_llm_response(response)
         except Exception as e:
-            logger.error("LLM analysis failed: %s", e)
-            data = {}
+            logger.error("LLM vision analysis failed: %s", e)
+            data = {"_vision_unavailable": True}
 
         return self._build_gui_state(data)
 
@@ -250,4 +250,5 @@ class ScreenAnalyzer:
             extracted_text=extracted_text,
             state_hash=state_hash,
             ui_signature=state_hash,
+            vision_unavailable=data.get("_vision_unavailable", False),
         )

@@ -73,6 +73,14 @@ IF goal requires controlling desktop applications, GUI automation, or interactin
     computer.click_element, computer.type_text, computer.fill_form
   → For complex multi-step GUI tasks: computer.use (autonomous OTAV loop)
   → do NOT use python.run with subprocess/pyautogui for GUI tasks — use computer.* skills
+  → IMPORTANT — when to use computer.read_screen vs direct action:
+    After a successful app.launch or when you already know the target app has focus,
+    you can directly use keyboard.type, keyboard.hotkey, mouse.click WITHOUT calling
+    computer.read_screen first. Only use computer.read_screen when:
+    (a) you genuinely need visual feedback to decide what to do next, OR
+    (b) a previous action failed and you need to verify the screen state, OR
+    (c) the task explicitly requires reading screen content (e.g. "截屏看看桌面").
+    Do NOT call computer.read_screen as a routine step between every action.
 
 IF goal involves file I/O:
   → text files (.txt .md .py .json .yaml .xml .html .css .js .log .ini .cfg .toml) → fs.read / fs.write
@@ -85,7 +93,34 @@ IF goal involves file I/O:
     contents into a single step. Split into one fs.write step per file.
     Each step should create ONE file only. This prevents token-limit truncation.
 
+── Skill Constraints (技能约束) ────────────────────────────────────
+
+IF the context contains a "Skill Constraint" section below, you MUST obey it:
+  → "Recommended skills" = prefer these skills for this sub-goal
+  → "Do NOT use" = these skills are PROHIBITED for this sub-goal
+  → This overrides the default Skill Routing rules above
+  → Example: if "Do NOT use: browser.run" is set, you must NOT use browser.run
+    even if the goal mentions visiting a website — use web.search instead
+  → The constraint reason explains WHY, helping you choose the right alternative
+
+── Search Engine Override (搜索引擎规则) ──────────────────────────
+
+CRITICAL: NEVER use browser.run to visit search engines (百度, Google, Bing, etc.)
+  → Search engines have anti-bot detection that blocks automated browsers
+  → Always use web.search for search queries — it uses the search API directly
+  → This rule applies even if the user explicitly says "打开百度搜索" or "visit google.com"
+  → If the user wants a screenshot of search results, use web.search first to get data,
+    then use browser.run on a SPECIFIC result URL (not the search engine itself)
+
 ── Error Recovery (异常恢复) ────────────────────────────────────
+
+IF computer.read_screen failed with "Vision LLM unavailable":
+  → Do NOT retry computer.read_screen — it will fail again.
+  → Fall back to non-visual skills: keyboard.type, keyboard.hotkey, mouse.click.
+  → If you already know the target app has focus (e.g. after app.launch succeeded),
+    proceed with keyboard/mouse actions directly.
+  → If the task fundamentally requires visual understanding (e.g. "describe what's
+    on screen"), report failure via FINISH with an explanation.
 
 IF python.run failed with KeyError/TypeError/IndexError/AttributeError or data-structure error:
   → IMMEDIATE next step: diagnostic python.run → print(type(step_N_output)); print(repr(step_N_output)[:500])

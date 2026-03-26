@@ -86,6 +86,16 @@ export function ChatInput({
     }
   }, [contextMenu.visible]);
 
+  // Listen for agent-command events from the Overview command bar
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const text = (e as CustomEvent).detail?.text;
+      if (text) handleSend(text);
+    };
+    window.addEventListener("agent-command", handler);
+    return () => window.removeEventListener("agent-command", handler);
+  }, [handleSend]);
+
   return (
     <div className="sticky bottom-0 border-t border-slate-200 dark:border-white/10 bg-white dark:bg-slate-950/50 p-4 transition-colors backdrop-blur-lg z-10">
       <div className="mx-auto max-w-4xl">

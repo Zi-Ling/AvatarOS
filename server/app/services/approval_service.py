@@ -165,6 +165,7 @@ class ApprovalService:
         approval_type: str = "quick",
         timeout_action: str = "mark_timeout",
         parent_request_id: Optional[str] = None,
+        interrupt_type: str = "approval_required",
     ) -> Dict[str, Any]:
         """创建审批请求（幂等）"""
         existing = self.get_request(request_id)
@@ -191,6 +192,7 @@ class ApprovalService:
             approval_type=approval_type,
             timeout_action=timeout_action,
             parent_request_id=parent_request_id,
+            interrupt_type=interrupt_type,
         )
         with Session(engine) as session:
             session.add(req)
@@ -208,6 +210,7 @@ class ApprovalService:
             "task_id": task_id,
             "step_id": step_id,
             "details": details,
+            "interrupt_type": interrupt_type,
         }
         try:
             from app.io.manager import SocketManager
@@ -239,6 +242,7 @@ class ApprovalService:
                 "expires_at": req.expires_at.isoformat() if req.expires_at else None,
                 "task_id": req.task_id,
                 "step_id": req.step_id,
+                "interrupt_type": req.interrupt_type,
             }
 
     def respond(
@@ -246,6 +250,7 @@ class ApprovalService:
         request_id: str,
         approved: bool,
         user_comment: Optional[str] = None,
+        modifications: Optional[Dict[str, Any]] = None,
         # grant 参数（批准时自动创建 grant）
         path_pattern: Optional[str] = None,
         operations: Optional[List[str]] = None,
@@ -256,6 +261,7 @@ class ApprovalService:
         """
         响应审批请求。
         批准时自动创建 grant（如果提供了 path_pattern）。
+        modifications: 用户"编辑后批准"时附带的修改内容。
         """
         status = ApprovalStatus.APPROVED if approved else ApprovalStatus.DENIED
 
@@ -267,6 +273,8 @@ class ApprovalService:
             req.status = status.value
             req.user_comment = user_comment
             req.responded_at = datetime.now(timezone.utc)
+            if modifications:
+                req.modifications = modifications
             session.add(req)
             session.commit()
 
@@ -302,6 +310,7 @@ class ApprovalService:
         timeout_seconds: Optional[int] = None,
         approval_type: str = "quick",
         timeout_action: str = "mark_timeout",
+        interrupt_type: str = "approval_required",
     ) -> Dict[str, Any]:
         """
         创建审批请求并触发 durable interrupt。
@@ -322,6 +331,7 @@ class ApprovalService:
             timeout_seconds=timeout_seconds,
             approval_type=approval_type,
             timeout_action=timeout_action,
+            interrupt_type=interrupt_type,
         )
 
     def get_pending_by_task(self, task_id: str) -> List[Dict[str, Any]]:
@@ -345,6 +355,7 @@ class ApprovalService:
                     "step_id": r.step_id,
                     "approval_type": r.approval_type,
                     "timeout_action": r.timeout_action,
+                    "interrupt_type": r.interrupt_type,
                 }
                 for r in reqs
             ]

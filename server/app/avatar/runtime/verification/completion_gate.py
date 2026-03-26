@@ -92,7 +92,7 @@ class CompletionGate:
 
         # --- No verifiers case ---
         if not verifiers or not targets:
-            return self._no_verifier_verdict(normalized_goal, coverage_summary)
+            return self._no_verifier_verdict(normalized_goal, coverage_summary, context=context)
 
         # --- Run verifiers ---
         # Verifier-target compatibility: type-specific verifiers (json_parseable,
@@ -178,14 +178,56 @@ class CompletionGate:
         self,
         normalized_goal: NormalizedGoal,
         coverage_summary: GoalCoverageSummary,
+        context: Optional[Dict[str, Any]] = None,
     ) -> GateDecision:
+        # When _required_outputs from TaskExecutionPlan includes file types,
+        # don't default to PASS with 0 verifiers — the plan explicitly
+        # requires file outputs that haven't been verified.
+        _required_outputs = (context or {}).get("_required_outputs")
+        if _required_outputs:
+            has_file_requirement = any(
+                o.get("type") == "file" for o in _required_outputs
+                if isinstance(o, dict)
+            )
+            if has_file_requirement:
+                return GateDecision(
+                    verdict=GateVerdict.UNCERTAIN,
+                    reason="No verifiers but _required_outputs includes file types — "
+                           "cannot confirm file deliverables without verification",
+                )
+
+        # ── Blocking deliverables check ─────────────────────────────────
+        # If the goal has blocking deliverables (required=True), 0 verifiers
+        # means we can't confirm they were produced → FAIL, not PASS.
+        _deliverables = getattr(normalized_goal, 'deliverables', None)
+        if _deliverables:
+            blocking = [d for d in _deliverables if getattr(d, 'required', True)]
+            if blocking:
+                return GateDecision(
+                    verdict=GateVerdict.UNCERTAIN,
+                    reason=f"No verifiers but {len(blocking)} blocking deliverable(s) "
+                           f"require verification — cannot auto-pass",
+                )
+
         # 非文件产出型任务（列表/展示/分析/问答）：没有 target 是正常的
-        # 只要有节点成功执行过，就判定 PASS
+        # coverage 确认：如果有 sub-goals 则需要覆盖，如果没有 sub-goals
+        # （total_count==0）则视为已覆盖 — 没有需要覆盖的目标
         if normalized_goal.goal_type in self._NON_FILE_GOAL_TYPES:
+            _coverage_ok = (
+                coverage_summary.is_currently_covered
+                or coverage_summary.total_count == 0
+            )
+            if _coverage_ok:
+                return GateDecision(
+                    verdict=GateVerdict.PASS,
+                    reason=f"Non-file goal_type={normalized_goal.goal_type}, "
+                           f"coverage satisfied — execution success is sufficient",
+                )
+            # Coverage NOT satisfied — don't auto-pass
             return GateDecision(
-                verdict=GateVerdict.PASS,
+                verdict=GateVerdict.UNCERTAIN,
                 reason=f"Non-file goal_type={normalized_goal.goal_type}, "
-                       f"no file targets expected — execution success is sufficient",
+                       f"but coverage not satisfied (0 verifiers, goals uncovered)",
             )
 
         if normalized_goal.risk_level == RiskLevel.HIGH:

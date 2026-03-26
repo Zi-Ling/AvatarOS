@@ -58,6 +58,59 @@ def _classify_param(param_name: str, param_schema: dict) -> Optional[str]:
     return None
 
 
+def _adapt_type(value: Any, param_schema: dict) -> Optional[Any]:
+    """
+    类型适配桥接：如果绑定值类型和目标参数期望类型不匹配，自动转换。
+
+    转换规则：
+      - 目标是 string，值是 dict/list → json.dumps
+      - 目标是 object/dict，值是 string → json.loads (best effort)
+      - 转换失败 → 返回 None（跳过绑定，不注入错误值）
+    """
+    import json as _json
+
+    expected_type = param_schema.get("type", "")
+
+    # 目标是 string，值是 dict/list → 序列化
+    if expected_type == "string" and isinstance(value, (dict, list)):
+        try:
+            return _json.dumps(value, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            logger.debug(
+                f"[ParamBinder] Type adapt failed: dict/list → string "
+                f"(value type={type(value).__name__})"
+            )
+            return None
+
+    # 目标是 object，值是 string → 反序列化
+    if expected_type == "object" and isinstance(value, str):
+        try:
+            parsed = _json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except (ValueError, TypeError):
+            pass
+        # 不是有效 JSON → 跳过
+        logger.debug(
+            f"[ParamBinder] Type adapt failed: string → object "
+            f"(value is not valid JSON)"
+        )
+        return None
+
+    # 目标是 array，值是 string → 反序列化
+    if expected_type == "array" and isinstance(value, str):
+        try:
+            parsed = _json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    # 无需转换
+    return value
+
+
 def _get_skill_schema(skill_name: str) -> dict:
     """从 skill registry 获取参数 schema，失败时返回空 dict"""
     try:
@@ -107,6 +160,12 @@ def bind_params(
     兜底：
       - 旧扁平字段 resolved_inputs["content"] / resolved_inputs["file_path"]
 
+    类型适配：
+      - 如果绑定值类型和目标参数期望类型不匹配，自动转换
+      - dict/list → str: json.dumps
+      - str → dict: json.loads (best effort)
+      - 转换失败时跳过绑定，不注入错误值
+
     Args:
         skill_name: skill 名称
         params: Planner 生成的原始参数 dict（会被复制，不修改原始）
@@ -152,34 +211,38 @@ def bind_params(
         if semantic_type == "content":
             # 优先 typed content_ref
             if content_ref and content_ref.get("confidence", 0) >= confidence_threshold and content_ref.get("content"):
-                bound[param_name] = content_ref["content"]
-                binding_log.append({
-                    "param": param_name,
-                    "semantic_type": "content",
-                    "source": content_ref.get("source_type", "unknown"),
-                    "rule": content_ref.get("resolver_rule", "content_ref"),
-                    "confidence": content_ref["confidence"],
-                    "via": "content_ref",
-                })
-                logger.info(
-                    f"[ParamBinder] {skill_name}.{param_name} ← content_ref "
-                    f"(source={content_ref.get('source_type')}, confidence={content_ref['confidence']:.2f})"
-                )
+                value = _adapt_type(content_ref["content"], param_schema)
+                if value is not None:
+                    bound[param_name] = value
+                    binding_log.append({
+                        "param": param_name,
+                        "semantic_type": "content",
+                        "source": content_ref.get("source_type", "unknown"),
+                        "rule": content_ref.get("resolver_rule", "content_ref"),
+                        "confidence": content_ref["confidence"],
+                        "via": "content_ref",
+                    })
+                    logger.info(
+                        f"[ParamBinder] {skill_name}.{param_name} ← content_ref "
+                        f"(source={content_ref.get('source_type')}, confidence={content_ref['confidence']:.2f})"
+                    )
             # 兜底扁平字段
             elif flat_content and flat_confidence >= confidence_threshold:
-                bound[param_name] = flat_content
-                binding_log.append({
-                    "param": param_name,
-                    "semantic_type": "content",
-                    "source": flat_source_type,
-                    "rule": flat_resolver_rule,
-                    "confidence": flat_confidence,
-                    "via": "flat",
-                })
-                logger.info(
-                    f"[ParamBinder] {skill_name}.{param_name} ← content(flat) "
-                    f"(source={flat_source_type}, confidence={flat_confidence:.2f})"
-                )
+                value = _adapt_type(flat_content, param_schema)
+                if value is not None:
+                    bound[param_name] = value
+                    binding_log.append({
+                        "param": param_name,
+                        "semantic_type": "content",
+                        "source": flat_source_type,
+                        "rule": flat_resolver_rule,
+                        "confidence": flat_confidence,
+                        "via": "flat",
+                    })
+                    logger.info(
+                        f"[ParamBinder] {skill_name}.{param_name} ← content(flat) "
+                        f"(source={flat_source_type}, confidence={flat_confidence:.2f})"
+                    )
 
         elif semantic_type in ("path", "source_path"):
             # 优先 typed path_ref

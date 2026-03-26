@@ -58,9 +58,13 @@ async def _get_browser():
                         "--disable-setuid-sandbox",
                         "--disable-dev-shm-usage",
                         "--disable-gpu",
+                        # Anti-detection: reduce automation fingerprint
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-features=IsolateOrigins,site-per-process",
                     ],
                 )
-                logger.info("[browser.run] Chromium browser process started")
+                # Inject anti-detection script into all new contexts
+                logger.info("[browser.run] Chromium browser process started (anti-detection enabled)")
             except Exception as e:
                 logger.error(f"[browser.run] Failed to launch browser: {e}")
                 raise
@@ -104,6 +108,10 @@ def _resolve_page(page=None) -> Page:
 
 async def wait_for(selector: str, page=None, timeout: int = 10000):
     \"\"\"等待元素出现（page 可省略，默认用当前页）\"\"\"
+    # Safety floor: Playwright uses milliseconds; prevent absurdly low values
+    # that LLM might generate (e.g. timeout=10 meaning 10ms)
+    if timeout < 1000:
+        timeout = max(timeout * 1000, 5000)  # treat as seconds → convert to ms
     await _resolve_page(page).wait_for_selector(selector, timeout=timeout)
 
 async def click(selector: str, page=None):
@@ -245,6 +253,14 @@ class BrowserRunOutput(SkillOutput):
     final_url: Optional[str] = None
     page_title: Optional[str] = None
     truncated: bool = False
+    error_type: Optional[str] = Field(
+        None,
+        description=(
+            "Semantic error classification for structured recovery. "
+            "Values: captcha_blocked, element_hidden, timeout, "
+            "empty_output, navigation_error, script_error"
+        ),
+    )
 
 
 @register_skill
@@ -297,8 +313,16 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
         # per-task 独立 context（隔离 cookie/storage/页面状态）
         context = await browser.new_context(
             viewport={"width": params.viewport_width, "height": params.viewport_height},
-            # session_profile 预留位，当前禁用
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
         )
+        # Anti-detection: override navigator.webdriver
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        """)
 
         stdout_lines: List[str] = []
         stderr_lines: List[str] = []
@@ -406,6 +430,19 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
             if has_fetch_intent and not has_output:
                 if stderr_out.strip():
                     logger.warning(f"[browser.run] Script stderr:\n{stderr_out[:2000]}")
+
+                # Classify empty output error
+                _error_type = "empty_output"
+                if "resolved to hidden" in stderr_out.lower():
+                    _error_type = "element_hidden"
+                elif final_url:
+                    _captcha_patterns = [
+                        "/sorry", "/captcha", "/challenge",
+                        "recaptcha", "hcaptcha",
+                    ]
+                    if any(p in final_url.lower() for p in _captcha_patterns):
+                        _error_type = "captcha_blocked"
+
                 return BrowserRunOutput(
                     success=False,
                     message=(
@@ -421,6 +458,7 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
                     page_title=page_title,
                     truncated=truncated,
                     retryable=False,
+                    error_type=_error_type,
                 )
 
             return BrowserRunOutput(
@@ -436,10 +474,48 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
             )
 
         except asyncio.TimeoutError:
+            # Semantic error classification for structured recovery
+            _error_type = "timeout"
+            _detail = f"Script timed out after {params.timeout}s"
+
+            # Check for CAPTCHA/anti-bot pages
+            try:
+                pages = context.pages
+                if pages:
+                    last_url = pages[-1].url or ""
+                    _captcha_patterns = [
+                        "/sorry", "/captcha", "/challenge",
+                        "recaptcha", "hcaptcha", "turnstile",
+                    ]
+                    if any(p in last_url.lower() for p in _captcha_patterns):
+                        _error_type = "captcha_blocked"
+                        _detail = (
+                            f"Anti-bot/CAPTCHA page detected (URL: {last_url}). "
+                            "The target site blocked automated access. "
+                            "Try using web.search API instead of browser automation."
+                        )
+            except Exception:
+                pass
+
+            # Check stderr for hidden element patterns
+            try:
+                _stderr_text = stderr_buf.getvalue() if 'stderr_buf' in dir() else ""
+                if "resolved to hidden" in _stderr_text.lower():
+                    _error_type = "element_hidden"
+                    _detail = (
+                        "Target element exists but is hidden/invisible. "
+                        "The page structure may have changed or the element "
+                        "is behind a modal/overlay. Try a different selector "
+                        "or use get_page_html() to inspect the actual DOM."
+                    )
+            except Exception:
+                pass
+
             return BrowserRunOutput(
                 success=False,
-                message=f"Script timed out after {params.timeout}s",
+                message=_detail,
                 stderr=f"TimeoutError: exceeded {params.timeout}s",
+                error_type=_error_type,
             )
         except Exception as e:
             import traceback
@@ -449,6 +525,7 @@ class BrowserRunSkill(BaseSkill[BrowserRunInput, BrowserRunOutput]):
                 success=False,
                 message=str(e),
                 stderr=tb[:_MAX_STDERR],
+                error_type="script_error",
             )
         finally:
             # 任务结束立即销毁 context（per-task 隔离）

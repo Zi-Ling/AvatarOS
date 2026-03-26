@@ -73,9 +73,6 @@ class KeyboardPressSkill(BaseSkill):
     )
 
     async def run(self, ctx: "SkillContext", input_data: KeyboardPressInput) -> SkillOutput:
-        import asyncio
         driver = KeyboardDriver()
-        for key in input_data.keys:
-            driver.press_key(key)
-            await asyncio.sleep(input_data.interval)
+        driver.press_keys(input_data.keys, input_data.interval)
         return SkillOutput(success=True, message=f"Pressed keys: {input_data.keys}")

@@ -135,6 +135,18 @@ class ApprovalRequest(SQLModel, table=True):
     parent_request_id: Optional[str] = Field(default=None, index=True, description="关联原审批 ID")
     timeout_action: str = Field(default="mark_timeout", description="mark_timeout/auto_fail/keep_waiting")
 
+    # 中断类型系统（AOS Workbench）
+    interrupt_type: str = Field(
+        default="approval_required",
+        description=(
+            "approval_required / input_required / auth_required / "
+            "recovery_choice_required / publish_required / conflict_resolution_required"
+        ),
+    )
+
+    # 多动作决策：用户编辑后批准时附带的修改内容
+    modifications: Optional[dict] = Field(default=None, sa_column=Column(JSON, name="modifications"))
+
 
 class Grant(SQLModel, table=True):
     """路径访问授权记录"""

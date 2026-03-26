@@ -252,12 +252,16 @@ class VerifierRegistry:
             JsonParseableVerifier,
             TextContainsVerifier,
         )
+        from app.avatar.runtime.verification.verifiers.report_verifier import (
+            ReportDeliverableVerifier,
+        )
         for cls in [
             FileExistsVerifier,
             JsonParseableVerifier,
             ImageOpenableVerifier,
             CsvHasDataVerifier,
             TextContainsVerifier,
+            ReportDeliverableVerifier,
         ]:
             self.register(cls)
 

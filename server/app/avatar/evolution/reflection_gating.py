@@ -73,8 +73,61 @@ class ReflectionGating:
         评估是否触发反思。
         触发条件：失败 / 成本异常 / 异常恢复 / 新任务类型。
         正常成功且成本正常且类型已知 → 跳过反思，仅更新基线。
+
+        HARDENED: 增加前置硬条件检查。只有当终态一致、证据链完整时
+        才允许生成 candidate，否则只记录 defect_trace，避免给学习层灌噪音。
         """
         task_type = self.resolve_task_type(trace)
+
+        # ── Hard pre-conditions: skip reflection if evidence is unreliable ──
+        # (a) Terminal state consistency: outcome status must not contradict
+        #     the step-level evidence.
+        if trace.steps:
+            all_steps_success = all(s.status == "success" for s in trace.steps)
+            any_step_success = any(s.status == "success" for s in trace.steps)
+            if outcome.status == OutcomeStatus.FAILED and all_steps_success:
+                # All steps succeeded but outcome is FAILED — state aggregation bug.
+                # Reflection from this trace would learn wrong lessons.
+                logger.info(
+                    "[ReflectionGating] HARD SKIP: all steps succeeded but "
+                    "outcome=FAILED — state aggregation inconsistency, type=%s",
+                    task_type,
+                )
+                self.update_baseline(task_type, cost)
+                return False
+            if outcome.status == OutcomeStatus.SUCCESS and not any_step_success:
+                # No steps succeeded but outcome is SUCCESS — impossible.
+                logger.info(
+                    "[ReflectionGating] HARD SKIP: no steps succeeded but "
+                    "outcome=SUCCESS — evidence chain broken, type=%s",
+                    task_type,
+                )
+                self.update_baseline(task_type, cost)
+                return False
+
+        # (b) Empty trace: no steps at all — nothing to learn from.
+        if not trace.steps:
+            logger.info(
+                "[ReflectionGating] HARD SKIP: empty trace (no steps), type=%s",
+                task_type,
+            )
+            self.update_baseline(task_type, cost)
+            return False
+
+        # (c) Error classification stability: if failure_category is
+        #     None (unclassified), the error signal is too noisy.
+        if outcome.status == OutcomeStatus.FAILED:
+            _fc = outcome.failure_category
+            if _fc is None:
+                logger.info(
+                    "[ReflectionGating] HARD SKIP: failed with unclassified "
+                    "error — too noisy for reflection, type=%s",
+                    task_type,
+                )
+                self.update_baseline(task_type, cost)
+                return False
+
+        # ── Original gating logic ───────────────────────────────────────
 
         # 条件 1：任务失败
         if outcome.status == OutcomeStatus.FAILED:

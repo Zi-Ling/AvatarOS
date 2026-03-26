@@ -141,6 +141,7 @@ class ExecutionResult:
     is_stuck: bool = False
     graph: Optional[Any] = None  # ExecutionGraph, typed as Any to avoid circular import
     summary: Optional[str] = None  # Human-readable result summary from AnswerSynthesizer
+    artifact_paths: Optional[List[str]] = None  # Aggregated artifact file paths (multi-agent)
 
 
 class GraphRuntime:

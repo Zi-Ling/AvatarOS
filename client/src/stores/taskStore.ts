@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { TaskStep, TaskState, TaskControlStatus } from '@/types/task';
 import type { ApprovalRequest } from '@/types/chat';
+import type { ActiveGateResponse } from '@/lib/api/task';
 
 // Re-export types for backward compatibility
 export type { TaskStep, TaskState, TaskControlStatus } from '@/types/task';
@@ -19,6 +20,9 @@ interface TaskStore {
   /** 每个任务的最后已处理 sequence（用于去重） */
   lastSequences: Record<string, number>;
 
+  /** Active gate prompt (human-in-the-loop) */
+  activeGate: (ActiveGateResponse & { taskSessionId: string }) | null;
+
   // Actions
   setActiveTask: (task: TaskState | null) => void;
   updateTaskStatus: (status: TaskState['status']) => void;
@@ -33,6 +37,8 @@ interface TaskStore {
   addPendingApproval: (req: ApprovalRequest) => void;
   removePendingApproval: (requestId: string) => void;
   setAutoSwitchedForTask: (taskId: string | null) => void;
+  setActiveGate: (gate: (ActiveGateResponse & { taskSessionId: string }) | null) => void;
+  clearActiveGate: () => void;
 
   // Multi-task Registry actions
   upsertTask: (task: TaskState) => void;
@@ -56,6 +62,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   autoSwitchedForTask: null,
   tasks: {},
   lastSequences: {},
+  activeGate: null,
 
   // Derived shim
   get isPaused() { return get().controlStatus === 'paused'; },
@@ -136,6 +143,9 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     })),
 
   setAutoSwitchedForTask: (taskId) => set({ autoSwitchedForTask: taskId }),
+
+  setActiveGate: (gate) => set({ activeGate: gate }),
+  clearActiveGate: () => set({ activeGate: null }),
 
   // Multi-task Registry actions
   upsertTask: (task) =>

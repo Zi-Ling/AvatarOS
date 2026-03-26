@@ -49,6 +49,18 @@ class SkillExecutorMixin:
 
         skill_cls = skill_registry.get(skill_name)
 
+        # ── Skill name normalization: fix common Planner typos ──
+        # e.g. "computer-keyboard_type" → "computer.keyboard.type"
+        if skill_cls is None:
+            normalized = skill_name.replace("-", ".").replace("_", ".")
+            if normalized != skill_name:
+                skill_cls = skill_registry.get(normalized)
+                if skill_cls is not None:
+                    logger.warning(
+                        f"[SkillExecutor] Skill name normalized: "
+                        f"'{skill_name}' → '{normalized}'"
+                    )
+
         if skill_cls is None:
             raise ExecutionError(
                 f"Skill '{skill_name}' not found in registry. "

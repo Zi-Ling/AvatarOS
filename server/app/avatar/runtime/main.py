@@ -692,6 +692,12 @@ class AvatarMain:
                 if resolved_inputs:
                     env_context["resolved_inputs"] = resolved_inputs
 
+                # 注入 gate resume 上下文（gate 回答后重新进入执行循环）
+                gate_env_patch = intent.metadata.get("gate_env_patch")
+                if gate_env_patch and isinstance(gate_env_patch, dict):
+                    env_context.update(gate_env_patch)
+                    env_context["_gate_resumed"] = True
+
                 # is_complex no longer gates budget — planner self-regulates
 
                 # ── 执行模式选择（纯自动路由） ──
@@ -703,7 +709,7 @@ class AvatarMain:
                     _exec_mode = "multi_agent"
                 else:
                     try:
-                        from app.avatar.runtime.multiagent.supervisor import ComplexityEvaluator
+                        from app.avatar.runtime.multiagent.core.supervisor import ComplexityEvaluator
                         _evaluator = ComplexityEvaluator(llm_client=self.llm_client)
                         _assessment = _evaluator.evaluate(intent.goal, env_context)
                         if _assessment.mode == "multi_agent":

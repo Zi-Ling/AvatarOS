@@ -143,6 +143,26 @@ function StepNode({
               阻塞点
             </span>
           )}
+
+          {/* Feedback action marker */}
+          {step.events.some((e) => e.event_type === "agent_feedback") && (() => {
+            const fbEvent = step.events.find((e) => e.event_type === "agent_feedback");
+            const action = fbEvent?.metadata?.action as string | undefined;
+            if (!action || action === "NONE" || action === "") return null;
+            const actionLabels: Record<string, { label: string; color: string }> = {
+              RETRY_SEARCH: { label: "重试搜索", color: "text-amber-600" },
+              RETRY_TASK: { label: "重试任务", color: "text-amber-600" },
+              REPLAN_DOWNSTREAM: { label: "下游重规划", color: "text-blue-600" },
+              ABORT_DOWNSTREAM: { label: "下游中止", color: "text-red-600" },
+            };
+            const info = actionLabels[action] || { label: action, color: "text-slate-500" };
+            return (
+              <span className={cn("inline-flex items-center gap-1 text-[10px] font-medium mt-0.5", info.color)}>
+                <RotateCw className="w-2.5 h-2.5" />
+                反馈: {info.label}
+              </span>
+            );
+          })()}
         </div>
       </div>
 

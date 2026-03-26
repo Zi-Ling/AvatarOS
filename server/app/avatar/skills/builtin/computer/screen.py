@@ -34,6 +34,7 @@ class ScreenInfoInput(BaseModel):
 
 class ScreenCaptureOutput(SkillOutput):
     base64_image: str = Field(..., description="Base64 encoded PNG image of the screen")
+    file_path: Optional[str] = Field(None, description="Path to saved screenshot PNG file")
 
 class ScreenInfoOutput(SkillOutput):
     info: dict = Field(..., description="Screen resolution and cursor position")
@@ -56,12 +57,26 @@ class ScreenCaptureSkill(BaseSkill):
     )
 
     async def run(self, ctx: "SkillContext", input_data: ScreenCaptureInput) -> ScreenCaptureOutput:
+        import base64, tempfile, os
         driver = ScreenDriver()
         b64_img = driver.capture_base64(input_data.region)
+
+        # Save to file so artifact system can register the path.
+        # Without file_path, _register_artifact silently skips → DeliverableSpec('png') unsatisfied.
+        session_id = getattr(ctx, "session_id", None) or "unknown"
+        out_dir = os.path.join(tempfile.gettempdir(), "avatarOS", "screenshots", session_id)
+        os.makedirs(out_dir, exist_ok=True)
+        import time
+        file_name = f"screenshot_{int(time.time() * 1000)}.png"
+        file_path = os.path.join(out_dir, file_name)
+        with open(file_path, "wb") as f:
+            f.write(base64.b64decode(b64_img))
+
         return ScreenCaptureOutput(
-            success=True, 
-            message="Screenshot captured successfully", 
-            base64_image=b64_img
+            success=True,
+            message="Screenshot captured successfully",
+            base64_image=b64_img,
+            file_path=file_path,
         )
 
 @register_skill

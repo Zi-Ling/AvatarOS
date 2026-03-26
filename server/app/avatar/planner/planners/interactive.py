@@ -168,6 +168,44 @@ Please try a DIFFERENT approach:
         if schema_hint:
             schema_hint_section = f"\n## ⚠️ Missing Required Parameters (Framework Enforcement)\n{schema_hint}\n"
 
+        # Skill constraint (injected by TaskExecutionPlan for sub-goal execution)
+        skill_constraint_section = ""
+        _skill_hint = env_context.get("_skill_hint")
+        if _skill_hint:
+            lines = ["## 🎯 Skill Constraint (Framework Enforced)"]
+            preferred = _skill_hint.get("preferred", [])
+            prohibited = _skill_hint.get("prohibited", [])
+            reason = _skill_hint.get("reason", "")
+            if preferred:
+                lines.append(f"Recommended skills: {', '.join(preferred)}")
+            if prohibited:
+                lines.append(f"Do NOT use: {', '.join(prohibited)}")
+            if reason:
+                lines.append(f"Reason: {reason}")
+            skill_constraint_section = "\n".join(lines) + "\n"
+
+        # Vision capability gating — hard constraint when vision LLM is unavailable
+        if env_context.get("_vision_unavailable"):
+            _vision_gate_lines = [
+                "## ⛔ Vision Unavailable (Framework Enforced)",
+                "The vision LLM backend is NOT available in this environment.",
+                "Do NOT use: computer.read_screen, computer.use",
+                "These skills WILL fail. Use keyboard/mouse/non-visual skills instead.",
+                "If the task fundamentally requires visual understanding, FINISH with an explanation.",
+            ]
+            skill_constraint_section += "\n".join(_vision_gate_lines) + "\n"
+
+        # Required outputs (injected by TaskExecutionPlan for structured output verification)
+        required_outputs_section = ""
+        _required_outputs = env_context.get("_required_outputs")
+        if _required_outputs:
+            lines = ["## 📦 Required Outputs (Framework Enforced)"]
+            lines.append("> You MUST produce ALL listed outputs before FINISH.")
+            for o in _required_outputs:
+                fmt = f", format: .{o['format']}" if o.get("format") else ""
+                lines.append(f"  - [{o.get('output_id', '?')}] {o.get('description', '')} ({o.get('type', 'data')}{fmt})")
+            required_outputs_section = "\n".join(lines) + "\n"
+
         # Recovery constraints (injected by controller on truncation or schema failure)
         recovery_section = ""
         recovery_constraints = env_context.get("recovery_constraints")
@@ -378,7 +416,7 @@ Please try a DIFFERENT approach:
 ## Execution History (Truth)
 {_format_history(task, workspace_root=env_context.get("workspace_path"), session_root=env_context.get("session_workspace_path"))}
 
-{loop_warning}{direction_warning}{goal_tracker_section}{dedup_hint_section}{truncation_hint_section}{schema_hint_section}{recovery_section}{deliverable_section}
+{loop_warning}{direction_warning}{goal_tracker_section}{dedup_hint_section}{truncation_hint_section}{schema_hint_section}{skill_constraint_section}{required_outputs_section}{recovery_section}{deliverable_section}
 ## Your Next Move
 Call a tool to execute the next step, or reply with text if the goal is achieved or no tool is needed.
 """

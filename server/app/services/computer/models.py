@@ -140,6 +140,7 @@ class GUIState(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).timestamp()
     )
     screenshot_artifact_id: Optional[str] = None
+    vision_unavailable: bool = False
 
     @staticmethod
     def _normalize_elements_summary(elements: list[VisibleElement]) -> str:

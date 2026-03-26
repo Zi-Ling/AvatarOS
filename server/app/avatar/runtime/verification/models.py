@@ -179,6 +179,7 @@ class VerifierConditionType(str, Enum):
     TEXT_CONTAINS = "text_contains"
     JSON_SCHEMA = "json_schema"
     CSV_COLUMNS = "csv_columns"
+    REPORT_DELIVERABLE = "report_deliverable"
     CUSTOM = "custom"
 
 

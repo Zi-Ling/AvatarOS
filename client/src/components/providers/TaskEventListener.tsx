@@ -9,6 +9,7 @@ import { useWorkbenchStore } from "@/stores/workbenchStore";
 import type { Message, TaskStep, ApprovalRequest, RunSummaryData } from "@/types/chat";
 import type { RunStep } from "@/types/run";
 import type { NarrativeEvent } from "@/types/narrative";
+import { useToastStore } from "@/lib/hooks/useToast";
 
 export function TaskEventListener() {
   const { socket } = useSocket();
@@ -375,6 +376,43 @@ export function TaskEventListener() {
       // ── 5.5 Approval response ──────────────────────────────────────────
       if (type === "approval_response" && payload?.request_id) {
         removePendingApproval(payload.request_id);
+      }
+
+      // ── 5.6 Gate triggered (human-in-the-loop) ────────────────────────
+      if (type === "gate.triggered" && payload?.gate_id) {
+        const { setActiveGate } = useTaskStore.getState();
+        setActiveGate({
+          taskSessionId: payload.task_session_id || "",
+          gate_id: payload.gate_id,
+          gate_type: payload.gate_type || "clarification",
+          version: payload.version || 1,
+          status: "active",
+          blocking_questions: payload.blocking_questions || [],
+          pending_assumptions: payload.pending_assumptions,
+          trigger_reason: payload.trigger_reason,
+        });
+        useToastStore.getState().addToast(
+          "warning",
+          payload.gate_type === "approval" ? "需要审批" : "需要补充信息",
+          payload.trigger_reason || "请在下方回答问题以继续执行",
+          8000,
+        );
+      }
+
+      // ── 5.7 Gate answered / resumed / expired ─────────────────────────
+      if (
+        (type === "gate.answered" || type === "gate.resumed" || type === "gate.expired") &&
+        payload?.gate_id
+      ) {
+        const { activeGate, clearActiveGate } = useTaskStore.getState();
+        if (activeGate && activeGate.gate_id === payload.gate_id) {
+          clearActiveGate();
+        }
+        if (type === "gate.resumed") {
+          useToastStore.getState().addToast("success", "执行已恢复", "回答已提交，任务继续执行");
+        } else if (type === "gate.expired") {
+          useToastStore.getState().addToast("error", "Gate 已过期", "等待超时，请重新触发任务");
+        }
       }
 
       // ── 6. Task completed ──────────────────────────────────────────────

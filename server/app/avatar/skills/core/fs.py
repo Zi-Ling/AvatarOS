@@ -255,6 +255,22 @@ class FsWriteItem(BaseModel):
     mode: str = Field("text", description="'text' or 'binary'")
     append: bool = Field(False, description="Append instead of overwrite")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_content_to_str(cls, values: Any) -> Any:
+        """Auto-coerce dict/list content to JSON string.
+
+        Planner often passes structured data (e.g. python.run output dict)
+        directly to fs.write's content field. Instead of failing with a
+        ValidationError, serialize it to a pretty-printed JSON string.
+        """
+        import json as _json
+        if isinstance(values, dict):
+            raw = values.get("content")
+            if isinstance(raw, (dict, list)):
+                values["content"] = _json.dumps(raw, ensure_ascii=False, indent=2)
+        return values
+
 class FsWriteInput(SkillInput):
     # 单文件模式
     path: Optional[str] = Field(None, description="File path to write (single-file mode)")
@@ -264,6 +280,17 @@ class FsWriteInput(SkillInput):
     append: bool = Field(False, description="Append instead of overwrite")
     # batch 模式：writes=[{"path":..., "content":..., "encoding":..., "mode":..., "append":...}, ...]
     writes: Optional[List[FsWriteItem]] = Field(None, description="Batch write: list of {path, content, encoding?, mode?, append?}")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_content_to_str(cls, values: Any) -> Any:
+        """Auto-coerce dict/list content to JSON string (single-file mode)."""
+        import json as _json
+        if isinstance(values, dict):
+            raw = values.get("content")
+            if isinstance(raw, (dict, list)):
+                values["content"] = _json.dumps(raw, ensure_ascii=False, indent=2)
+        return values
 
 class FsWriteOutput(SkillOutput):
     output: Optional[str] = Field(None, description="Written file path (single) or comma-separated paths (batch)")

@@ -186,6 +186,30 @@ def _is_binary_like_payload(text: str) -> bool:
     return False
 
 
+@dataclass
+class ResolverConfig:
+    """All tunable parameters for ReferenceResolver in one place.
+
+    Centralises thresholds, confidence scores, and limits that were
+    previously scattered as magic numbers across multiple methods.
+    """
+    # ── Confidence scores ───────────────────────────────────────────
+    confidence_task_result_full: float = 0.95   # task_result with path + value
+    confidence_task_result_path: float = 0.85   # task_result with path only
+    confidence_task_result_value: float = 0.80  # task_result with value only
+    confidence_chat_message: float = 0.65       # chat assistant message
+
+    # ── Relevance scoring ───────────────────────────────────────────
+    relevance_min_confidence: float = 0.40      # below this → skip binding
+    relevance_demoted_confidence: float = 0.30  # assigned when demoting
+    jaccard_threshold_task: float = 0.15        # task_result relevance cutoff
+    jaccard_threshold_chat: float = 0.10        # chat_message relevance cutoff
+
+    # ── Content limits ──────────────────────────────────────────────
+    max_content_len: int = 2000
+    min_chat_content_len: int = 20              # skip very short chat msgs
+
+
 class ReferenceResolver:
     """
     无状态解析器，每次请求独立调用。
@@ -193,31 +217,57 @@ class ReferenceResolver:
     resolve(history) 按优先级扫描 history，返回 ReferenceResolution。
     调用方无需传入 goal 或指代词——只要有 history 就尝试绑定，
     由 confidence 决定是否使用（建议阈值 0.5）。
+
+    设计原则：
+    - 默认允许绑定（default-allow），只在明确是独立新任务时阻断
+    - 所有阈值集中在 ResolverConfig，不散落在方法里
+    - 正则模式只做粗粒度分类，精细判断靠 token 重叠度
     """
 
-    # 置信度配置
-    CONFIDENCE_TASK_RESULT_FULL = 0.95   # task_result 有 path + value
-    CONFIDENCE_TASK_RESULT_PATH = 0.85   # task_result 只有 path
-    CONFIDENCE_TASK_RESULT_VALUE = 0.80  # task_result 只有 value
-    CONFIDENCE_CHAT_MESSAGE = 0.65       # chat assistant 消息
+    def __init__(self, config: Optional[ResolverConfig] = None):
+        self.config = config or ResolverConfig()
 
-    # 内容截断上限
-    MAX_CONTENT_LEN = 2000
+    # ── Backward-compatible class-level aliases ─────────────────────
+    # Existing callers may read these; delegate to config.
+    @property
+    def CONFIDENCE_TASK_RESULT_FULL(self) -> float:
+        return self.config.confidence_task_result_full
+
+    @property
+    def CONFIDENCE_TASK_RESULT_PATH(self) -> float:
+        return self.config.confidence_task_result_path
+
+    @property
+    def CONFIDENCE_TASK_RESULT_VALUE(self) -> float:
+        return self.config.confidence_task_result_value
+
+    @property
+    def CONFIDENCE_CHAT_MESSAGE(self) -> float:
+        return self.config.confidence_chat_message
+
+    @property
+    def MAX_CONTENT_LEN(self) -> int:
+        return self.config.max_content_len
 
     def resolve(self, history: list, goal: str = "") -> ReferenceResolution:
         """
         从 history 里按优先级提取最可信的引用绑定。
-        history 格式：[{"role": "user"|"assistant", "content": "...", "metadata": {...}}, ...]
 
-        goal: 当前任务的 goal 文本。如果提供，会做轻量级语义相关性检测，
-        对无关的上一轮结果降低 confidence，避免跨轮过度绑定。
+        设计原则（default-allow）：
+        - 默认允许跨轮绑定
+        - 只在 goal 明确是独立新任务时才阻断 chat_message 绑定
+        - task_result 绑定不受阻断，仅通过 relevance scoring 降权
+        - 所有阈值来自 self.config，不在方法体内硬编码
         """
         resolution = ReferenceResolution()
+        cfg = self.config
 
-        # 绑定必要性门：如果 goal 没有跨轮指代词且是独立任务，不绑定 chat_message
-        _needs_cross_turn = bool(
-            goal and self._CROSS_TURN_INDICATORS.search(goal)
-        )
+        # ── Chat-message binding gate (default-allow) ───────────────────
+        # BLOCK chat binding only when goal is clearly an independent new
+        # task AND has no cross-turn indicators. Everything else defaults
+        # to "allow" — short supplementary messages, constraint additions,
+        # corrections all naturally get cross-turn context.
+        _skip_chat = self._is_independent_new_task(goal)
 
         for idx, msg in enumerate(reversed(history)):
             if msg.get("role") != "assistant":
@@ -228,236 +278,262 @@ class ReferenceResolver:
 
             if msg_type == "task_result":
                 ri = self._from_task_result(meta, idx)
-                if ri:
-                    # Goal-aware relevance check: if the current goal has no
-                    # keyword overlap with the previous task result, this is
-                    # likely an unrelated cross-turn binding. Demote confidence
-                    # so downstream won't use it.
-                    if goal and ri.confidence > 0.4:
-                        ri.confidence = self._adjust_confidence_by_relevance(
-                            ri, goal, meta
-                        )
-                    if ri.confidence < 0.4:
-                        logger.debug(
-                            f"[ReferenceResolver] Skipping irrelevant task_result "
-                            f"(confidence={ri.confidence:.2f} after relevance check)"
-                        )
-                        continue
-                    resolution.inputs.append(ri)
-                    resolution.resolved = True
-                    logger.debug(
-                        f"[ReferenceResolver] Bound from task_result "
-                        f"(ref_type={ri.ref_type}, confidence={ri.confidence:.2f})"
+                if ri is None:
+                    continue
+                if goal and ri.confidence > cfg.relevance_min_confidence:
+                    ri.confidence = self._adjust_confidence_by_relevance(
+                        ri, goal, meta,
                     )
-                    return resolution
+                if ri.confidence < cfg.relevance_min_confidence:
+                    logger.debug(
+                        "[ReferenceResolver] Skipping irrelevant task_result "
+                        "(confidence=%.2f after relevance check)", ri.confidence,
+                    )
+                    continue
+                resolution.inputs.append(ri)
+                resolution.resolved = True
+                logger.debug(
+                    "[ReferenceResolver] Bound from task_result "
+                    "(ref_type=%s, confidence=%.2f)", ri.ref_type, ri.confidence,
+                )
+                return resolution
 
             elif msg_type == "chat":
-                # 绑定必要性门：chat_message 只在有明确跨轮指代词时才绑定
-                # 避免独立任务（如"生成 people.json"）被上一轮 chat 内容污染
-                if not _needs_cross_turn:
+                if _skip_chat:
                     logger.debug(
                         "[ReferenceResolver] Skipping chat_message binding — "
-                        "no cross-turn indicator in goal"
+                        "goal is an independent new task",
                     )
                     continue
 
                 content = msg.get("content", "")
-                if content:
-                    cleaned = _clean_content(content)
-                    if len(cleaned) < 20:
-                        continue
-                    ri = self._from_chat_message(content, idx)
-                    if ri is None:
-                        continue  # binary-like，跳过继续找下一条
+                if not content:
+                    continue
+                cleaned = _clean_content(content)
+                if len(cleaned) < cfg.min_chat_content_len:
+                    continue
+                ri = self._from_chat_message(content, idx)
+                if ri is None:
+                    continue
 
-                    # chat_message 也做 goal 相关性检查
-                    if goal:
-                        goal_tokens = self._extract_tokens(goal)
-                        chat_tokens = self._extract_tokens(cleaned[:200])
-                        if goal_tokens and chat_tokens:
-                            overlap = goal_tokens & chat_tokens
-                            union = goal_tokens | chat_tokens
-                            jaccard = len(overlap) / len(union) if union else 0.0
-                            if jaccard < 0.1:
-                                logger.debug(
-                                    f"[ReferenceResolver] Skipping irrelevant chat_message "
-                                    f"(jaccard={jaccard:.2f})"
-                                )
-                                continue
+                # Relevance check for chat messages
+                if goal and not self._is_relevant_chat(goal, cleaned, cfg.jaccard_threshold_chat):
+                    continue
 
-                    resolution.inputs.append(ri)
-                    resolution.resolved = True
-                    logger.debug(
-                        f"[ReferenceResolver] Bound from chat message "
-                        f"(ref_type={ri.ref_type}, confidence={ri.confidence:.2f})"
-                    )
-                    return resolution
+                resolution.inputs.append(ri)
+                resolution.resolved = True
+                logger.debug(
+                    "[ReferenceResolver] Bound from chat message "
+                    "(ref_type=%s, confidence=%.2f)", ri.ref_type, ri.confidence,
+                )
+                return resolution
 
         return resolution
+
+    # ── Binding gate ────────────────────────────────────────────────────
+
+    def _is_independent_new_task(self, goal: str) -> bool:
+        """Determine if goal is clearly an independent new task.
+
+        Uses a structural heuristic: goal starts with a creation/action verb
+        AND does not contain cross-turn reference indicators.
+
+        Returns True → skip chat_message binding.
+        Returns False → allow chat_message binding (default).
+        """
+        if not goal:
+            return False
+        stripped = goal.strip()
+        # Structural check: starts with a creation/generation verb
+        if not self._NEW_TASK_HEAD_RE.search(stripped):
+            return False
+        # Override: explicit cross-turn reference → not independent
+        if self._CROSS_TURN_RE.search(goal):
+            return False
+        return True
+
+    # Structural pattern: goal starts with a creation/generation/action verb.
+    # This is intentionally broad — false positives are safe because the
+    # downstream relevance scoring will still allow binding if the content
+    # is actually related.
+    _NEW_TASK_HEAD_RE = re.compile(
+        # Chinese: verb + quantifier/object at start of sentence
+        r'^(写[一首篇段个]|生成|创建|搜索|查[找询]|计算|画[一个]?|'
+        r'做[一个]?|列出|翻译[一这]|打开|启动|运行|下载|安装|删除|'
+        r'发送|上传|编写|设计|分析|总结|整理|'
+        # English: verb at start
+        r'write\s+a\b|create\s+|generate\s+|search\s+|find\s+|'
+        r'calculate\s+|draw\s+|make\s+|list\s+|compose\s+|'
+        r'open\s+|launch\s+|run\s+|download\s+|install\s+|'
+        r'delete\s+|send\s+|upload\s+|build\s+|design\s+)',
+        re.IGNORECASE,
+    )
+
+    # Cross-turn reference indicators: user explicitly refers to previous
+    # turn's result. Presence overrides _NEW_TASK_HEAD_RE.
+    _CROSS_TURN_RE = re.compile(
+        r'(这首|那个|上次|刚才|之前|上面的|前面的|'
+        r'the\s+result|that\s+file|this\s+poem|the\s+text|'
+        r'last\s+result|previous|the\s+output)',
+        re.IGNORECASE,
+    )
+
+    # ── Relevance scoring ───────────────────────────────────────────────
+
+    def _is_relevant_chat(self, goal: str, chat_text: str, threshold: float) -> bool:
+        """Check if chat_text is relevant to goal via token overlap."""
+        goal_tokens = self._extract_tokens(goal)
+        chat_tokens = self._extract_tokens(chat_text[:200])
+        if not goal_tokens or not chat_tokens:
+            return True  # can't determine → allow
+        jaccard = len(goal_tokens & chat_tokens) / len(goal_tokens | chat_tokens)
+        if jaccard < threshold:
+            logger.debug(
+                "[ReferenceResolver] Skipping irrelevant chat_message "
+                "(jaccard=%.2f < %.2f)", jaccard, threshold,
+            )
+            return False
+        return True
+
+    def _adjust_confidence_by_relevance(
+        self, ri: ResolvedInput, goal: str, meta: dict,
+    ) -> float:
+        """Adjust confidence based on goal↔previous-task semantic overlap.
+
+        Strategy:
+        1. Explicit cross-turn reference → keep original confidence
+        2. Independent new task → demote to config.relevance_demoted_confidence
+        3. Otherwise → Jaccard overlap scoring, demote if below threshold
+        """
+        cfg = self.config
+
+        if self._CROSS_TURN_RE.search(goal):
+            return ri.confidence
+
+        if self._is_independent_new_task(goal):
+            logger.debug(
+                "[ReferenceResolver] Independent task detected, "
+                "demoting confidence %.2f → %.2f",
+                ri.confidence, cfg.relevance_demoted_confidence,
+            )
+            return cfg.relevance_demoted_confidence
+
+        # Token overlap with previous task's goal or content
+        prev_text = (
+            meta.get("goal") or meta.get("task_goal") or
+            (ri.content or "")[:200]
+        )
+        if not prev_text:
+            return ri.confidence
+
+        goal_tokens = self._extract_tokens(goal)
+        prev_tokens = self._extract_tokens(prev_text)
+        if not goal_tokens or not prev_tokens:
+            return ri.confidence
+
+        jaccard = len(goal_tokens & prev_tokens) / len(goal_tokens | prev_tokens)
+        if jaccard < cfg.jaccard_threshold_task:
+            logger.debug(
+                "[ReferenceResolver] Cross-turn relevance low "
+                "(jaccard=%.2f < %.2f), demoting confidence %.2f → %.2f",
+                jaccard, cfg.jaccard_threshold_task,
+                ri.confidence, cfg.relevance_demoted_confidence,
+            )
+            return cfg.relevance_demoted_confidence
+
+        return ri.confidence
+
+    # ── Source extractors ───────────────────────────────────────────────
 
     def _from_task_result(self, meta: dict, idx: int) -> Optional[ResolvedInput]:
         file_path = meta.get("output_path") or ""
         task_id = meta.get("task_id", f"msg_{idx}")
 
-        # 路径规范化：确保 file_path 是宿主机路径
         if file_path:
             try:
-                from app.avatar.runtime.workspace.path_canonical import (
-                    canonicalize_path, is_container_path,
-                )
-                if is_container_path(file_path):
-                    # 无法在此处获取 host_workspace，保留容器路径
-                    # （调用方应在注入 env_context 前已规范化）
-                    pass
+                from app.avatar.runtime.workspace.path_canonical import is_container_path
+                is_container_path(file_path)  # validate; no-op if not container
             except ImportError:
                 pass
 
-        # 优先使用完整值（小型值对象），fallback 到截断展示值
         raw_value = meta.get("output_value_full") or meta.get("output_value") or ""
         artifact_ref = meta.get("artifact_ref")
 
         if not file_path and not raw_value and not artifact_ref:
             return None
 
-        # binary-like payload（hex/base64/低语义密度）不作为可引用内容
-        # 只保留 file_path（如果有），让 LLM 通过路径引用而非内联原始值
-        value_is_binary = raw_value and _is_binary_like_payload(raw_value)
-        if value_is_binary:
+        if raw_value and _is_binary_like_payload(raw_value):
             logger.debug(
-                f"[ReferenceResolver] task_result output_value is binary-like payload "
-                f"({len(raw_value)} chars), skipping content binding"
+                "[ReferenceResolver] task_result output_value is binary-like "
+                "(%d chars), skipping content binding", len(raw_value),
             )
-            raw_value = ""  # 不生成 content_ref
+            raw_value = ""
 
-        content = raw_value[:self.MAX_CONTENT_LEN] if raw_value else None
+        content = raw_value[:self.config.max_content_len] if raw_value else None
 
         if file_path and content:
-            confidence = self.CONFIDENCE_TASK_RESULT_FULL
-            rule = "task_result.output_path+output_value"
-            ref_type: RefType = "both"
+            confidence = self.config.confidence_task_result_full
+            rule, ref_type = "task_result.output_path+output_value", "both"
         elif file_path:
-            confidence = self.CONFIDENCE_TASK_RESULT_PATH
-            rule = "task_result.output_path"
-            ref_type = "path"
+            confidence = self.config.confidence_task_result_path
+            rule, ref_type = "task_result.output_path", "path"
         elif content:
-            confidence = self.CONFIDENCE_TASK_RESULT_VALUE
-            rule = "task_result.output_value"
-            ref_type = "content"
+            confidence = self.config.confidence_task_result_value
+            rule, ref_type = "task_result.output_value", "content"
         elif artifact_ref:
-            # 大型内容只有 artifact 引用，没有内联值
-            confidence = self.CONFIDENCE_TASK_RESULT_PATH
-            rule = "task_result.artifact_ref"
-            ref_type = "path"
+            confidence = self.config.confidence_task_result_path
+            rule, ref_type = "task_result.artifact_ref", "path"
         else:
-            # 既没有可用 path 也没有可用 content（binary 被过滤且无 path）
             return None
 
         return ResolvedInput(
-            source_type="task_result",
-            source_id=task_id,
-            resolver_rule=rule,
-            confidence=confidence,
-            ref_type=ref_type,
-            content=content,
-            file_path=file_path or None,
-            artifact_ref=artifact_ref,
+            source_type="task_result", source_id=task_id,
+            resolver_rule=rule, confidence=confidence,
+            ref_type=ref_type, content=content,
+            file_path=file_path or None, artifact_ref=artifact_ref,
         )
 
     def _from_chat_message(self, raw_content: str, idx: int) -> Optional[ResolvedInput]:
         cleaned = _clean_content(raw_content)
-
-        # binary-like payload 不作为可引用内容，直接跳过
         if _is_binary_like_payload(cleaned):
             logger.debug(
-                f"[ReferenceResolver] chat message is binary-like payload "
-                f"({len(cleaned)} chars), skipping content binding"
+                "[ReferenceResolver] chat message is binary-like "
+                "(%d chars), skipping", len(cleaned),
             )
             return None
-
-        if len(cleaned) > self.MAX_CONTENT_LEN:
-            cleaned = cleaned[:self.MAX_CONTENT_LEN] + _TRUNCATION_MARKER
-
+        if len(cleaned) > self.config.max_content_len:
+            cleaned = cleaned[:self.config.max_content_len] + _TRUNCATION_MARKER
         return ResolvedInput(
-            source_type="chat_message",
-            source_id=f"msg_{idx}",
+            source_type="chat_message", source_id=f"msg_{idx}",
             resolver_rule="chat_message.assistant_content",
-            confidence=self.CONFIDENCE_CHAT_MESSAGE,
-            ref_type="content",
-            content=cleaned,
+            confidence=self.config.confidence_chat_message,
+            ref_type="content", content=cleaned,
         )
 
-    # 跨轮引用指代词：用户明确引用上一轮结果的关键词
-    _CROSS_TURN_INDICATORS = re.compile(
-        r'(这首|那个|上次|刚才|之前|the\s+result|that\s+file|this\s+poem|'
-        r'the\s+text|上面的|前面的|last\s+result|previous)',
-        re.IGNORECASE,
-    )
+    # ── Token extraction ────────────────────────────────────────────────
 
-    def _adjust_confidence_by_relevance(
-        self,
-        ri: ResolvedInput,
-        goal: str,
-        meta: dict,
-    ) -> float:
-        """
-        根据当前 goal 和上一轮 task_result 的语义相关性调整 confidence。
-
-        策略：
-        1. 如果 goal 里有明确的跨轮指代词 → 保持原 confidence（用户明确引用）
-        2. 提取 goal 和上一轮 goal/content 的关键词，计算重叠度
-        3. 重叠度极低 → 大幅降低 confidence（避免无关绑定）
-        """
-        # 用户明确引用上一轮 → 保持原 confidence
-        if self._CROSS_TURN_INDICATORS.search(goal):
-            return ri.confidence
-
-        # 提取上一轮的 goal（如果有）或 content 的前 200 字符作为比较对象
-        prev_goal = meta.get("goal") or meta.get("task_goal") or ""
-        prev_text = prev_goal or (ri.content or "")[:200]
-
-        if not prev_text:
-            return ri.confidence
-
-        # 轻量级关键词重叠：提取 2+ 字符的 token，计算 Jaccard 相似度
-        goal_tokens = self._extract_tokens(goal)
-        prev_tokens = self._extract_tokens(prev_text)
-
-        if not goal_tokens or not prev_tokens:
-            return ri.confidence
-
-        overlap = goal_tokens & prev_tokens
-        union = goal_tokens | prev_tokens
-        jaccard = len(overlap) / len(union) if union else 0.0
-
-        if jaccard < 0.1:
-            # 几乎无重叠 — 大概率是无关的跨轮绑定
-            demoted = 0.30
-            logger.debug(
-                f"[ReferenceResolver] Cross-turn relevance low "
-                f"(jaccard={jaccard:.2f}), demoting confidence "
-                f"{ri.confidence:.2f} → {demoted:.2f}"
-            )
-            return demoted
-
-        return ri.confidence
+    # Stopwords: high-frequency function words that add noise to Jaccard.
+    # Kept as a class-level frozenset for reuse across calls.
+    _STOP_WORDS: frozenset = frozenset({
+        # English function words
+        "the", "this", "that", "and", "for", "with", "from", "into",
+        "is", "are", "was", "were", "be", "to", "of", "in", "on",
+        "at", "by", "an", "it", "as", "or", "if", "do", "no",
+        # Chinese function words (2+ chars to match extraction pattern)
+        "没有", "可以", "自己", "一个", "一首", "一段", "一篇",
+        "关于", "帮我", "请你", "什么", "怎么", "这个", "那个",
+    })
 
     @staticmethod
     def _extract_tokens(text: str) -> set:
-        """提取文本中的关键词 token（2+ 字符，去停用词）。"""
-        # 中文：连续汉字序列；英文：连续字母序列
-        raw = re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]{2,}', text.lower())
-        # 简单停用词过滤
-        _stop = {"the", "this", "that", "and", "for", "with", "from", "into",
-                 "is", "are", "was", "were", "be", "to", "of", "in", "on",
-                 "at", "by", "an", "it", "as", "or", "if", "do", "no",
-                 "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
-                 "都", "一", "个", "上", "也", "很", "到", "说", "要", "去",
-                 "你", "会", "着", "没有", "看", "好", "自己", "这"}
-        tokens = set()
-        for t in raw:
-            if len(t) >= 2 and t not in _stop:
-                tokens.add(t)
-        return tokens
+        """Extract keyword tokens for lightweight similarity scoring.
+
+        Chinese: contiguous CJK sequences (2+ chars).
+        English: contiguous alpha sequences (2+ chars), lowercased.
+        Single-char Chinese tokens are excluded — too noisy for Jaccard.
+        """
+        raw = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{2,}', text.lower())
+        return {t for t in raw if t not in ReferenceResolver._STOP_WORDS}
 
 
 # ---------------------------------------------------------------------------

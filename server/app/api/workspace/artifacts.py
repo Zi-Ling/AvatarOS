@@ -32,7 +32,20 @@ def _record_to_dict(r: ArtifactRecord) -> dict:
         "artifact_type": r.artifact_type,
         "consumed_by_step_ids": consumed,
         "created_at": r.created_at.isoformat(),
+        "preview_url": r.preview_url or f"/artifacts/{r.artifact_id}/download",
+        "preview_state": r.preview_state if r.preview_state != "none" else _infer_preview_state(r),
     }
+
+
+def _infer_preview_state(r: ArtifactRecord) -> str:
+    """根据 mime_type 推断 preview_state（兼容旧数据）。"""
+    if r.mime_type and (
+        r.mime_type.startswith("text/html")
+        or r.mime_type.startswith("image/")
+        or r.mime_type.startswith("text/")
+    ):
+        return "static"
+    return "none"
 
 
 @router.get("/session/{session_id}")
@@ -165,3 +178,99 @@ async def download_artifact(artifact_id: str):
         filename=record.filename,
         media_type=record.mime_type or "application/octet-stream",
     )
+
+
+# ── Version Lineage & Diff ────────────────────────────────────────────────────
+
+@router.get("/versions/{task_session_id}/{artifact_path:path}")
+async def get_version_lineage(task_session_id: str, artifact_path: str):
+    """
+    获取某个 artifact_path 在指定 task_session 下的所有版本（含 lineage 关系）。
+    """
+    from app.db.long_task_models import ArtifactVersionRecord
+
+    with Session(engine) as db:
+        versions = db.exec(
+            select(ArtifactVersionRecord)
+            .where(ArtifactVersionRecord.task_session_id == task_session_id)
+            .where(ArtifactVersionRecord.artifact_path == artifact_path)
+            .order_by(ArtifactVersionRecord.version.asc())
+        ).all()
+
+    if not versions:
+        raise HTTPException(status_code=404, detail="No versions found")
+
+    return {
+        "task_session_id": task_session_id,
+        "artifact_path": artifact_path,
+        "total_versions": len(versions),
+        "versions": [
+            {
+                "id": v.id,
+                "version": v.version,
+                "parent_version_id": v.parent_version_id,
+                "version_source": v.version_source,
+                "producer_step_id": v.producer_step_id,
+                "content_hash": v.content_hash,
+                "size": v.size,
+                "stale_status": v.stale_status,
+                "created_at": v.created_at.isoformat(),
+            }
+            for v in versions
+        ],
+    }
+
+
+@router.get("/versions/diff/{version_a_id}/{version_b_id}")
+async def diff_versions(version_a_id: str, version_b_id: str):
+    """
+    对比两个 ArtifactVersionRecord 的文本内容差异。
+    仅支持文本类文件（通过关联的 ArtifactRecord 读取 storage_uri）。
+    返回 unified diff 格式。
+    """
+    import difflib
+    from app.db.long_task_models import ArtifactVersionRecord
+
+    with Session(engine) as db:
+        va = db.get(ArtifactVersionRecord, version_a_id)
+        vb = db.get(ArtifactVersionRecord, version_b_id)
+
+    if not va or not vb:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    # 通过 artifact_path 找到对应的 ArtifactRecord（取 storage_uri）
+    def _read_content(version: ArtifactVersionRecord) -> list[str]:
+        with Session(engine) as db:
+            record = db.exec(
+                select(ArtifactRecord)
+                .where(ArtifactRecord.session_id.isnot(None))
+                .where(ArtifactRecord.filename == Path(version.artifact_path).name)
+                .where(ArtifactRecord.checksum == version.content_hash)
+            ).first()
+        if not record:
+            # Fallback: 直接用 artifact_path
+            p = Path(version.artifact_path)
+            if p.exists() and p.is_file():
+                return p.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+            raise HTTPException(status_code=410, detail=f"File not found for version {version.id}")
+        p = Path(record.storage_uri)
+        if not p.exists():
+            raise HTTPException(status_code=410, detail=f"File no longer exists: {record.storage_uri}")
+        return p.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+
+    lines_a = _read_content(va)
+    lines_b = _read_content(vb)
+
+    diff = list(difflib.unified_diff(
+        lines_a, lines_b,
+        fromfile=f"{va.artifact_path} v{va.version}",
+        tofile=f"{vb.artifact_path} v{vb.version}",
+    ))
+
+    return {
+        "version_a": {"id": va.id, "version": va.version, "path": va.artifact_path},
+        "version_b": {"id": vb.id, "version": vb.version, "path": vb.artifact_path},
+        "has_changes": len(diff) > 0,
+        "diff_lines": len(diff),
+        "unified_diff": "".join(diff),
+    }

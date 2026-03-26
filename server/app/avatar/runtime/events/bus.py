@@ -96,6 +96,10 @@ class EventBus:
                 EventType.NODE_STARTED,
                 EventType.NODE_COMPLETED,
                 EventType.NODE_FAILED,
+                EventType.GATE_TRIGGERED,
+                EventType.GATE_ANSWERED,
+                EventType.GATE_EXPIRED,
+                EventType.GATE_RESUMED,
             }
             if event.type in broadcast_events:
                 try:

@@ -109,6 +109,19 @@ class GoalNormalizer:
         artifacts = self._extract_artifacts(goal)
         risk_level = self._infer_risk_level(goal_lower, artifacts)
         goal_type = self._infer_goal_type(goal_lower)
+
+        # Non-file goal types (query/data_analysis/general) that mention file
+        # extensions are talking *about* those files, not requesting to *produce*
+        # them.  E.g. "列出所有xlsx文件名" → query about xlsx, not "create xlsx".
+        # Suppress artifacts from bare extension mentions (step 2) which use
+        # synthetic glob hints like "output/*.xlsx", but keep real explicit
+        # paths like "output/data.csv" from step 1.
+        if goal_type in self._NON_FILE_GOAL_TYPES:
+            artifacts = [
+                a for a in artifacts
+                if not (a.path_hint and "*" in a.path_hint)
+            ]
+
         verification_intents = self._infer_intents(artifacts, goal_lower)
         sub_goals = self._decompose_sub_goals(goal)
         deliverables = self._build_deliverables(artifacts)
@@ -186,6 +199,44 @@ class GoalNormalizer:
                         required=True,
                     ))
 
+        # 3. Action-verb based deliverable detection: "截图", "保存", "写入文件"
+        #    These produce file artifacts even without explicit file extensions.
+        if not artifacts:
+            artifacts = self._extract_action_deliverables(goal)
+
+        return artifacts
+
+    # ── Action-verb deliverable extraction ──────────────────────────────
+
+    # Action verbs that imply file output, mapped to default artifact type
+    _ACTION_DELIVERABLE_MAP = {
+        # Screenshot / capture
+        r'截图|截屏|screenshot|screen\s*capture|capture.*screen|take.*screenshot': (
+            "image/png", ".png", "screenshot"
+        ),
+        # Save / write file (generic)
+        r'保存(?:到|为|成)|save\s+(?:to|as)|写入文件|write\s+to\s+file': (
+            "application/octet-stream", ".txt", "saved_file"
+        ),
+        # Record / export
+        r'录屏|record\s+screen|screen\s*record': (
+            "video/mp4", ".mp4", "recording"
+        ),
+    }
+
+    def _extract_action_deliverables(self, goal: str) -> List[ExpectedArtifact]:
+        """Extract deliverables from action verbs (截图, 保存, etc.)."""
+        artifacts: List[ExpectedArtifact] = []
+        seen_roles: set = set()
+        for pattern, (mime, ext, role) in self._ACTION_DELIVERABLE_MAP.items():
+            if re.search(pattern, goal, re.IGNORECASE) and role not in seen_roles:
+                seen_roles.add(role)
+                artifacts.append(ExpectedArtifact(
+                    label=f"action:{role}",
+                    mime_type=mime,
+                    path_hint=f"output/*{ext}",
+                    required=True,
+                ))
         return artifacts
 
     # ── Deliverable generation ──────────────────────────────────────────

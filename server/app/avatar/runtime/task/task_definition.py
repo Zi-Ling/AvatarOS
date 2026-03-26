@@ -77,6 +77,7 @@ class TaskDefinition:
     risks: List[Risk] = field(default_factory=list)
     open_questions: List[str] = field(default_factory=list)
     acceptance_criteria: List[SourcedTextItem] = field(default_factory=list)
+    task_kind: Optional[str] = None  # TaskKind value — once set, locks downstream
     schema_version: str = "1.0.0"
 
 
@@ -288,3 +289,15 @@ class TaskDefinitionEngine:
                 q = f"[high-risk: requires approval] {risk.text}"
                 if q not in task_def.open_questions:
                     task_def.open_questions.append(q)
+
+        # ── Task kind classification ────────────────────────────────────
+        # Auto-classify task_kind from objective text if not already set.
+        # Once set, this locks downstream components (Planner, PlanBuilder)
+        # from drifting into incompatible task categories.
+        if task_def.task_kind is None and task_def.objective.text:
+            try:
+                from app.avatar.runtime.task.intent_classifier import classify_intent
+                _signals = classify_intent(task_def.objective.text)
+                task_def.task_kind = _signals.task_kind.value
+            except Exception as _tk_err:
+                logger.debug("task_kind classification failed: %s", _tk_err)

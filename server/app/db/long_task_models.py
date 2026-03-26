@@ -56,6 +56,12 @@ class TaskSession(SQLModel, table=True):
     last_transition_reason: Optional[str] = Field(default=None, description="最后一次转换原因")
     recovery_chain_json: Optional[str] = Field(default=None, description="恢复链路 JSON")
 
+    # 暂停上下文（AOS Workbench Continuity Card）
+    pause_context_json: Optional[str] = Field(
+        default=None,
+        description="暂停时写入的上下文 JSON: {pause_reason, completed_steps_summary, next_planned_action, checkpoint_id}",
+    )
+
     # Event Sequence 持久化
     last_event_sequence: int = Field(default=0, description="该任务最后发出的事件 sequence 号")
 
@@ -151,10 +157,13 @@ class StepState(SQLModel, table=True):
 # ---------------------------------------------------------------------------
 class ArtifactVersionRecord(SQLModel, table=True):
     """
-    产物版本记录（含依赖追踪）。
+    产物版本记录（含依赖追踪 + 版本 lineage）。
 
     artifact_kind 用于交付筛选和 merge 影响分析：
         file / logical / delivery
+
+    version_source 标识版本产生原因：
+        initial / iteration / repair / change_merge / manual
     """
     __tablename__ = "artifact_versions"
 
@@ -169,6 +178,16 @@ class ArtifactVersionRecord(SQLModel, table=True):
     mtime: float = Field(description="文件修改时间")
     stale_status: Optional[str] = Field(default=None, description="null / soft_stale / hard_stale")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # ── 版本 lineage（版本化骨架）────────────────────────────────────
+    parent_version_id: Optional[str] = Field(
+        default=None, index=True,
+        description="上一版本的 ArtifactVersionRecord.id，v1 时为 null",
+    )
+    version_source: str = Field(
+        default="initial",
+        description="initial / iteration / repair / change_merge / manual",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -283,5 +302,84 @@ class EffectLedgerEntry(SQLModel, table=True):
     remote_receipt: Optional[str] = Field(default=None, description="远端回执")
     metadata_json: Optional[str] = Field(default=None, description="额外元数据")
     compensation_details: Optional[str] = Field(default=None, description="补偿操作详情")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# 11. GateRequestRecord — 持久化人机协作门控请求
+# ---------------------------------------------------------------------------
+class GateRequestRecord(SQLModel, table=True):
+    """Persistent gate request for human-in-the-loop collaboration.
+
+    Lifecycle: active → answered → merged | expired | cancelled
+    Supports idempotent response via gate_id + version.
+    """
+    __tablename__ = "gate_requests"
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    task_session_id: str = Field(index=True)
+    session_id: str = Field(default="", index=True, description="ExecutionSession / conversation ID")
+    gate_type: str = Field(description="clarification / approval / confirmation / missing_input")
+    status: str = Field(default="active", index=True, description="active / answered / merged / expired / cancelled")
+    version: int = Field(default=1, description="Monotonic version for idempotent response")
+
+    # Request payload
+    trigger_reason: str = Field(default="")
+    blocking_questions_json: Optional[str] = Field(default=None, description="JSON array of blocking questions")
+    required_info_json: Optional[str] = Field(default=None, description="JSON dict of required info")
+    pending_assumptions_json: Optional[str] = Field(default=None, description="JSON array of assumptions for batch display")
+
+    # Response payload (filled when user answers)
+    answers_json: Optional[str] = Field(default=None, description="JSON dict of user answers")
+    answered_at: Optional[datetime] = Field(default=None)
+
+    # Merge tracking
+    merge_target: Optional[str] = Field(default=None, description="Where answers were merged: task_definition / env_context / plan_inputs")
+    merged_at: Optional[datetime] = Field(default=None)
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# 12. SubtaskGraphSnapshot — multi-agent SubtaskGraph 持久化快照
+# ---------------------------------------------------------------------------
+class SubtaskGraphSnapshot(SQLModel, table=True):
+    """Persistent snapshot of a SubtaskGraph for gate resume and crash recovery.
+
+    Saved when execution enters WAITING_INPUT (gate) or at periodic checkpoints.
+    Restored on gate resume to continue from the interrupted point.
+    """
+    __tablename__ = "subtask_graph_snapshots"
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    task_session_id: str = Field(index=True)
+    graph_id: str = Field(index=True, description="SubtaskGraph.graph_id")
+    graph_json: str = Field(description="SubtaskGraph.to_dict() JSON serialization")
+    results_json: Optional[str] = Field(default=None, description="Completed subtask results JSON")
+    snapshot_reason: str = Field(default="gate_waiting", description="gate_waiting / checkpoint / pre_replan")
+    exec_mode: str = Field(default="multi_agent", description="Execution mode at snapshot time")
+    intent: str = Field(default="", description="Original intent for re-execution")
+    env_context_json: Optional[str] = Field(default=None, description="Serialized env_context subset for resume")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# 13. CustomRoleRecord — 持久化自定义 Worker 角色
+# ---------------------------------------------------------------------------
+class CustomRoleRecord(SQLModel, table=True):
+    """Persistent custom worker role definition.
+
+    Loaded on startup to restore dynamically registered roles.
+    """
+    __tablename__ = "custom_roles"
+
+    role_name: str = Field(primary_key=True)
+    system_prompt: str = Field(description="Role system prompt / goal_tracker_hint")
+    allowed_skills_json: Optional[str] = Field(default=None, description="JSON array of allowed skills")
+    prohibited_skills_json: Optional[str] = Field(default=None, description="JSON array of prohibited skills")
+    budget_multiplier: float = Field(default=1.0)
+    skill_reason: str = Field(default="")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

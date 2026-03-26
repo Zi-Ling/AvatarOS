@@ -7,6 +7,10 @@ from app.avatar.runtime.verification.verifiers.builtin import (
     CsvHasDataVerifier,
     TextContainsVerifier,
 )
+from app.avatar.runtime.verification.verifiers.report_verifier import (
+    ReportDeliverableVerifier,
+    ReportVerifierConfig,
+)
 
 __all__ = [
     "BaseVerifier",
@@ -15,4 +19,6 @@ __all__ = [
     "ImageOpenableVerifier",
     "CsvHasDataVerifier",
     "TextContainsVerifier",
+    "ReportDeliverableVerifier",
+    "ReportVerifierConfig",
 ]

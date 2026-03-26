@@ -152,6 +152,20 @@ class OTAVLoopController:
             gui_state, screenshot = await self._observe(session_state)
             last_gui_state = gui_state
             last_screenshot = screenshot
+
+            # Vision LLM unavailable — fail fast instead of looping with empty data
+            if gui_state.vision_unavailable:
+                await self._emit("computer.finished", session_state, {
+                    "success": False, "reason": "vision_llm_unavailable",
+                })
+                return self._build_result(
+                    False,
+                    "Vision LLM unavailable — cannot analyze screen for autonomous GUI control. "
+                    "Consider using browser.run or keyboard/mouse skills instead.",
+                    session_state, evidence_chain, start_time,
+                    failure_reason="vision_llm_unavailable",
+                )
+
             await self._emit("computer.observe.completed", session_state, {
                 "screenshot_artifact_id": session_state.last_screenshot_artifact_id,
                 "app_name": gui_state.app_name,

@@ -5,6 +5,7 @@ import { ChatInput } from "./_components/ChatInput";
 import { MessageList } from "./_components/MessageList";
 import { VoiceRecording } from "./_components/VoiceRecording";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { GatePrompt } from "@/components/ui/GatePrompt";
 import { useLanguage } from "@/theme/i18n/LanguageContext";
 import { useChatStore } from "@/stores/chatStore";
 import { useChat } from "@/lib/hooks/useChat";
@@ -162,6 +163,8 @@ export default function ChatInterface() {
         onDelete={handleDeleteMessage}
         formatFileSize={formatFileSize}
       />
+
+      <GatePrompt />
 
       <ChatInput
         inputValue={inputValue}

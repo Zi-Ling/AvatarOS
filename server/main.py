@@ -40,6 +40,8 @@ from app.api import (
 from app.api.log import logging_router
 from app.api.task_session import router as task_session_router
 from app.api.task_scheduler_api import router as task_scheduler_router
+from app.api.role_management import router as role_management_router
+from app.api.metrics_api import router as metrics_router
 from app.api.workflow import orchestration_router
 from app.api.health import router as health_router
 from app.api.task.durable_endpoints import router as task_durable_router
@@ -110,6 +112,10 @@ for router in [
     logging_router,
     # long-task runtime
     task_session_router, task_scheduler_router,
+    # role management
+    role_management_router,
+    # metrics
+    metrics_router,
     # workflow orchestration (DAG-based)
     orchestration_router,
     # health & resilience

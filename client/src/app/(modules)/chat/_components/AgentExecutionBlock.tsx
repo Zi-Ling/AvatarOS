@@ -13,6 +13,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { cancelTask, pauseTask, resumeTask } from "@/lib/api/task";
 import type { RunStep, RunStatus } from "@/types/run";
 import { ApprovalCard } from "./ApprovalCard";
+import { SubtaskProgress } from "@/components/ui/SubtaskProgress";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -400,6 +401,9 @@ export function AgentExecutionBlock({ runId }: AgentExecutionBlockProps) {
           />
         </div>
       )}
+
+      {/* ── Multi-agent subtask progress (shown when ≥3 subtasks) ── */}
+      {steps.length >= 3 && <SubtaskProgress runId={runId} />}
 
       {/* ── Planning state ── */}
       {status === "planning" && steps.length === 0 && (

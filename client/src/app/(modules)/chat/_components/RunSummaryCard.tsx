@@ -105,6 +105,12 @@ export function RunSummaryCard({ data }: RunSummaryCardProps) {
                 </span>
               </>
             )}
+            {data.totalTokens != null && data.totalTokens > 0 && (
+              <>
+                <span>·</span>
+                <span className="text-slate-400">{data.totalTokens.toLocaleString()} tokens</span>
+              </>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-1">

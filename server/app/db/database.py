@@ -33,7 +33,7 @@ def init_db():
     from app.db.artifact_record import ArtifactRecord                     # noqa: F401
     from app.db.artifact_registry_record import ArtifactRegistryRecord    # noqa: F401
     from app.db.cost_record import CostRecordDB                           # noqa: F401
-    from app.db.long_task_models import TaskSession, PlanGraphSnapshot, PatchLogEntry, StepState, ArtifactVersionRecord, ArtifactDependency, Checkpoint, ChangeRequestRecord, TaskQueueEntry  # noqa: F401
+    from app.db.long_task_models import TaskSession, PlanGraphSnapshot, PatchLogEntry, StepState, ArtifactVersionRecord, ArtifactDependency, Checkpoint, ChangeRequestRecord, TaskQueueEntry, EffectLedgerEntry, GateRequestRecord, SubtaskGraphSnapshot, CustomRoleRecord  # noqa: F401
     from app.avatar.evolution.models import ExecutionTraceDB, StepRecordDB, ArtifactSnapshotDB, OutcomeRecordDB, CostTelemetryDB, LearningCandidateDB, StatusChangeDB, CostBaselineDB, EvolutionVersionDB  # noqa: F401
     from app.db.knowledge_models import KnowledgeDocumentRecord           # noqa: F401
 
@@ -43,5 +43,15 @@ def init_db():
 
 def get_db() -> Generator[Session, None, None]:
     """获取数据库会话（用于 FastAPI 依赖注入）"""
+    with Session(engine) as session:
+        yield session
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def get_session() -> Generator[Session, None, None]:
+    """获取数据库会话（上下文管理器，供非 FastAPI 代码使用）"""
     with Session(engine) as session:
         yield session

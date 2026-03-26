@@ -44,6 +44,7 @@ class ErrorCode(str, Enum):
     EXPECTED_DICT_GOT_STR = "EXPECTED_DICT_GOT_STR"
     EXPECTED_LIST_GOT_DICT = "EXPECTED_LIST_GOT_DICT"
     SCHEMA_FIELD_MISSING = "SCHEMA_FIELD_MISSING"
+    PYDANTIC_VALIDATION = "PYDANTIC_VALIDATION"
     # invalid_value
     JSON_DECODE_FAILED = "JSON_DECODE_FAILED"
     VALUE_OUT_OF_RANGE = "VALUE_OUT_OF_RANGE"
@@ -99,7 +100,7 @@ def _get_exception_type_map() -> Dict[type, tuple]:
     global _EXCEPTION_TYPE_MAP_RESOLVED
     if _EXCEPTION_TYPE_MAP_RESOLVED is None:
         import json as _json
-        _EXCEPTION_TYPE_MAP_RESOLVED = {
+        _base: Dict[type, tuple] = {
             FileNotFoundError: (RuntimeErrorClass.MISSING_DEPENDENCY, ErrorCode.FILE_MISSING),
             ModuleNotFoundError: (RuntimeErrorClass.MISSING_DEPENDENCY, ErrorCode.MODULE_MISSING),
             ImportError: (RuntimeErrorClass.MISSING_DEPENDENCY, ErrorCode.IMPORT_FAILED),
@@ -107,6 +108,13 @@ def _get_exception_type_map() -> Dict[type, tuple]:
             IndentationError: (RuntimeErrorClass.SYNTAX_ERROR, ErrorCode.INDENTATION_ERROR),
             _json.JSONDecodeError: (RuntimeErrorClass.INVALID_VALUE, ErrorCode.JSON_DECODE_FAILED),
         }
+        # Pydantic ValidationError → TYPE_MISMATCH (schema contract violation)
+        try:
+            from pydantic import ValidationError as _PydanticVE
+            _base[_PydanticVE] = (RuntimeErrorClass.TYPE_MISMATCH, ErrorCode.PYDANTIC_VALIDATION)
+        except ImportError:
+            pass
+        _EXCEPTION_TYPE_MAP_RESOLVED = _base
     return _EXCEPTION_TYPE_MAP_RESOLVED
 
 
@@ -127,6 +135,21 @@ _MESSAGE_PATTERNS = [
     (re.compile(r"cannot read binary file|binary file.*not supported|not a zip file|"
                 r"Package not found at|is not a (?:docx|xlsx|pptx|zip) file", re.IGNORECASE),
      RuntimeErrorClass.TYPE_MISMATCH, ErrorCode.SCHEMA_FIELD_MISSING),
+    # Pydantic-style schema validation messages (e.g. "Input should be a valid string")
+    (re.compile(r"Input should be a valid\s+\w+|"
+                r"value is not a valid\s+\w+|"
+                r"str type expected|"
+                r"string_type|"
+                r"extra_forbidden|"
+                r"literal_error|"
+                r"\d+ validation error", re.IGNORECASE),
+     RuntimeErrorClass.TYPE_MISMATCH, ErrorCode.PYDANTIC_VALIDATION),
+    # Container stderr: ModuleNotFoundError / ImportError buried in error message string
+    # Docker containers wrap the real exception in ExecutionError("Container exited with code 1"),
+    # so the Python exception type is lost — we must match the message text.
+    (re.compile(r"ModuleNotFoundError|No module named\s+['\"]?\w|ImportError:\s+cannot import",
+                re.IGNORECASE),
+     RuntimeErrorClass.MISSING_DEPENDENCY, ErrorCode.MODULE_MISSING),
 ]
 
 
@@ -205,6 +228,13 @@ class ErrorClassifier:
         if isinstance(exception, AttributeError):
             return RuntimeErrorClass.MISSING_FIELD, ErrorCode.ATTRIBUTE_NOT_FOUND
         if isinstance(exception, (TypeError, ValueError)):
+            # Check if this is a Pydantic-style schema mismatch before falling back
+            msg = str(exception)
+            if any(kw in msg.lower() for kw in (
+                "input should be", "value is not a valid", "str type expected",
+                "validation error", "string_type", "extra_forbidden", "literal_error",
+            )):
+                return RuntimeErrorClass.TYPE_MISMATCH, ErrorCode.PYDANTIC_VALIDATION
             return RuntimeErrorClass.INVALID_VALUE, ErrorCode.EMPTY_VALUE
         if isinstance(exception, (ConnectionError, TimeoutError, OSError)):
             return RuntimeErrorClass.EXTERNAL_IO_ERROR, ErrorCode.NETWORK_TIMEOUT

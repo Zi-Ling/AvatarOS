@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from app.avatar.runtime.workspace.artifact_collector import ArtifactCollector, CollectedArtifact
     from app.avatar.runtime.graph.storage.step_trace_store import StepTraceStore
 
-from app.avatar.runtime.graph.controller.dag_repair import DagRepairHelper
+from app.avatar.runtime.graph.controller.synthesis.dag_repair import DagRepairHelper
 
 logger = logging.getLogger(__name__)
 

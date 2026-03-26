@@ -10,13 +10,61 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Set
 
 from app.avatar.runtime.context.reference_resolver import _is_binary_like_payload
+from app.avatar.runtime.graph.controller.guards.goal_tracker import GoalTrackerConfig
 
 # Re-export Task/Step types for callers
 from ..models import Task, Step
+
+# Shared config — stopwords come from GoalTrackerConfig
+_GT_CFG = GoalTrackerConfig()
+
+
+@dataclass(frozen=True)
+class HistoryFormatterConfig:
+    """All tunable parameters for history formatting in one place."""
+
+    # _is_markup_content thresholds
+    markup_min_bracket_count: int = 10
+    markup_bracket_density: float = 0.02
+
+    # _compress_structured_output: max chars before head+tail truncation
+    compress_max_chars: int = 3000
+    compress_head_chars: int = 2000
+    compress_tail_chars: int = 800
+
+    # _format_history: output preview truncation
+    output_preview_max_chars: int = 600
+    output_preview_head_chars: int = 250
+    output_preview_tail_chars: int = 300
+    error_msg_max_chars: int = 600
+    error_msg_head_chars: int = 200
+    error_msg_tail_chars: int = 400
+
+    # _build_goal_coverage_summary
+    summary_max_recent_steps: int = 3
+    summary_max_comp_lines: int = 17  # header + 15 items + omitted
+    summary_comp_head_lines: int = 16
+    summary_output_truncate_chars: int = 300
+    summary_output_head_chars: int = 250
+    param_fingerprint_max_chars: int = 200
+
+    # Finish confidence thresholds
+    keyword_overlap_finish_threshold: float = 0.4
+    duplicate_param_similarity_threshold: float = 0.92
+
+    # Write intent keywords (Chinese + English)
+    write_intent_keywords: FrozenSet[str] = frozenset({
+        "写入", "写到", "写文件", "创建文件", "保存", "存储", "生成文件",
+        "write", "create file", "save file", "output file",
+    })
+
+
+_HF_CFG = HistoryFormatterConfig()
 
 
 def _sanitize_host_paths(text: str, workspace_root: Optional[str],
@@ -85,7 +133,7 @@ def _is_markup_content(text: str) -> bool:
         return True
     # High density of angle brackets indicates markup
     bracket_count = stripped.count('<') + stripped.count('>')
-    if bracket_count > 10 and bracket_count / len(stripped) > 0.02:
+    if bracket_count > _HF_CFG.markup_min_bracket_count and bracket_count / len(stripped) > _HF_CFG.markup_bracket_density:
         return True
     return False
 
@@ -158,8 +206,8 @@ def _compress_structured_output(output: Any, step_index: int) -> Optional[str]:
     result = header + "\n" + "\n".join(compressed_lines)
 
     # Final safety: if compressed form is still huge (>3000 chars), do head+tail
-    if len(result) > 3000:
-        result = result[:2000] + f"\n  ... [truncated, {total} items total]\n" + result[-800:]
+    if len(result) > _HF_CFG.compress_max_chars:
+        result = result[:_HF_CFG.compress_head_chars] + f"\n  ... [truncated, {total} items total]\n" + result[-_HF_CFG.compress_tail_chars:]
 
     return result
 
@@ -190,16 +238,16 @@ def _format_history(task: Task, workspace_root: Optional[str] = None,
                     compressed = _compress_structured_output(raw_output, i)
                     if compressed is not None:
                         out_preview = compressed
-                    elif len(out_preview) > 600:
+                    elif len(out_preview) > _HF_CFG.output_preview_max_chars:
                         # Generic long text: head+tail truncation
-                        out_preview = out_preview[:250] + "\n... [中间省略] ...\n" + out_preview[-300:]
+                        out_preview = out_preview[:_HF_CFG.output_preview_head_chars] + "\n... [中间省略] ...\n" + out_preview[-_HF_CFG.output_preview_tail_chars:]
 
                 out_preview = _sanitize_host_paths(out_preview, workspace_root, session_root)
                 result_str = f"Output: {out_preview}"
             else:
                 error_msg = str(step.result.error)
-                if len(error_msg) > 600:
-                    error_msg = error_msg[:200] + "\n... [中间省略] ...\n" + error_msg[-400:]
+                if len(error_msg) > _HF_CFG.error_msg_max_chars:
+                    error_msg = error_msg[:_HF_CFG.error_msg_head_chars] + "\n... [中间省略] ...\n" + error_msg[-_HF_CFG.error_msg_tail_chars:]
                 result_str = f"Error: {error_msg}"
 
                 # File Type Routing violation detection:
@@ -282,7 +330,7 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
     # ── Latest successful outputs ──────────────────────────────────────────
     lines.append("Latest successful outputs:")
     # 只展示最近 3 个成功步骤的输出摘要
-    for step_num, step in successful_steps[-3:]:
+    for step_num, step in successful_steps[-_HF_CFG.summary_max_recent_steps:]:
         raw_out = step.result.output
         out = str(raw_out) if raw_out else "(no output)"
         out = _sanitize_host_paths(out, workspace_root, session_root)
@@ -297,12 +345,12 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
             if compressed is not None:
                 # In summary, show a shorter version (first 15 items max)
                 comp_lines = compressed.split("\n")
-                if len(comp_lines) > 17:  # header + 15 items + omitted
-                    out = "\n".join(comp_lines[:16]) + f"\n  ... [see step_{step_num} output for full list]"
+                if len(comp_lines) > _HF_CFG.summary_max_comp_lines:
+                    out = "\n".join(comp_lines[:_HF_CFG.summary_comp_head_lines]) + f"\n  ... [see step_{step_num} output for full list]"
                 else:
                     out = compressed
-            elif len(out) > 300:
-                out = out[:250] + "...[truncated]"
+            elif len(out) > _HF_CFG.summary_output_truncate_chars:
+                out = out[:_HF_CFG.summary_output_head_chars] + "...[truncated]"
         lines.append(f"  step_{step_num} ({step.skill_name}): {out}")
     lines.append("")
 
@@ -313,12 +361,8 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
     last_output_lower = last_output.lower()
     goal_lower = task.goal.lower()
 
-    # 提取 goal 中的关键词（去掉停用词）
-    _STOPWORDS = {"the", "a", "an", "is", "are", "in", "on", "at", "to", "of",
-                  "and", "or", "for", "with", "by", "from", "that", "this",
-                  "请", "帮我", "我要", "一下", "所有", "的", "了", "在", "把",
-                  "并", "然后", "接着", "之后"}
-    goal_tokens = set(re.findall(r'[\w\u4e00-\u9fff]+', goal_lower)) - _STOPWORDS
+    # 提取 goal 中的关键词（停用词来自 GoalTrackerConfig）
+    goal_tokens = set(re.findall(r'[\w\u4e00-\u9fff]+', goal_lower)) - _GT_CFG.stopwords
     output_tokens = set(re.findall(r'[\w\u4e00-\u9fff]+', last_output_lower))
     keyword_overlap = len(goal_tokens & output_tokens) / max(len(goal_tokens), 1)
 
@@ -352,14 +396,14 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
                 for k in _key_params:
                     v = (params or {}).get(k)
                     if v is not None:
-                        s = re.sub(r'\s+', ' ', str(v).strip())[:200]
+                        s = re.sub(r'\s+', ' ', str(v).strip())[:_HF_CFG.param_fingerprint_max_chars]
                         parts.append(f"{k}={s}")
                 return "|".join(parts)
 
             prev_fp = _fp(prev_step.params)
             last_fp = _fp(last_success_step.params)
             param_sim = SequenceMatcher(None, prev_fp, last_fp).ratio()
-            if param_sim >= 0.92:
+            if param_sim >= _HF_CFG.duplicate_param_similarity_threshold:
                 recent_duplicate = True
 
     # 规则 3：是否有明确未完成的失败步骤（最近一步失败）
@@ -368,11 +412,7 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
     # ── 规则 4：写文件意图但缺少 fs write 成功步骤 ───────────────────────
     # goal 含写/创建文件关键词时，必须有 file-writing skill 成功才能 FINISH
     # 防止 python.run 只输出文件路径列表就被误判为"已完成写文件"
-    _WRITE_INTENT_KEYWORDS = {
-        "写入", "写到", "写文件", "创建文件", "保存", "存储", "生成文件",
-        "write", "create file", "save file", "output file",
-    }
-    goal_has_write_intent = any(kw in goal_lower for kw in _WRITE_INTENT_KEYWORDS)
+    goal_has_write_intent = any(kw in goal_lower for kw in _HF_CFG.write_intent_keywords)
     has_write_success = False
     if goal_has_write_intent:
         try:
@@ -393,7 +433,7 @@ def _build_goal_coverage_summary(task: Task, workspace_root: Optional[str] = Non
     finish_signals = []
     continue_signals = []
 
-    if keyword_overlap >= 0.4 and not missing_write:
+    if keyword_overlap >= _HF_CFG.keyword_overlap_finish_threshold and not missing_write:
         finish_signals.append(f"last output has {keyword_overlap:.0%} keyword overlap with goal")
     if recent_duplicate:
         finish_signals.append("last two successful steps are near-identical (possible redundant loop)")

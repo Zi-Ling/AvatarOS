@@ -166,6 +166,46 @@ async def pause_task(task_id: str):
     if prev_status == "unknown":
         raise HTTPException(status_code=404, detail="Task not found or already finished")
     if accepted:
+        # 写入暂停上下文（Continuity Card 数据源）
+        try:
+            import json
+            from app.services.task_session_store import TaskSessionStore
+            from app.db.database import engine as db_engine
+            from sqlmodel import Session as DBSession, select
+            from app.db.long_task_models import TaskSession, StepState
+
+            with DBSession(db_engine) as db:
+                ts = db.exec(select(TaskSession).where(TaskSession.id == task_id)).first()
+                if ts:
+                    # 收集已完成步骤摘要
+                    completed_steps = db.exec(
+                        select(StepState).where(
+                            StepState.task_session_id == task_id,
+                            StepState.status == "success",
+                        )
+                    ).all()
+                    completed_summary = [s.capability_name for s in completed_steps[:10]]
+
+                    # 查找下一个 pending/ready 步骤
+                    next_step = db.exec(
+                        select(StepState).where(
+                            StepState.task_session_id == task_id,
+                            StepState.status.in_(["pending", "ready"]),
+                        ).limit(1)
+                    ).first()
+
+                    pause_ctx = {
+                        "pause_reason": "用户主动暂停",
+                        "completed_steps_summary": completed_summary,
+                        "completed_count": len(completed_steps),
+                        "next_planned_action": next_step.capability_name if next_step else None,
+                    }
+                    ts.pause_context_json = json.dumps(pause_ctx, ensure_ascii=False)
+                    db.add(ts)
+                    db.commit()
+        except Exception as e:
+            logger.warning(f"[pause_task] Failed to write pause context: {e}")
+
         socket_manager = SocketManager.get_instance()
         await socket_manager.emit("server_event", {
             "type": "task_status_changed",
@@ -193,6 +233,20 @@ async def resume_task(task_id: str):
     if prev_status == "unknown":
         raise HTTPException(status_code=404, detail="Task not found or already finished")
     if accepted:
+        # 清除暂停上下文
+        try:
+            from app.db.database import engine as db_engine
+            from sqlmodel import Session as DBSession, select
+            from app.db.long_task_models import TaskSession
+            with DBSession(db_engine) as db:
+                ts = db.exec(select(TaskSession).where(TaskSession.id == task_id)).first()
+                if ts:
+                    ts.pause_context_json = None
+                    db.add(ts)
+                    db.commit()
+        except Exception:
+            pass
+
         socket_manager = SocketManager.get_instance()
         await socket_manager.emit("server_event", {
             "type": "task_status_changed",
@@ -215,6 +269,22 @@ async def resume_task(task_id: str):
         "previous_status": prev_status,
         "current_status": curr_status,
     }
+
+
+@router.get("/{task_id}/pause-context")
+async def get_pause_context(task_id: str):
+    """获取任务暂停上下文（Continuity Card 数据源）。"""
+    import json
+    from app.db.database import engine as db_engine
+    from sqlmodel import Session as DBSession, select
+    from app.db.long_task_models import TaskSession
+
+    with DBSession(db_engine) as db:
+        ts = db.exec(select(TaskSession).where(TaskSession.id == task_id)).first()
+        if not ts:
+            raise HTTPException(status_code=404, detail="Task session not found")
+        ctx = json.loads(ts.pause_context_json) if ts.pause_context_json else None
+    return {"task_id": task_id, "pause_context": ctx}
 
 
 # ============ Run API ============

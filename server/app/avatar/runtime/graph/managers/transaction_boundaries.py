@@ -12,7 +12,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db.database import engine
 from app.db.long_task_models import StepState, PatchLogEntry
@@ -79,15 +79,37 @@ class TransactionBoundaries:
                 artifact_record = None
                 if artifact_data:
                     from app.db.long_task_models import ArtifactVersionRecord
+
+                    # Auto-link parent_version_id to previous version of same path
+                    parent_id = None
+                    new_version = artifact_data.get("version", 1)
+                    artifact_path = artifact_data["artifact_path"]
+                    existing = db.exec(
+                        select(ArtifactVersionRecord)
+                        .where(ArtifactVersionRecord.task_session_id == task_session_id)
+                        .where(ArtifactVersionRecord.artifact_path == artifact_path)
+                        .order_by(ArtifactVersionRecord.version.desc())
+                    ).first()
+                    if existing:
+                        parent_id = existing.id
+                        new_version = existing.version + 1
+
+                    # Determine version_source
+                    version_source = artifact_data.get("version_source", "initial")
+                    if new_version > 1 and version_source == "initial":
+                        version_source = "iteration"
+
                     artifact_record = ArtifactVersionRecord(
                         task_session_id=task_session_id,
-                        artifact_path=artifact_data["artifact_path"],
+                        artifact_path=artifact_path,
                         artifact_kind=artifact_data.get("artifact_kind", "file"),
                         producer_step_id=step_id,
-                        version=artifact_data.get("version", 1),
+                        version=new_version,
                         content_hash=artifact_data["content_hash"],
                         size=artifact_data.get("size", 0),
                         mtime=artifact_data.get("mtime", 0.0),
+                        parent_version_id=parent_id,
+                        version_source=version_source,
                     )
                     db.add(artifact_record)
 

@@ -80,6 +80,7 @@ class BudgetAccount:
     def record_cost(self, record: CostRecord) -> None:
         """
         Accumulate cost from a CostRecord.
+        Also persists to CostRecordDB (non-blocking, failure-tolerant).
         On failure: logs cost_record_failed event, marks data_incomplete=True.
         Never raises — does not block main execution flow.
         """
@@ -97,6 +98,27 @@ class BudgetAccount:
             ]:
                 entry = store.setdefault(key, BudgetAccountEntry())
                 entry.data_incomplete = True
+
+        # Persist to DB (non-blocking, failure-tolerant)
+        try:
+            from app.db.cost_record import CostRecordDB
+            from app.db.database import get_session
+            db_record = CostRecordDB(
+                step_id=record.step_id,
+                task_id=record.task_id,
+                session_id=record.session_id,
+                declared_estimate=record.declared_estimate,
+                measured_runtime_cost=record.measured_runtime_cost,
+                llm_cost=record.llm_cost,
+                skill_cost=record.skill_cost,
+                token_count=record.token_count,
+                model=record.model,
+            )
+            with get_session() as db:
+                db.add(db_record)
+                db.commit()
+        except Exception as _db_err:
+            logger.debug("[BudgetAccount] DB persist failed (non-blocking): %s", _db_err)
             # Emit trace event if available
             if self.trace_store:
                 try:

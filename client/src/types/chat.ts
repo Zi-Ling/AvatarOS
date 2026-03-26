@@ -22,6 +22,14 @@ export type Attachment = {
   file?: File;
 };
 
+export type InterruptType =
+  | "approval_required"
+  | "input_required"
+  | "auth_required"
+  | "recovery_choice_required"
+  | "publish_required"
+  | "conflict_resolution_required";
+
 export type ApprovalRequest = {
   request_id: string;
   message: string;
@@ -31,6 +39,7 @@ export type ApprovalRequest = {
   expires_at: string;
   task_id?: string;
   step_id?: string;
+  interrupt_type?: InterruptType;
 };
 
 export type ApprovalStatus = "pending" | "submitting" | "approved" | "rejected" | "expired";
@@ -51,6 +60,9 @@ export type RunSummaryData = {
   // 结构化原始输出（供折叠面板展示）
   structuredOutput?: Record<string, unknown> | unknown[];
   keyOutputs: Array<{ stepName: string; skillName?: string; summary?: string; artifacts?: string[] }>;
+  // Cost tracking (multi-agent)
+  totalTokens?: number;
+  totalCost?: number;
 };
 
 // ─── Message Kind System ───────────────────────────────────────────────────
